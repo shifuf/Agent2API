@@ -114,7 +114,11 @@ fn clean_string(value: Option<&Value>, max: usize) -> String {
 }
 
 fn text_of(value: &Value, key: &str) -> String {
-    value.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// 订阅链接校验：http/https 开头（mihomo 的 http provider 只认这两种）。
@@ -122,9 +126,15 @@ fn valid_url(url: &str) -> Result<(), String> {
     if url.is_empty() {
         return Err("请填写订阅链接".to_string());
     }
-    if url.chars().count() > MAX_URL_LENGTH { return Err("订阅链接过长".to_string()); }
-    let parsed = url::Url::parse(url).map_err(|_| "订阅链接不是有效的 HTTP / HTTPS 地址".to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() || url.chars().any(char::is_whitespace) {
+    if url.chars().count() > MAX_URL_LENGTH {
+        return Err("订阅链接过长".to_string());
+    }
+    let parsed =
+        url::Url::parse(url).map_err(|_| "订阅链接不是有效的 HTTP / HTTPS 地址".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || url.chars().any(char::is_whitespace)
+    {
         return Err("订阅链接不是有效的 HTTP / HTTPS 地址".to_string());
     }
     Ok(())
@@ -138,15 +148,14 @@ fn valid_url(url: &str) -> Result<(), String> {
 /// `proxies` 列表 / 列表为空 → provider 里 0 个节点；节点缺 name 或重名 →
 /// 整个 provider 加载失败（mihomo 对 provider 内的节点名有唯一性要求）。
 fn validate_local_content(content: &str) -> Result<usize, String> {
-    let parsed: serde_yaml::Value = serde_yaml::from_str(content)
-        .map_err(|error| format!("YAML 解析失败: {error}"))?;
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(content).map_err(|error| format!("YAML 解析失败: {error}"))?;
     let Some(items) = parsed
         .get("proxies")
         .and_then(serde_yaml::Value::as_sequence)
     else {
         return Err(
-            "文件里没有找到节点列表（需要 Clash YAML 格式：顶层有非空的 proxies 列表）"
-                .to_string(),
+            "文件里没有找到节点列表（需要 Clash YAML 格式：顶层有非空的 proxies 列表）".to_string(),
         );
     };
     if items.is_empty() {
@@ -157,7 +166,9 @@ fn validate_local_content(content: &str) -> Result<usize, String> {
         let Some(name) = item.get("name").and_then(serde_yaml::Value::as_str) else {
             return Err("有节点缺少 name 字段（mihomo 要求每个节点都有名称）".to_string());
         };
-        if name.trim().is_empty() { return Err("节点名称不能为空".to_string()); }
+        if name.trim().is_empty() {
+            return Err("节点名称不能为空".to_string());
+        }
         if !names.insert(name.to_string()) {
             return Err(format!("文件里有重复的节点名「{name}」"));
         }
@@ -200,7 +211,12 @@ fn normalize_item(input: &Value, existing: Option<&Value>) -> Result<Value, Stri
             .map(|item| text_of(item, "kind") == "local")
             .unwrap_or(false),
     };
-    let url = object.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let url = object
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let (url, content, file_name) = if is_local {
         // 新内容优先；没带（编辑没重选文件 / 行内启停）沿用旧条目的。
         // 本地订阅 url 一律置空：留着表单漏过来的旧链接会让它看起来像链接订阅
@@ -418,22 +434,24 @@ pub fn ids() -> std::collections::HashSet<String> {
 /// 也返回空表」的口径去喂它，一次读库异常就会把**全部**订阅节点判成孤儿清掉
 /// —— 那是不可逆的数据丢失。所以清理路径必须走这里：`Err` 时调用方跳过清理。
 pub fn live_ids() -> Result<std::collections::HashSet<String>, String> {
+    use rusqlite::OptionalExtension;
     let db = database()?;
     let raw = db
         .with(|conn| {
             conn.query_row("SELECT value FROM kv WHERE key = ?1", [KV_KEY], |row| {
                 row.get::<_, String>(0)
             })
-            .ok()
+            .optional()
         })
-        .ok_or_else(|| "订阅数据库繁忙".to_string())?;
+        .ok_or_else(|| "订阅数据库繁忙".to_string())?
+        .map_err(|error| format!("读取订阅数据失败: {error}"))?;
     // 没有记录 = 一条订阅都还没有（正常状态，不是错误）
     let Some(raw) = raw else {
         return Ok(std::collections::HashSet::new());
     };
     // 有记录但解析不出来 = 存储坏了：**不能**当成空表，否则上面那个误删又回来了
-    let value: Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("订阅数据解析失败: {error}"))?;
+    let value: Value =
+        serde_json::from_str(&raw).map_err(|error| format!("订阅数据解析失败: {error}"))?;
     let items = value
         .get("items")
         .and_then(Value::as_array)
@@ -486,7 +504,13 @@ mod tests {
 
     #[test]
     fn subscription_urls_require_an_http_host_without_truncation() {
-        for url in ["", "https://", "ftp://example.com/sub", "https://exa mple.com/sub", "https://example.com/a\nb"] {
+        for url in [
+            "",
+            "https://",
+            "ftp://example.com/sub",
+            "https://exa mple.com/sub",
+            "https://example.com/a\nb",
+        ] {
             assert!(valid_url(url).is_err(), "{url}");
         }
         assert!(valid_url("https://example.com/sub?token=test").is_ok());
@@ -496,9 +520,18 @@ mod tests {
 
     #[test]
     fn local_provider_requires_unique_nonempty_node_names() {
-        for yaml in ["proxies: []", "proxies: [ {name: ''} ]", "proxies: [ {type: ss} ]", "proxies: [ {name: a}, {name: a} ]", "other: []"] {
+        for yaml in [
+            "proxies: []",
+            "proxies: [ {name: ''} ]",
+            "proxies: [ {type: ss} ]",
+            "proxies: [ {name: a}, {name: a} ]",
+            "other: []",
+        ] {
             assert!(validate_local_content(yaml).is_err(), "{yaml}");
         }
-        assert_eq!(validate_local_content("proxies: [ {name: a}, {name: b} ]").unwrap(), 2);
+        assert_eq!(
+            validate_local_content("proxies: [ {name: a}, {name: b} ]").unwrap(),
+            2
+        );
     }
 }

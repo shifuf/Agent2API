@@ -25,7 +25,7 @@ Restored the proxy subscription implementation from `v3.3.0-beta.5` onto the cur
 - PASS: `npm --prefix desktop-tauri/ui-islands run typecheck`.
 - PASS: `npm ci --prefix desktop-tauri/mobile --no-audit --no-fund` and `npm --prefix desktop-tauri/mobile run typecheck` (including the root task's managed-model UI).
 - PASS: `git diff --check` at preparation time.
-- Added nine Rust tests covering subscription URL/YAML validation, supported sources, disabled/invalid subscription ports, settings validation and range movement, safe uninstall, and generated kernel listener configuration. The root/toolchain task owns cargo check/test and Cargo.lock; its dependency download is still in progress at this report's preparation time. Do not treat these Rust tests as executed until its result is recorded.
+- Added fourteen Rust tests covering subscription URL/YAML validation, supported sources, disabled/invalid subscription ports, settings validation and range movement, safe uninstall, and generated kernel listener configuration. The root/toolchain task owns cargo check/test and Cargo.lock. The test binary compiled, but Windows runtime initialization exited with `0xc0000005` before running tests; the toolchain worker is investigating linker/import relocation. Do not treat these Rust tests as executed until the integration result is recorded.
 - A real Mihomo binary and a live upstream subscription have not been used for end-to-end traffic validation in this task.
 
 ## Maintenance entry points
@@ -35,3 +35,13 @@ Restored the proxy subscription implementation from `v3.3.0-beta.5` onto the cur
 - `sub_kernel/mod.rs` pins Mihomo `v1.19.32`; update `assets.rs` platform archive and binary SHA256 values together when changing the pin.
 - `desktop-tauri/src-tauri/server/src/server/api/subscriptions.rs`: management contract.
 - `desktop-tauri/ui-islands/src/islands/proxies-sub-*` and `proxies-kernel-*`: desktop controls.
+
+## Independent review follow-up
+
+The channel worker reviewed the restoration and identified three beta.5 defects, now fixed:
+
+- Pausing/re-enabling a subscription keeps its pool IDs and account/service references. Temporarily missing nodes are disabled and lose stale ports; explicit subscription deletion removes mirrors. Resume allocation accepts the stale disabled mirror immediately, while regular reconciliation skips missing nodes to avoid repeated restarts.
+- Runtime compares the complete provider node catalog and definitions, rather than only allocated listeners. A second configuration pass stops its current child before allocating again, allowing registered ports to be reused.
+- Manual refresh snapshots before the controller request and rebuilds inline proxy definitions even when names remain unchanged but server/password parameters changed.
+
+Five additional Rust behavioral tests cover pause/resume identity, stale-port removal, first-pass resume listener allocation, full-catalog comparisons and same-name parameter changes (fourteen proxy/subscription tests total). Rust execution remains owned by the integration/toolchain task.

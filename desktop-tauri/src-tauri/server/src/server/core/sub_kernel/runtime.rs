@@ -111,8 +111,8 @@ fn read_state() -> Value {
 fn save_state(state: &Value) -> Result<(), String> {
     let dir = crate::server::core::sub_kernel::kernel_dir();
     std::fs::create_dir_all(&dir).map_err(|error| format!("创建内核目录失败: {error}"))?;
-    let text =
-        serde_json::to_string_pretty(state).map_err(|error| format!("编码内核状态失败: {error}"))?;
+    let text = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("编码内核状态失败: {error}"))?;
     std::fs::write(state_file_path(), text).map_err(|error| format!("写入内核状态失败: {error}"))
 }
 
@@ -246,7 +246,8 @@ fn read_provider_definitions(providers: &[ProviderInput]) -> HashMap<String, Val
     let dir = crate::server::core::sub_kernel::kernel_dir().join("providers");
     let mut defs: HashMap<String, Value> = HashMap::new();
     for provider in providers {
-        let Ok(text) = std::fs::read_to_string(dir.join(format!("sub_{}.yaml", provider.id))) else {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("sub_{}.yaml", provider.id)))
+        else {
             continue;
         };
         let Ok(parsed) = serde_yaml::from_str::<Yaml>(&text) else {
@@ -385,9 +386,12 @@ async fn poll_providers(
                 }
             }
             // 至少一家拿到了节点就收手 —— 拉取失败的留给下一次 restart 再试
-            let any_nodes = latest
-                .values()
-                .any(|value| value.as_array().map(|items| !items.is_empty()).unwrap_or(false));
+            let any_nodes = latest.values().any(|value| {
+                value
+                    .as_array()
+                    .map(|items| !items.is_empty())
+                    .unwrap_or(false)
+            });
             if any_nodes {
                 break;
             }
@@ -481,7 +485,9 @@ fn build_config(
     let mut proxies: Vec<Value> = Vec::new();
     let mut aliases: Vec<String> = Vec::new();
     for (key, definition) in inline {
-        let Some(object) = definition.as_object() else { continue };
+        let Some(object) = definition.as_object() else {
+            continue;
+        };
         let alias = alias_of_key(key);
         let mut entry = object.clone();
         entry.insert("name".to_string(), Value::String(alias.clone()));
@@ -572,7 +578,7 @@ fn listener_node_keys() -> HashSet<String> {
         crate::server::core::sub_kernel::account_store(),
     );
     let borrowed: HashSet<&str> = pool_ids.iter().map(String::as_str).collect();
-    crate::server::core::proxy_pool::listener_node_keys(&borrowed)
+    crate::server::core::proxy_pool::subscription_node_keys(&borrowed)
 }
 
 /// 按**现存订阅**裁剪端口注册表（分配之前调用）。
@@ -589,7 +595,10 @@ fn listener_node_keys() -> HashSet<String> {
 /// 订阅被禁用时也不在清单里（`enabled_provider_inputs` 只给启用的），它的
 /// 端口一并回收 —— 那些节点本来就不会出现在池里，账号引用早已解析失败。
 fn prune_ports(state: &mut Value, providers: &[ProviderInput]) {
-    let live: HashSet<&str> = providers.iter().map(|provider| provider.id.as_str()).collect();
+    let live: HashSet<&str> = providers
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
     let kept: Map<String, Value> = state_ports(state)
         .into_iter()
         .filter(|(key, _)| {
@@ -683,10 +692,21 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
     save_state(&state)?;
 
     // ④ 写配置 → 杀旧 → spawn → 等控制器
-    restart_with_config(providers, controller_port, test_port, &secret, &targets, &defs).await?;
+    restart_with_config(
+        providers,
+        controller_port,
+        test_port,
+        &secret,
+        &targets,
+        &defs,
+    )
+    .await?;
 
     // ⑤ 轮询 provider：节点集合与配置不一致时重建 + 重启一次
-    let provider_ids: Vec<String> = providers.iter().map(|provider| provider.id.clone()).collect();
+    let provider_ids: Vec<String> = providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect();
     let live = poll_providers(controller_port, &secret, &provider_ids, PROVIDER_WAIT_MS).await;
     let mut final_targets = targets;
     // 全量节点清单（provider 缓存优先，轮询到的新节点并入）—— 比较与镜像都按它
@@ -706,10 +726,13 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
             }
         }
     }
-    if nodes_changed(&final_targets, &live_nodes) {
+    let latest_defs = read_provider_definitions(providers);
+    if provider_content_changed(&provider_nodes, &live_nodes, &defs, &latest_defs) {
+        // 释放本轮刚启动的监听器，再按注册表复用端口；否则会把自己的端口判成外部占用。
+        stop_kernel().await;
         // 定义要**重新读**：首次拉取的缓存是这一轮才落地的（② 读时还没有），
         // 拿旧的那份会让新节点全都「没有定义」而分不到端口
-        defs = read_provider_definitions(providers);
+        defs = latest_defs;
         let next_targets = allocate_listeners(
             providers,
             &state_ports(&state),
@@ -785,7 +808,10 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
 fn write_ports(state: &mut Value, targets: &[NodeTarget]) {
     let mut port_map = state_ports(state);
     for target in targets {
-        port_map.insert(node_key(&target.provider_id, &target.node), json!(target.port));
+        port_map.insert(
+            node_key(&target.provider_id, &target.node),
+            json!(target.port),
+        );
     }
     state_insert(state, "ports", Value::Object(port_map));
 }
@@ -800,8 +826,7 @@ async fn restart_with_config(
     defs: &HashMap<String, Value>,
 ) -> Result<(), String> {
     let dir = crate::server::core::sub_kernel::kernel_dir();
-    let config =
-        build_config(providers, controller_port, secret, test_port, targets, defs)?;
+    let config = build_config(providers, controller_port, secret, test_port, targets, defs)?;
     std::fs::write(dir.join("config.yaml"), &config)
         .map_err(|error| format!("写入内核配置失败: {error}"))?;
 
@@ -845,7 +870,10 @@ async fn restart_with_config(
     // 状态带出来
     let deadline = tokio::time::Instant::now() + Duration::from_millis(CONTROLLER_WAIT_MS);
     loop {
-        if controller_get(controller_port, secret, "/version").await.is_some() {
+        if controller_get(controller_port, secret, "/version")
+            .await
+            .is_some()
+        {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -892,7 +920,7 @@ pub async fn stop_kernel() {
 // ─── 刷新与遗留进程 ────────────────────────────────────────
 
 /// 强制刷新一条订阅的内容：控制器 PUT（provider 强制拉取）→ 轮询节点 →
-/// 集合变了才重建配置 + 重启（端口注册表保持稳定）。
+/// 重建配置并重启，以便同名节点的参数更新也生效（端口注册表保持稳定）。
 pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<(), String> {
     let state = read_state();
     let Some(controller_port) = state.get("controllerPort").and_then(json_u16) else {
@@ -908,6 +936,7 @@ pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<()
         .iter()
         .find(|provider| provider.id == sub_id)
         .ok_or_else(|| "订阅不存在".to_string())?;
+    let before: HashSet<String> = read_provider_nodes(sub_id).into_iter().collect();
     controller_put(
         controller_port,
         secret,
@@ -928,7 +957,6 @@ pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<()
     // 所以这里轮询到「清单与刷新前不同」才收手：先记下刷新前的清单，等新
     // 清单出现（或等到超时）。超时仍无变化时按「内容确实没变」处理 ——
     // 机场没加节点时这就是正确答案，不能报错。
-    let before: HashSet<String> = read_provider_nodes(sub_id).into_iter().collect();
     let names = poll_provider_change(controller_port, secret, sub_id, &before, 20_000).await;
     let count = names.len();
     record_provider_sync(sub_id, &provider.name, count);
@@ -939,11 +967,9 @@ pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<()
         ));
     }
 
-    // 节点集合变了 → 重建配置 + 重启（新节点分新端口，消失的摘掉）
-    let next: HashSet<String> = names.iter().cloned().collect();
-    if before != next {
-        run_restart(providers).await?;
-    }
+    // 节点定义内联在顶层 proxies，同名节点也可能换 server / password。
+    // 明确刷新成功后重建一次，不能只按名称变化判断。
+    run_restart(providers).await?;
     Ok(())
 }
 
@@ -1096,19 +1122,13 @@ fn kill_by_pid(pid: u64) -> bool {
     {
         use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
-            PROCESS_SYNCHRONIZE,
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE,
         };
         let Ok(pid) = u32::try_from(pid) else {
             return false;
         };
-        let handle = unsafe {
-            OpenProcess(
-                PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
-                false,
-                pid,
-            )
-        };
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid) };
         let Ok(handle) = handle else {
             // 打不开句柄：进程已退出，或者权限不足（系统进程）
             return false;
@@ -1174,8 +1194,9 @@ async fn ensure_controller_port(state: &mut Value, secret: &str) -> Result<u16, 
         }
     }
     let taken: HashSet<u16> = HashSet::new();
-    let port = alloc_port(&taken, CONTROLLER_PORT_BASE, CONTROLLER_PORT_END)
-        .ok_or_else(|| format!("没有可用的控制端口（{CONTROLLER_PORT_BASE}-{CONTROLLER_PORT_END} 全被占用）"))?;
+    let port = alloc_port(&taken, CONTROLLER_PORT_BASE, CONTROLLER_PORT_END).ok_or_else(|| {
+        format!("没有可用的控制端口（{CONTROLLER_PORT_BASE}-{CONTROLLER_PORT_END} 全被占用）")
+    })?;
     state_insert(state, "controllerPort", json!(port));
     Ok(port)
 }
@@ -1196,7 +1217,9 @@ async fn ensure_test_port(
     secret: &str,
 ) -> Result<u16, String> {
     let old_kernel_ours = controller_alive_port(controller_port)
-        && controller_get(controller_port, secret, "/version").await.is_some();
+        && controller_get(controller_port, secret, "/version")
+            .await
+            .is_some();
     if let Some(port) = state.get("testPort").and_then(json_u16) {
         if port != controller_port && (port_free(port) || old_kernel_ours) {
             return Ok(port);
@@ -1241,8 +1264,7 @@ fn allocate_listeners(
     controller_port: u16,
     test_port: u16,
 ) -> Result<Vec<NodeTarget>, String> {
-    let (listener_base, listener_end) =
-        crate::server::core::proxy_settings::listener_port_range();
+    let (listener_base, listener_end) = crate::server::core::proxy_settings::listener_port_range();
     let wanted = listener_node_keys();
     let mut taken: HashSet<u16> = HashSet::new();
     for port in ports.values().filter_map(json_u16) {
@@ -1297,33 +1319,23 @@ fn allocate_listeners(
 /// 比较的是**全量节点清单**而不是已分配端口的子集：机场加了新节点时，哪怕
 /// 没人引用它，也要让代理池的镜像跟上（sync 在重启后做，但重建配置的触发
 /// 在这里）。
-fn nodes_changed(targets: &[NodeTarget], live_nodes: &[(String, Vec<String>)]) -> bool {
-    for (provider_id, names) in live_nodes {
-        // 配置里的节点（targets 只含被引用的）必须在最新清单里
-        for target in targets.iter().filter(|target| &target.provider_id == provider_id) {
-            if !names.contains(&target.node) {
-                return true; // 引用中的节点在最新清单里消失了
-            }
-        }
-        // 清单里出现了配置里没有的节点（新节点 → 池镜像要更新）
-        let known: HashSet<&str> = targets
+fn provider_content_changed(
+    previous_nodes: &[(String, Vec<String>)],
+    current_nodes: &[(String, Vec<String>)],
+    previous_defs: &HashMap<String, Value>,
+    current_defs: &HashMap<String, Value>,
+) -> bool {
+    nodes_changed(previous_nodes, current_nodes) || previous_defs != current_defs
+}
+
+fn nodes_changed(previous: &[(String, Vec<String>)], current: &[(String, Vec<String>)]) -> bool {
+    let keys = |providers: &[(String, Vec<String>)]| -> HashSet<String> {
+        providers
             .iter()
-            .filter(|target| &target.provider_id == provider_id)
-            .map(|target| target.node.as_str())
-            .collect();
-        for name in names {
-            if !known.contains(name.as_str()) {
-                return true;
-            }
-        }
-    }
-    // 上次有监听器、这次订阅整个消失（live_nodes 没有这家）—— 也要重建
-    for target in targets {
-        if !live_nodes.iter().any(|(provider_id, _)| &target.provider_id == provider_id) {
-            return true;
-        }
-    }
-    false
+            .flat_map(|(id, nodes)| nodes.iter().map(move |node| node_key(id, node)))
+            .collect()
+    };
+    keys(previous) != keys(current)
 }
 
 /// 控制器密钥（随机 32 字节 → hex；getrandom 与 Qoder PKCE 同一依赖）
@@ -1365,6 +1377,9 @@ pub fn test_port() -> Option<u16> {
 /// 节点根本不在订阅缓存里（已被机场移除）时**不等**，当场给出与池解析
 /// （`proxy_pool::resolve_item`）同一口径的话。
 pub async fn select_test_node(provider_id: &str, node: &str) -> Result<u16, String> {
+    if crate::server::core::subscriptions::find_enabled_state(provider_id) != Some(true) {
+        return Err("订阅已禁用或不存在，请先启用订阅".to_string());
+    }
     if !crate::server::core::sub_kernel::installed() {
         return Err("代理内核未安装（先在「订阅管理」下载内核）".to_string());
     }
@@ -1372,7 +1387,10 @@ pub async fn select_test_node(provider_id: &str, node: &str) -> Result<u16, Stri
         return Err("内核已手动关闭 —— 点内核状态条的「启动内核」后再测试".to_string());
     }
     // 缓存里没有这个节点 = 定义进不了配置、组里也不可能有它 —— 等待是白等
-    if !read_provider_nodes(provider_id).iter().any(|name| name == node) {
+    if !read_provider_nodes(provider_id)
+        .iter()
+        .any(|name| name == node)
+    {
         return Err(
             "该节点已不在订阅里（订阅更新后节点被移除，等下一次同步或重新订阅）".to_string(),
         );
@@ -1440,16 +1458,42 @@ mod tests {
     #[test]
     fn configuration_exposes_only_assigned_listeners_but_tests_all_nodes() {
         let providers = vec![
-            ProviderInput { id: "remote".into(), name: "Remote".into(), url: "https://example.com/sub".into(), content: String::new() },
-            ProviderInput { id: "local".into(), name: "Local".into(), url: String::new(), content: "proxies: []".into() },
+            ProviderInput {
+                id: "remote".into(),
+                name: "Remote".into(),
+                url: "https://example.com/sub".into(),
+                content: String::new(),
+            },
+            ProviderInput {
+                id: "local".into(),
+                name: "Local".into(),
+                url: String::new(),
+                content: "proxies: []".into(),
+            },
         ];
         let defs = HashMap::from([
-            (node_key("remote", "same-name"), json!({"name":"same-name","type":"http","server":"remote.example","port":8080})),
-            (node_key("local", "same-name"), json!({"name":"same-name","type":"socks5","server":"local.example","port":1080})),
+            (
+                node_key("remote", "same-name"),
+                json!({"name":"same-name","type":"http","server":"remote.example","port":8080}),
+            ),
+            (
+                node_key("local", "same-name"),
+                json!({"name":"same-name","type":"socks5","server":"local.example","port":1080}),
+            ),
         ]);
         let listeners = vec![
-            NodeTarget { provider_id: "remote".into(), sub_name: "Remote".into(), node: "same-name".into(), port: Some(19101) },
-            NodeTarget { provider_id: "local".into(), sub_name: "Local".into(), node: "same-name".into(), port: None },
+            NodeTarget {
+                provider_id: "remote".into(),
+                sub_name: "Remote".into(),
+                node: "same-name".into(),
+                port: Some(19101),
+            },
+            NodeTarget {
+                provider_id: "local".into(),
+                sub_name: "Local".into(),
+                node: "same-name".into(),
+                port: None,
+            },
         ];
         let yaml = build_config(&providers, 19090, "secret", 19099, &listeners, &defs).unwrap();
         let config: Value = serde_yaml::from_str(&yaml).unwrap();
@@ -1458,11 +1502,53 @@ mod tests {
         assert!(config["proxy-providers"]["sub_local"].get("url").is_none());
         assert_eq!(config["proxies"].as_array().unwrap().len(), 2);
         assert_ne!(config["proxies"][0]["name"], config["proxies"][1]["name"]);
-        assert_eq!(config["proxy-groups"][0]["proxies"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            config["proxy-groups"][0]["proxies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(config["listeners"].as_array().unwrap().len(), 2);
-        assert!(config["listeners"].as_array().unwrap().iter().all(|listener| listener["listen"] == "127.0.0.1"));
+        assert!(config["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|listener| listener["listen"] == "127.0.0.1"));
         assert_eq!(config["listeners"][0]["port"], 19101);
         assert_eq!(config["listeners"][1]["port"], 19099);
         assert!(config.get("tun").is_none());
+    }
+    #[test]
+    fn full_catalog_comparison_does_not_restart_for_unreferenced_nodes() {
+        let previous = vec![(
+            "sub".to_string(),
+            vec!["used".to_string(), "unused".to_string()],
+        )];
+        let reordered = vec![(
+            "sub".to_string(),
+            vec!["unused".to_string(), "used".to_string()],
+        )];
+        assert!(!nodes_changed(&previous, &reordered));
+        assert!(nodes_changed(
+            &previous,
+            &[("sub".to_string(), vec!["used".to_string()])]
+        ));
+        assert!(nodes_changed(&previous, &[]));
+    }
+
+    #[test]
+    fn same_named_node_parameter_changes_require_rebuild() {
+        let nodes = vec![("sub".to_string(), vec!["node".to_string()])];
+        let old = HashMap::from([(
+            node_key("sub", "node"),
+            json!({"name":"node","server":"old.example","password":"old"}),
+        )]);
+        let next = HashMap::from([(
+            node_key("sub", "node"),
+            json!({"name":"node","server":"new.example","password":"new"}),
+        )]);
+        assert!(!provider_content_changed(&nodes, &nodes, &old, &old));
+        assert!(provider_content_changed(&nodes, &nodes, &old, &next));
     }
 }

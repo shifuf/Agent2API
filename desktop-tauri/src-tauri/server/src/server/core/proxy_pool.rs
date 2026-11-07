@@ -199,7 +199,11 @@ fn valid_port(value: Option<&Value>) -> Option<u16> {
 }
 
 fn text_of(value: &Value, key: &str) -> String {
-    value.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// 把 API 输入（新建 / 编辑的整份表单）归一成一条**手动**池条目。
@@ -216,7 +220,10 @@ fn normalize_item(input: &Value, existing: Option<&Value>) -> Result<Value, Stri
     let Some(object) = input.as_object() else {
         return Err("代理条目必须是对象".to_string());
     };
-    if object.get("source").is_some_and(|source| !source.is_null() && !source.is_string()) {
+    if object
+        .get("source")
+        .is_some_and(|source| !source.is_null() && !source.is_string())
+    {
         return Err("代理来源必须是字符串".to_string());
     }
     let source_input = clean_string(object.get("source"), 20);
@@ -235,9 +242,7 @@ fn normalize_item(input: &Value, existing: Option<&Value>) -> Result<Value, Stri
     }
 
     let now = logging::now_ms();
-    let id = existing
-        .map(|item| text_of(item, "id"))
-        .unwrap_or_default();
+    let id = existing.map(|item| text_of(item, "id")).unwrap_or_default();
     let id = if id.is_empty() { new_id() } else { id };
     let created_at = existing
         .and_then(|item| item.get("createdAt"))
@@ -254,7 +259,11 @@ fn normalize_item(input: &Value, existing: Option<&Value>) -> Result<Value, Stri
 
     let protocol = {
         let cleaned = clean_string(object.get("protocol"), 10).to_lowercase();
-        if cleaned.is_empty() { "http".to_string() } else { cleaned }
+        if cleaned.is_empty() {
+            "http".to_string()
+        } else {
+            cleaned
+        }
     };
     if protocol != "http" && protocol != "socks5" {
         return Err("代理协议只支持 http 或 socks5".to_string());
@@ -319,7 +328,9 @@ pub fn is_locally_disabled(item: &Value) -> bool {
 /// 少一处就会冒出「界面显示已禁用、转发却还在用它」这类谁也解释不清的状态。
 /// manual 条目没有本地禁用位，退化成 `enabled` 本身。
 pub fn is_enabled(item: &Value) -> bool {
-    is_supported(item) && !is_locally_disabled(item) && !matches!(item.get("enabled"), Some(Value::Bool(false)))
+    is_supported(item)
+        && !is_locally_disabled(item)
+        && !matches!(item.get("enabled"), Some(Value::Bool(false)))
 }
 
 // ─── 解析（给 core::proxies 的 pool 分支与 describe 共用）──────
@@ -348,23 +359,25 @@ pub fn resolve_item(item: &Value) -> Option<ProxyResolution> {
             // 「没有端口」是未引用节点的**正常状态**而不是待补建的缺口：
             // 测试走统一测试口（见模块头），不再需要端口；地址只在「真在用」
             // 时存在。
-            let node_alive = crate::server::core::subscriptions::ids()
-                .contains(&text_of(item, "providerId"));
+            let node_alive =
+                crate::server::core::subscriptions::ids().contains(&text_of(item, "providerId"));
             return Some(ProxyResolution::Failed(if node_alive {
                 "该节点的监听端口尚未就绪（在账号或更新设置中选中并保存后，内核会自动分配端口；已保存的请稍等或检查内核状态）".to_string()
             } else {
                 "订阅节点已不存在（订阅更新后节点被移除，等下一次同步或重新订阅）".to_string()
             }));
         };
-        return Some(ProxyResolution::Resolved(crate::server::core::proxies::ResolvedProxy {
-            source: "pool".to_string(),
-            protocol: "http".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: Some(port),
-            username: String::new(),
-            password: String::new(),
-            label: String::new(),
-        }));
+        return Some(ProxyResolution::Resolved(
+            crate::server::core::proxies::ResolvedProxy {
+                source: "pool".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some(port),
+                username: String::new(),
+                password: String::new(),
+                label: String::new(),
+            },
+        ));
     } else {
         json!({
             "source": "custom",
@@ -385,11 +398,15 @@ pub fn resolve_item(item: &Value) -> Option<ProxyResolution> {
 ///   `Ok(proxy)` 出口可用；
 ///   `Err(原因)` 条目不存在 / 被禁用 / 解析失败 —— 调用方原样报出去
 ///               （账号列表的「代理异常」气泡、转发时回退直连的日志）。
-pub fn resolve_reference(proxy_id: &str) -> Result<crate::server::core::proxies::ResolvedProxy, String> {
+pub fn resolve_reference(
+    proxy_id: &str,
+) -> Result<crate::server::core::proxies::ResolvedProxy, String> {
     let Some(item) = find_raw(proxy_id) else {
         return Err(format!("代理「{proxy_id}」不存在或已被删除"));
     };
-    if !is_supported(&item) { return Err("不支持的代理来源".to_string()); }
+    if !is_supported(&item) {
+        return Err("不支持的代理来源".to_string());
+    }
     if !is_enabled(&item) {
         return Err(format!(
             "代理「{}」已禁用（在「网络代理」页启用它）",
@@ -402,7 +419,9 @@ pub fn resolve_reference(proxy_id: &str) -> Result<crate::server::core::proxies:
 /// 出口测试专用解析：与 `resolve_reference` 只差**不看禁用位** ——
 /// 「先测通、再启用」是常见操作顺序，禁用的条目也要能测（只有引用解析
 /// 那条链必须挡住禁用项，理由见 `resolve_reference`）。
-pub fn resolve_for_test(proxy_id: &str) -> Result<crate::server::core::proxies::ResolvedProxy, String> {
+pub fn resolve_for_test(
+    proxy_id: &str,
+) -> Result<crate::server::core::proxies::ResolvedProxy, String> {
     let Some(item) = find_raw(proxy_id) else {
         return Err(format!("代理「{proxy_id}」不存在或已被删除"));
     };
@@ -411,7 +430,11 @@ pub fn resolve_for_test(proxy_id: &str) -> Result<crate::server::core::proxies::
 
 fn display_name(item: &Value, fallback: &str) -> String {
     let name = text_of(item, "name");
-    if name.is_empty() { fallback.to_string() } else { name }
+    if name.is_empty() {
+        fallback.to_string()
+    } else {
+        name
+    }
 }
 
 fn resolve_entry(
@@ -483,7 +506,11 @@ fn describe_item(item: &Value) -> Value {
 /// 最新全量列表（公开形态）。写操作也返回它 —— 与模型管理页的写接口同约定：
 /// 前端就地替换，不必再拉一次。
 pub fn list() -> Vec<Value> {
-    read_items().iter().filter(|item| is_supported(item)).map(describe_item).collect()
+    read_items()
+        .iter()
+        .filter(|item| is_supported(item))
+        .map(describe_item)
+        .collect()
 }
 
 fn find_raw(id: &str) -> Option<Value> {
@@ -513,7 +540,10 @@ pub fn create(input: &Value) -> Result<Vec<Value>, String> {
 /// 该条目是否来自 Clash 同步（只读镜像）。写操作一律先过它。
 fn is_manual_item(item: &Value) -> bool {
     matches!(item.get("source"), None | Some(Value::Null))
-        || matches!(item.get("source").and_then(Value::as_str), Some("" | "manual" | "custom"))
+        || matches!(
+            item.get("source").and_then(Value::as_str),
+            Some("" | "manual" | "custom")
+        )
 }
 
 fn is_supported(item: &Value) -> bool {
@@ -606,12 +636,15 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(Vec<Value>, EnabledChange
         return Err(format!("代理「{id}」不存在"));
     };
     // 先读完需要的信息再拿可变借用（同一元素不能同时借两次）
-    if !is_supported(&items[index]) { return Err("不支持的代理来源".to_string()); }
+    if !is_supported(&items[index]) {
+        return Err("不支持的代理来源".to_string());
+    }
     let source = text_of(&items[index], "source");
     let manual = is_manual_item(&items[index]);
     let name = display_name(&items[index], id);
     // 关闭流程的判据：这条现在是不是真开着**本机**监听端口（只有订阅节点有）
-    let had_port = is_subscription_item(&items[index]) && valid_port(items[index].get("port")).is_some();
+    let had_port =
+        is_subscription_item(&items[index]) && valid_port(items[index].get("port")).is_some();
     let now = logging::now_ms();
     let Some(object) = items[index].as_object_mut() else {
         return Err("代理条目形状异常".to_string());
@@ -628,10 +661,25 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(Vec<Value>, EnabledChange
     write_items(&items)?;
     logging::log(
         "[Proxies]",
-        &format!("{}代理「{name}」", if enabled { "✅ 启用" } else { "⏸️ 禁用" }),
+        &format!(
+            "{}代理「{name}」",
+            if enabled {
+                "✅ 启用"
+            } else {
+                "⏸️ 禁用"
+            }
+        ),
     );
     let enabled = is_enabled(&items[index]);
-    Ok((list(), EnabledChange { name, source, had_port, enabled }))
+    Ok((
+        list(),
+        EnabledChange {
+            name,
+            source,
+            had_port,
+            enabled,
+        },
+    ))
 }
 
 /// 删除条目；返回（最新列表, 被删条目的名称 —— 调用方拼日志/提示用）。
@@ -780,14 +828,20 @@ pub fn sync_clash() -> ClashSyncReport {
 
     if changes > 0 {
         if let Err(error) = write_items(&items) {
-            return ClashSyncReport { changes: 0, error: Some(error) };
+            return ClashSyncReport {
+                changes: 0,
+                error: Some(error),
+            };
         }
         logging::log(
             "[Proxies]",
             &format!("🔄 已同步 Clash Verge 出口（{changes} 项变更）"),
         );
     }
-    ClashSyncReport { changes, error: None }
+    ClashSyncReport {
+        changes,
+        error: None,
+    }
 }
 
 /// 一次出口测试的结果（字段与 `egress::ConnectivityResult` 对应）。
@@ -918,7 +972,7 @@ pub struct SubscriptionNodeTarget {
 ///
 ///   · 集合里的节点 upsert（按 `providerId + node` 定位：**已存在的沿用 id**
 ///     —— 账号按 id 引用池条目，重生成 id 会让引用全部悬空）；
-///   · 订阅侧已消失的（或订阅被删 / 被禁用后不再出现在集合里的）镜像条目摘掉；
+///   · 订阅被删除时摘掉镜像；暂停或暂时无节点时保留 ID 并清端口；
 ///   · 同一订阅内**本次清单里已不存在**的节点条目也摘掉（见下方 ③）；
 ///   · manual 与 clash 条目从不被碰。
 ///
@@ -933,8 +987,29 @@ pub fn sync_subscription_nodes(
     targets: &[SubscriptionNodeTarget],
     referenced_ids: &std::collections::HashSet<String>,
 ) -> Result<usize, String> {
-    let now = logging::now_ms();
     let mut items = read_items();
+    // 读取失败时不把全部订阅当成删除：保留池并向上报告错误。
+    let stored_providers = crate::server::core::subscriptions::live_ids()?;
+    let changes = merge_subscription_nodes(
+        &mut items,
+        targets,
+        referenced_ids,
+        &stored_providers,
+        logging::now_ms(),
+    );
+    if changes > 0 {
+        write_items(&items)?;
+    }
+    Ok(changes)
+}
+
+fn merge_subscription_nodes(
+    items: &mut Vec<Value>,
+    targets: &[SubscriptionNodeTarget],
+    referenced_ids: &std::collections::HashSet<String>,
+    stored_providers: &std::collections::HashSet<String>,
+    now: i64,
+) -> usize {
     let mut changes = 0usize;
 
     // ① 目标集合逐条 upsert（沿用已有条目的 id / createdAt / lastTest）
@@ -946,22 +1021,28 @@ pub fn sync_subscription_nodes(
         };
         let existing = items.iter_mut().position(|item| {
             is_subscription_item(item)
-                && item.get("providerId").and_then(Value::as_str) == Some(target.provider_id.as_str())
+                && item.get("providerId").and_then(Value::as_str)
+                    == Some(target.provider_id.as_str())
                 && item.get("node").and_then(Value::as_str) == Some(target.node.as_str())
         });
         match existing {
             Some(index) => {
-                let current_port = items[index].get("port").and_then(Value::as_u64).map(|v| v as u16);
+                let current_port = valid_port(items[index].get("port"));
                 let port_changed = current_port != target.port;
                 let name_changed = text_of(&items[index], "name") != name;
-                if port_changed || name_changed {
+                let source_changed = items[index].get("enabled") == Some(&Value::Bool(false));
+                if port_changed || name_changed || source_changed {
                     if let Some(object) = items[index].as_object_mut() {
                         object.insert("name".to_string(), Value::String(name));
+                        object.insert("enabled".to_string(), Value::Bool(true));
                         // None = 未分配端口（lazy listeners）：写 null 而不是删键，
                         // 前端按 null 显示「未分配」
                         object.insert(
                             "port".to_string(),
-                            target.port.map(|port| Value::from(port)).unwrap_or(Value::Null),
+                            target
+                                .port
+                                .map(|port| Value::from(port))
+                                .unwrap_or(Value::Null),
                         );
                         object.insert("updatedAt".to_string(), Value::from(now));
                     }
@@ -990,18 +1071,8 @@ pub fn sync_subscription_nodes(
         }
     }
 
-    // ② 目标集合之外（且 providerId 不在集合里）的订阅镜像条目摘掉。
-    //
-    // 判据刻意按 **providerId** 而不是节点名：节点名随订阅内容变化（机场
-    // 改名很常见），按名判定会把改名后的节点删了重加（id 变了，账号引用
-    // 悬空）。providerId 不在本次集合 = 该订阅被删 / 被禁用 / 已无节点，
-    // 它名下的全部条目才真正该走。
-    //
-    // ③ 同一订阅内、本次清单里已经没有的节点条目摘掉 —— 这一段正是「按名
-    // 判定会误删改名节点」的代价兑现处：不改名就没事，一旦改名旧条目就永远
-    // 等不到同名节点来更新它，从此挂在池里（实测「魔戒」订阅的
-    // `剩余流量：X GB` 每更新一次沉淀一条，攒了 7 条）。判据取交集而非并集：
-    // 只有「providerId 还活着」时才进 ③，providerId 整个消失的走 ②。
+    // 暂停订阅或临时取不到节点时保留池 ID；真正删除按存储中的订阅 ID 判定。
+    // 单个节点从清单消失时仅保留仍被引用的条目，并清空已关闭的监听端口。
     let live_providers: std::collections::HashSet<&str> = targets
         .iter()
         .map(|target| target.provider_id.as_str())
@@ -1012,15 +1083,15 @@ pub fn sync_subscription_nodes(
         .map(|target| (target.provider_id.as_str(), target.node.as_str()))
         .collect();
     let before = items.len();
-    items.retain(|item| {
+    items.retain_mut(|item| {
         if !is_subscription_item(item) {
             return true;
         }
         let Some(provider_id) = item.get("providerId").and_then(Value::as_str) else {
             return false; // 没有引用信息的坏行（手工改库），清掉
         };
-        if !live_providers.contains(provider_id) {
-            return false; // ②：订阅整个没了
+        if !stored_providers.contains(provider_id) {
+            return false; // 用户已删除订阅。
         }
         // ③：订阅还在，但这个节点在最新清单里已经不存在
         let Some(node) = item.get("node").and_then(Value::as_str) else {
@@ -1035,14 +1106,20 @@ pub fn sync_subscription_nodes(
             .and_then(Value::as_str)
             .map(|id| referenced_ids.contains(id))
             .unwrap_or(false);
-        referenced
+        let keep = !live_providers.contains(provider_id) || referenced;
+        if keep
+            && (item.get("port").is_some_and(|port| !port.is_null())
+                || item.get("enabled") != Some(&Value::Bool(false)))
+        {
+            item["port"] = Value::Null;
+            item["enabled"] = Value::Bool(false);
+            item["updatedAt"] = json!(now);
+            changes += 1;
+        }
+        keep
     });
     changes += before - items.len();
-
-    if changes > 0 {
-        write_items(&items)?;
-    }
-    Ok(changes)
+    changes
 }
 
 /// 把**全部订阅镜像条目**的端口清空（删内核时调用，见
@@ -1065,7 +1142,9 @@ pub fn unprovision_subscription_nodes() -> Result<usize, String> {
         if !is_subscription_item(item) || valid_port(item.get("port")).is_none() {
             continue;
         }
-        let Some(object) = item.as_object_mut() else { continue };
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
         object.insert("port".to_string(), Value::Null);
         object.insert("updatedAt".to_string(), Value::from(now));
         changes += 1;
@@ -1082,18 +1161,64 @@ pub fn unprovision_subscription_nodes() -> Result<usize, String> {
 /// 的引用（条目已被删）查不出节点、自然跳过 —— 那类引用解析时本来就会报「不存在」。
 /// 内核的 `allocate_listeners` 用它决定「哪些节点开监听器」（lazy listeners）。
 ///
-/// **本页禁用中的条目不算**（`is_enabled`）：账号虽然还引用着它，但引用解析已经
-/// 按「已禁用」失败并回退直连了（见 `resolve_reference`）—— 再给它开着监听端口
-/// 就是为一条没人用的节点白占端口，也与用户在启用列上按下的那一下自相矛盾。
-pub fn subscription_node_keys(pool_ids: &std::collections::HashSet<&str>) -> std::collections::HashSet<String> {
-    read_items()
+/// 以当前订阅开关和节点本地开关筛选候选。订阅刚恢复时，池里的来源状态可能
+/// 仍是上次同步留下的 false；分配器还会按当前节点定义确认候选是否存在。
+pub fn subscription_node_keys(
+    pool_ids: &std::collections::HashSet<&str>,
+) -> std::collections::HashSet<String> {
+    let enabled_providers = crate::server::core::subscriptions::enabled_provider_inputs()
+        .into_iter()
+        .map(|provider| provider.id)
+        .collect();
+    collect_subscription_node_keys(&read_items(), pool_ids, &enabled_providers)
+}
+
+fn collect_subscription_node_keys(
+    items: &[Value],
+    pool_ids: &std::collections::HashSet<&str>,
+    enabled_providers: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    items
+        .iter()
+        // 来源侧 enabled 是上次同步的镜像：刚恢复订阅时仍是 false。
+        // 当前订阅状态 + 本地开关决定是否需要端口，节点是否仍存在由分配器按定义检查。
+        .filter(|item| is_subscription_item(item) && !is_locally_disabled(item))
+        .filter(|item| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| pool_ids.contains(id))
+        })
+        .filter_map(|item| {
+            let provider_id = item.get("providerId").and_then(Value::as_str)?;
+            if !enabled_providers.contains(provider_id) {
+                return None;
+            }
+            let node = item.get("node").and_then(Value::as_str)?;
+            Some(format!("{provider_id}::{node}"))
+        })
+        .collect()
+}
+
+/// 对账需要的监听器：账号或服务线路引用中的可用条目。
+/// 已从订阅中消失的节点会被同步为 disabled，应跳过以免每次账号保存都触发重启。
+/// 订阅恢复本身会请求内核重建，分配器用 subscription_node_keys 接纳尚未同步的镜像。
+pub fn listener_node_keys(
+    pool_ids: &std::collections::HashSet<&str>,
+) -> std::collections::HashSet<String> {
+    collect_listener_node_keys(&read_items(), pool_ids)
+}
+
+fn collect_listener_node_keys(
+    items: &[Value],
+    pool_ids: &std::collections::HashSet<&str>,
+) -> std::collections::HashSet<String> {
+    items
         .iter()
         .filter(|item| is_subscription_item(item) && is_enabled(item))
         .filter(|item| {
             item.get("id")
                 .and_then(Value::as_str)
-                .map(|id| pool_ids.contains(id))
-                .unwrap_or(false)
+                .is_some_and(|id| pool_ids.contains(id))
         })
         .filter_map(|item| {
             let provider_id = item.get("providerId").and_then(Value::as_str)?;
@@ -1101,16 +1226,6 @@ pub fn subscription_node_keys(pool_ids: &std::collections::HashSet<&str>) -> std
             Some(format!("{provider_id}::{node}"))
         })
         .collect()
-}
-
-/// 内核该给哪些节点开监听器：**账号或服务线路引用中的条目**（禁用中的不算）。
-///
-/// 内核侧（`runtime::listener_node_keys`）与对账判定
-/// （`api::proxies::reconcile_listeners`）都从这一处取，必须同一口径
-/// —— 口径不一致就会出现「判定说没有缺口、内核却不建」这类谁也解释不清的
-/// 状态。测试不在此列（测试走统一测试口，不需要端口，见模块头）。
-pub fn listener_node_keys(pool_ids: &std::collections::HashSet<&str>) -> std::collections::HashSet<String> {
-    subscription_node_keys(pool_ids)
 }
 
 /// 测试目标（`api::proxies::pool_test` 读它）：条目的展示名与订阅节点的定位
@@ -1144,8 +1259,7 @@ pub fn test_target(id: &str) -> Result<TestTarget, String> {
 /// 判据与 `listener_node_keys` 完全同口径（账号或服务线路引用，禁用中的不算），
 /// 只是限定到一条：订阅条目已启用、端口还空着，并且在 `referenced` 引用合集里。
 ///
-/// 与内核侧同口径是硬要求：口径不一致就会出现「判定说没有缺口、内核却不建」
-/// 这类谁也解释不清的状态（补建那条链的注释里也写着同一句话）。
+/// 订阅恢复时的暂存禁用状态由恢复操作自己的内核重建处理。
 pub fn needs_listener(id: &str, referenced: &std::collections::HashSet<&str>) -> bool {
     let Some(item) = find_raw(id) else {
         return false;
@@ -1164,8 +1278,7 @@ pub fn needs_listener(id: &str, referenced: &std::collections::HashSet<&str>) ->
 ///
 /// 对账链路（`api::proxies::reconcile_listeners`）的读入口：拿它和「该开
 /// 监听器的节点集合」（`listener_node_keys`）比对 —— 该开却没端口的要补建，
-/// 端口还挂着却不该开的要回收。`provider_nodes`（provider 缓存）里没有的
-/// 节点跳过 —— 订阅还没拉到内容时谈不上补建。
+/// 端口还挂着却不该开的要回收。来源不可用的条目不会进入 wanted 集合。
 pub fn subscription_entries_with_ports() -> Vec<(String, String, Option<u16>)> {
     read_items()
         .iter()
@@ -1185,30 +1298,133 @@ mod tests {
 
     #[test]
     fn supported_sources_keep_subscription_and_legacy_manual() {
-        for source in [Value::Null, json!(""), json!("manual"), json!("custom"), json!("clash"), json!("subscription")] {
+        for source in [
+            Value::Null,
+            json!(""),
+            json!("manual"),
+            json!("custom"),
+            json!("clash"),
+            json!("subscription"),
+        ] {
             assert!(is_enabled(&json!({"source": source})), "{source}");
         }
         for source in [json!("unknown"), json!(42)] {
             let item = json!({"source": source, "host": "127.0.0.1", "port": 8080});
             assert!(!is_enabled(&item));
-            assert!(matches!(resolve_item(&item), Some(ProxyResolution::Failed(_))));
+            assert!(matches!(
+                resolve_item(&item),
+                Some(ProxyResolution::Failed(_))
+            ));
         }
-        assert!(!is_enabled(&json!({"source": "subscription", "localDisabled": true})));
-        assert!(!is_enabled(&json!({"source": "subscription", "enabled": false})));
+        assert!(!is_enabled(
+            &json!({"source": "subscription", "localDisabled": true})
+        ));
+        assert!(!is_enabled(
+            &json!({"source": "subscription", "enabled": false})
+        ));
     }
 
     #[test]
     fn manual_input_rejects_unknown_or_mirrored_sources() {
         for source in ["unknown", "subscription", "clash"] {
-            assert!(normalize_item(&json!({"name":"test", "source":source, "host":"127.0.0.1", "port":8080}), None).is_err());
+            assert!(normalize_item(
+                &json!({"name":"test", "source":source, "host":"127.0.0.1", "port":8080}),
+                None
+            )
+            .is_err());
         }
     }
 
     #[test]
     fn subscription_requires_valid_listener_port() {
         for port in [json!(null), json!(0), json!(65536), json!(-1), json!(1.5)] {
-            assert!(matches!(resolve_item(&json!({"source":"subscription", "port":port})), Some(ProxyResolution::Failed(_))));
+            assert!(matches!(
+                resolve_item(&json!({"source":"subscription", "port":port})),
+                Some(ProxyResolution::Failed(_))
+            ));
         }
-        assert!(matches!(resolve_item(&json!({"source":"subscription", "port":19101})), Some(ProxyResolution::Resolved(_))));
+        assert!(matches!(
+            resolve_item(&json!({"source":"subscription", "port":19101})),
+            Some(ProxyResolution::Resolved(_))
+        ));
+    }
+    #[test]
+    fn pausing_and_resuming_subscription_preserves_pool_references() {
+        let mut items = vec![
+            json!({"id":"px-stable","source":"subscription","providerId":"sub","node":"node","name":"Sub · node","enabled":true,"port":19101,"localDisabled":true}),
+        ];
+        let stored = std::collections::HashSet::from(["sub".to_string()]);
+        let referenced = std::collections::HashSet::from(["px-stable".to_string()]);
+        merge_subscription_nodes(&mut items, &[], &referenced, &stored, 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "px-stable");
+        assert_eq!(items[0]["port"], Value::Null);
+        assert_eq!(items[0]["enabled"], false);
+        let targets = vec![SubscriptionNodeTarget {
+            provider_id: "sub".into(),
+            sub_name: "Sub".into(),
+            node: "node".into(),
+            port: Some(19101),
+        }];
+        merge_subscription_nodes(&mut items, &targets, &referenced, &stored, 2);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "px-stable");
+        assert_eq!(items[0]["port"], 19101);
+        assert_eq!(items[0]["enabled"], true);
+        assert_eq!(items[0]["localDisabled"], true);
+    }
+
+    #[test]
+    fn removed_referenced_node_loses_its_stale_listener_port() {
+        let mut items = vec![
+            json!({"id":"px-old","source":"subscription","providerId":"sub","node":"old","port":19101}),
+        ];
+        let stored = std::collections::HashSet::from(["sub".to_string()]);
+        let referenced = std::collections::HashSet::from(["px-old".to_string()]);
+        let targets = vec![SubscriptionNodeTarget {
+            provider_id: "sub".into(),
+            sub_name: "Sub".into(),
+            node: "new".into(),
+            port: None,
+        }];
+        merge_subscription_nodes(&mut items, &targets, &referenced, &stored, 1);
+        let old = items.iter().find(|item| item["id"] == "px-old").unwrap();
+        assert_eq!(old["port"], Value::Null);
+        merge_subscription_nodes(
+            &mut items,
+            &[],
+            &referenced,
+            &std::collections::HashSet::new(),
+            2,
+        );
+        assert!(
+            items.is_empty(),
+            "explicitly deleted subscriptions should remove their mirrors"
+        );
+    }
+
+    #[test]
+    fn resumed_subscription_requests_listener_before_the_next_pool_sync() {
+        let items = vec![
+            json!({"id":"px-stable","source":"subscription","providerId":"sub","node":"node","enabled":false,"port":null}),
+        ];
+        let referenced = std::collections::HashSet::from(["px-stable"]);
+        let enabled = std::collections::HashSet::from(["sub".to_string()]);
+        assert!(
+            collect_subscription_node_keys(&items, &referenced, &enabled).contains("sub::node")
+        );
+        assert!(
+            collect_listener_node_keys(&items, &referenced).is_empty(),
+            "missing nodes must not trigger repeated reconciliation restarts"
+        );
+        assert!(collect_subscription_node_keys(
+            &items,
+            &referenced,
+            &std::collections::HashSet::new()
+        )
+        .is_empty());
+        let mut disabled = items;
+        disabled[0]["localDisabled"] = json!(true);
+        assert!(collect_subscription_node_keys(&disabled, &referenced, &enabled).is_empty());
     }
 }

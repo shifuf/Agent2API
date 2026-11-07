@@ -682,7 +682,7 @@ function SubModal({
             <>
               <div className='flex flex-row items-center gap-2.5'>
                 <Switch checked={enabled} onCheckedChange={setEnabled} aria-label={t('启用这条订阅')} />
-                <span className='text-[12.5px]'>{t('启用（禁用的订阅不参与内核同步，它的节点会从代理池移除）')}</span>
+                <span className='text-[12.5px]'>{t('启用（禁用后暂停同步和节点使用，保留账号引用）')}</span>
               </div>
 
               {/* 定时刷新只属于链接订阅；本地文件是导入那一刻的内容，两种说明分开写 */}
