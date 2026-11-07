@@ -545,7 +545,7 @@ export type SharedWindow = {
   /** 「添加账号」弹窗（归另一个代理，本页只调它的 open） */
   wbAddAccountModal?: { open?: () => void; close?: () => void }
   /** 添加表单的步骤复位（打开弹窗后按 providers 摘要重画卡片） */
-  wbAccountAddForms?: { syncAddProvider?: () => void }
+  wbAccountAddForms?: { syncAddProvider?: () => void; openNewCustomForm?: () => void }
 }
 
 /** 列设置的登记项（照 table-col-settings.tsx 的 TableSpec 收窄成本页用到的那几个字段） */

@@ -150,17 +150,19 @@ try {
 
   await step('desktop manual model catalog starts empty', async () => {
     await nav('gateway');
-    await desktop.getByText('手动添加对外模型，并选择渠道中的上游模型。获取上游清单不会自动发布模型。', { exact: true }).waitFor();
-    await desktop.getByText('尚未添加对外模型。点击「添加模型」，选择渠道和上游模型后即可使用。', { exact: true }).waitFor();
+    await desktop.locator('[data-model-workspace]').waitFor();
+    await desktop.getByText('尚未添加模型。可从厂商目录或账号上游选择，也可填写自定义模型。', { exact: true }).waitFor();
     const catalog = await api('/api/models/catalog');
     assert.deepEqual(catalog.models, []);
     await screenshot(desktop, 'desktop-models-empty');
   });
 
-  await step('desktop add-model dialog exposes manual model ID and bindings', async () => {
+  await step('desktop add-model dialog exposes manual model ID and separate association guidance', async () => {
     await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
     await desktop.locator('#managed-model-id').waitFor();
-    await desktop.getByText('选择渠道 / 上游模型', { exact: true }).waitFor();
+    await desktop.getByRole('button', { name: '从目录或上游选择', exact: true }).waitFor();
+    await desktop.getByText('先创建模型，再独立关联渠道。新模型默认停用。', { exact: true }).waitFor();
+    assert.equal(await desktop.locator('[data-model-editor] .models-basic-fields').getByRole('checkbox').count(), 0, 'Basic model editor must not mutate channel associations');
     await screenshot(desktop, 'desktop-model-editor-empty');
     await desktop.getByRole('button', { name: '取消', exact: true }).click();
   });
@@ -168,11 +170,14 @@ try {
   await step('preloaded manufacturer catalog fills model IDs and preserves draft on refresh failure', async () => {
     try {
       await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
+      await desktop.getByRole('button', { name: '从目录或上游选择', exact: true }).click();
+      await desktop.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).waitFor();
       assert.equal(await desktop.getByRole('button', { name: / \/ shared$/ }).count(), 1, 'Duplicate model IDs appear more than once across manufacturers');
       await desktop.getByRole('combobox', { name: '模型厂商', exact: true }).selectOption('maker-a');
       await desktop.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).click();
       assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
       assert.equal(await desktop.locator('#managed-model-name').inputValue(), 'Alpha Latest');
+      await desktop.getByRole('button', { name: '从目录或上游选择', exact: true }).click();
       await desktop.getByRole('button', { name: '更新模型目录', exact: true }).click();
       await desktop.getByText('目录更新失败，继续使用已缓存的模型。', { exact: true }).waitFor();
       assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
@@ -183,7 +188,12 @@ try {
       assert(directoryRequests >= 2, 'Model page did not preload and refresh the directory');
       assert.deepEqual((await api('/api/models/catalog')).models, []);
       await screenshot(desktop, 'desktop-public-model-catalog');
-    } finally { await desktop.getByRole('button', { name: '取消', exact: true }).click(); }
+    } finally {
+      // A failed assertion may leave either the nested picker or the model form open.
+      await desktop.keyboard.press('Escape');
+      await desktop.keyboard.press('Escape');
+      await desktop.locator('[data-model-editor]').waitFor({ state: 'hidden' });
+    }
   });
 
   await step('API template channel shows independent Key groups and selectable models', async () => {
@@ -193,17 +203,18 @@ try {
     await desktop.locator('#custom-name-input').fill('Browser smoke template');
     await desktop.locator('#custom-baseurl-input').fill(upstreamBase);
     await desktop.locator('#create-channel-0-keys').fill('smoke-key-a\nsmoke-key-b');
-    const group = desktop.locator('section').filter({ has: desktop.locator('#create-channel-0-keys') });
-    await group.getByRole('button', { name: '获取模型', exact: true }).click();
+    const modelGroup = desktop.locator('[data-channel-model-group="0"]:visible');
+    await modelGroup.getByRole('button', { name: '获取模型', exact: true }).click();
     const modelsPanel = desktop.locator('[data-channel-panel="models"]');
     await modelsPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
-    assert.equal(await group.locator('#create-channel-0-models').inputValue(), '');
+    assert.deepEqual(await modelGroup.locator('code').allTextContents(), []);
     await modelsPanel.getByRole('button', { name: '关闭', exact: true }).click();
-    await group.getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
-    await group.getByRole('button', { name: '获取模型', exact: true }).click();
+    await modelGroup.getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
+    await modelGroup.getByRole('button', { name: '获取模型', exact: true }).click();
     await modelsPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).check();
     await modelsPanel.getByRole('button', { name: '确认选择', exact: true }).click();
-    assert.equal(await group.locator('#create-channel-0-models').inputValue(), 'upstream-b');
+    await modelsPanel.waitFor({ state: 'hidden' });
+    assert.deepEqual(await modelGroup.locator('code').allTextContents(), ['upstream-b']);
     await desktop.getByRole('button', { name: '添加分组', exact: true }).click();
     await desktop.locator('#create-channel-1-keys').waitFor();
     await screenshot(desktop, 'desktop-channel-key-groups');
@@ -226,22 +237,35 @@ try {
     await desktop.goto(base, { waitUntil: 'domcontentloaded' });
     await nav('gateway');
     await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
+    await desktop.getByRole('button', { name: '从目录或上游选择', exact: true }).click();
     await desktop.getByRole('combobox', { name: '模型来源', exact: true }).selectOption('upstream');
     await desktop.getByRole('button', { name: 'Browser smoke channel / upstream-a', exact: true }).click();
     assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'upstream-a');
     await desktop.locator('#managed-model-id').fill('browser-public-model');
     await desktop.locator('#managed-model-name').fill('Browser published model');
-    await desktop.getByRole('checkbox', { name: 'Browser smoke channel / upstream-a', exact: true }).check();
     await screenshot(desktop, 'desktop-model-editor-selected');
     await desktop.getByRole('button', { name: '保存', exact: true }).click();
     await desktop.getByRole('cell', { name: 'browser-public-model', exact: true }).waitFor();
-    const catalog = await api('/api/models/catalog');
+    let catalog = await api('/api/models/catalog');
     assert.equal(catalog.models[0].id, 'browser-public-model');
+    assert.equal(catalog.models[0].enabled, false, 'Creating a model must not publish it');
+    assert.deepEqual(catalog.models[0].bindings, [], 'Choosing an upstream candidate must not silently associate it');
+    await desktop.getByRole('button', { name: '关联渠道 browser-public-model', exact: true }).click();
+    const association = desktop.locator('[data-model-association]');
+    await association.getByRole('checkbox', { name: 'Browser smoke channel / upstream-a', exact: true }).check();
+    await association.getByRole('button', { name: '保存关联', exact: true }).click();
+    await association.waitFor({ state: 'hidden' });
+    await desktop.getByRole('switch', { name: '启用 browser-public-model', exact: true }).click();
+    await desktop.locator('[data-model-row="browser-public-model"]').getByText('已启用', { exact: true }).waitFor();
+    assert.equal(await desktop.getByRole('switch', { name: '启用 browser-public-model', exact: true }).getAttribute('aria-checked'), 'true');
+    catalog = await api('/api/models/catalog');
+    assert.equal(catalog.models[0].enabled, true);
     assert.equal(catalog.models[0].bindings[0].model, 'upstream-a');
   });
 
   await step('existing custom models can be found and opened without creating a duplicate', async () => {
     await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
+    await desktop.getByRole('button', { name: '从目录或上游选择', exact: true }).click();
     await desktop.getByRole('combobox', { name: '模型来源', exact: true }).selectOption('custom');
     await desktop.getByRole('button', { name: '已有自定义模型 / browser-public-model', exact: true }).click();
     await desktop.getByRole('heading', { name: '编辑模型', exact: true }).waitFor();
@@ -254,10 +278,11 @@ try {
   await step('gateway Key editor exposes channel and published-model restrictions', async () => {
     await nav('keys');
     await desktop.getByRole('button', { name: '＋ 新建 Key', exact: true }).click();
-    await desktop.getByLabel('可用渠道', { exact: true }).waitFor();
-    await desktop.getByLabel('可用模型', { exact: true }).click();
-    await desktop.getByText('browser-public-model', { exact: true }).filter({ visible: true }).waitFor();
-    assert.equal(await desktop.getByText('upstream-b', { exact: true }).filter({ visible: true }).count(), 0);
+    await desktop.getByRole('button', { name: '选择渠道', exact: true }).waitFor();
+    await desktop.getByRole('button', { name: '选择模型', exact: true }).click();
+    const models = desktop.locator('[data-key-selection="models"]');
+    await models.getByRole('checkbox', { name: 'browser-public-model', exact: true }).waitFor();
+    assert.equal(await models.getByRole('checkbox', { name: 'upstream-b', exact: true }).count(), 0);
     await screenshot(desktop, 'desktop-gateway-key-models');
     await desktop.keyboard.press('Escape');
     await desktop.keyboard.press('Escape');
@@ -271,10 +296,11 @@ try {
     await desktop.goto(base, { waitUntil: 'domcontentloaded' });
     await nav('keys');
     await desktop.getByRole('row').filter({ hasText: 'Retained browser key' }).getByRole('button', { name: '可用范围', exact: true }).click();
+    await desktop.getByRole('button', { name: '选择模型', exact: true }).click();
     await desktop.getByText('以下已保存的限制当前不可用，仍会保留；可手动移除。', { exact: true }).waitFor();
-    await desktop.getByLabel('可用模型', { exact: true }).click();
-    assert.equal(await desktop.getByRole('option', { name: 'browser-public-model', exact: true }).count(), 0);
+    assert.equal(await desktop.locator('[data-key-selection="models"]').getByRole('checkbox', { name: 'browser-public-model', exact: true }).count(), 0);
     await desktop.keyboard.press('Escape');
+    await desktop.locator('[data-key-selection="models"]').waitFor({ state: 'hidden' });
     await screenshot(desktop, 'desktop-key-unavailable-restriction');
     await desktop.getByRole('button', { name: '保存范围', exact: true }).click();
     await desktop.getByRole('heading', { name: /可用范围/ }).waitFor({ state: 'hidden' });
@@ -309,17 +335,19 @@ try {
     await mobile.goto(`${base}/m#models`, { waitUntil: 'domcontentloaded' });
     await mobile.getByText('browser-public-model', { exact: true }).waitFor();
     await screenshot(mobile, 'mobile-models');
-    await mobile.getByRole('button', { name: '编辑', exact: true }).click();
+    await mobile.getByRole('button', { name: '编辑 browser-public-model', exact: true }).click();
+    await mobile.getByRole('button', { name: '从目录或上游选择', exact: true }).click();
     await mobile.getByRole('combobox', { name: '模型厂商', exact: true }).selectOption('maker-a');
     await mobile.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).click();
-    assert.equal(await mobile.locator('#mobile-model-id').inputValue(), 'Alpha/Latest');
-    await mobile.locator('#mobile-model-id').fill('browser-public-model');
-    await mobile.locator('#mobile-model-name').fill('Edited from mobile smoke');
+    assert.equal(await mobile.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
+    await mobile.locator('#managed-model-id').fill('browser-public-model');
+    await mobile.locator('#managed-model-name').fill('Edited from mobile smoke');
     await screenshot(mobile, 'mobile-model-editor');
     await mobile.getByRole('button', { name: '保存', exact: true }).click();
     await mobile.getByText('Edited from mobile smoke', { exact: true }).waitFor();
     const catalog = await api('/api/models/catalog');
     assert.equal(catalog.models.find(model => model.id === 'browser-public-model').name, 'Edited from mobile smoke');
+    assert.deepEqual(catalog.models.find(model => model.id === 'browser-public-model').bindings, [{ provider: providerId, model: 'upstream-a' }]);
     const overflow = await mobile.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
     assert.equal(overflow, false, 'Mobile page horizontally overflows');
   }, mobile);

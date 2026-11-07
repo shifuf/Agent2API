@@ -20,11 +20,12 @@ export function useChannelPanel() {
 }
 
 /** The form stays centered; group operations expand a panel inside the same dialog. */
-export function ChannelDialogContent({ title, description, children, footer, open = true, scope = '', keepMounted = false }: {
+export function ChannelDialogContent({ title, description, children, footer, sidebar, open = true, scope = '', keepMounted = false }: {
   title: React.ReactNode
   description?: React.ReactNode
   children: React.ReactNode
   footer: React.ReactNode
+  sidebar?: React.ReactNode
   open?: boolean
   scope?: string
   keepMounted?: boolean
@@ -55,7 +56,7 @@ export function ChannelDialogContent({ title, description, children, footer, ope
 
   return <ChannelPanelContext.Provider value={context}>
     <DialogContent overlayForceRender keepMounted={keepMounted} data-channel-dialog
-      data-panel-open={Boolean(activeId)} className='acct-add-form-dialog channel-dialog'
+      data-panel-open={Boolean(activeId)} data-has-sidebar={Boolean(sidebar)} className='acct-add-form-dialog channel-dialog'
       onPointerDownCapture={event => {
         if (event.target instanceof Element && event.target.closest('[data-channel-panel]')) intent.current++
       }}
@@ -76,6 +77,7 @@ export function ChannelDialogContent({ title, description, children, footer, ope
         </div>
       </DialogHeader>
       <div className='channel-dialog-workspace'>
+        {sidebar && <aside className='channel-dialog-sidebar'>{sidebar}</aside>}
         <DialogBody className='channel-dialog-form'>{children}</DialogBody>
         <div ref={setHost} className='channel-dialog-panel' hidden={!activeId} />
       </div>

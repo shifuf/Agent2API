@@ -1,613 +1,70 @@
 import * as React from 'react'
-import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
-import {
-  Badge,
-  Button,
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogSection,
-  DialogTitle,
-  Input,
-  Label,
-  MultiSelect,
-  Switch,
-  type MultiSelectOption,
-  Card, CardHeader, Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@ui'
-import { TableFooter, useClientPaging } from './table-shell'
+import { Badge, Button, Card, CardHeader, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@ui'
+import { mountOnPage } from '../island-lazy'
 import { t } from '../i18n'
+import { TableFooter, useClientPaging } from './table-shell'
+import { KeyEditorDialog, KeyViewDialog } from './keys-dialogs'
+import { errorMessage, filterKeys, type KeyEntry, type KeysBridge, type KeysPayload, type ProviderOption } from './keys-data'
 
-/**
- * Agent2API · 网关 Key 页（列表 / 新建 / 启停 / 删除 / 可用范围）—— React 岛。
- *
- * 替换 ui/keys-panel.js（那份用 innerHTML 拼 .models-table 的行、事件走容器委托）。
- * 对外接口与原实现**完全一致**：`window.wbKeysPanel = { load, render, visibleColumns }`
- * —— app.js:151 切到本页时调 load()，table-columns.js 的列宽层按 visibleColumns()
- * 算「当前可见列」（覆盖值落到哪个 <col>、末列不给把手），调用点一行都不用改。
- *
- * ── 数据口径（照旧，别改）──────────────────────────────────
- * 数据来自 `GET /api/keys`（`{keys, authRequired, providers, modelsByProvider}`，
- * keys 带明文 key 与掩码）。写接口都返回最新列表，就地替换后重绘；列表默认显示掩码，
- * 每行可单独「显示」明文并复制（复制走 clipboard.js 的 data-copy 委托）。
- * 「可用提供商 / 可用模型」两个白名单**空数组 = 不限制**（见后端 core::api_keys）。
- *
- * ── 两个多选走组件库的 MultiSelect ───────────────────────────
- * 「可用提供商 / 可用模型」是**受控**的 React state（不再渲染原生 `<select multiple>`
- * 再让 select.js 增强）：候选、勾选、联动全在这一层算 —— 联动规则见 modelOptions，
- * 提交给后端的取值口径见 pickedFromOptions。
- *
- * ── 弹窗走组件库的 Dialog（与 request-clear-modal / conc-dialog 同一手法）──
- * 旧的 `#key-modal`（.modal-mask 一族）不再使用：Esc / 点遮罩关闭、焦点陷阱、滚动
- * 锁定都由 Dialog 内建。MultiSelect 的浮层是 Base UI 自己的浮层（portal 到 body，
- * z-35 高于弹窗的 z-30），与模态共用同一套 outside-press 判定，不需要额外放行。
- *
- * ── 列设置：为什么在 layout effect 里注册，而不是模块顶层 ──────
- * ① 本岛的模块体比 table-col-settings.tsx 先执行（import.meta.glob 按文件名字典序），
- *    模块顶层那一刻 `window.wbColSettings` 还不存在；
- * ② 「列设置」按钮要插进**本岛渲染出来的** .panel-head .head-actions，而 React 的首次
- *    渲染排在后面的任务里 —— 顶层 querySelector 拿到的是 index.html 的静态骨架
- *    （马上会被 replaceChildren 清掉），按钮会插进一个即将消失的节点。
- * 表头同步跟着注册一起做，并靠 syncStaticHead 内部的 `wbTableColumns.repaint('keys')`
- * 补上把手与列宽：table-columns.js 在本脚本之后加载，谁先跑都有可能 —— 它先跑时找
- * 不到表（当时 React 还没渲染），这次 repaint 补上；这次是空转时，它加载期自己会找。
- * <colgroup> / <thead> 由本文件渲染但 `data-col` 一个不少，React 从不动这几棵静态
- * 子树（虚拟 DOM 不变），所以命令式的重排 / 摘除是安全的。
- */
-
-/* ─── 类型 ─────────────────────────────────── */
-
-/** 一把 Key（`GET /api/keys` 的 keys[]，对应后端 `api_keys::ApiKeyEntry::public_json`） */
-type KeyEntry = {
-  id: string
-  name?: string
-  /** 明文：本机管理界面要能随时复制给客户端（掩码只用于列表折叠展示） */
-  key?: string
-  masked?: string
-  enabled?: boolean
-  createdAt?: number
-  /** 白名单，**空数组 = 不限制** */
-  allowedProviders?: string[]
-  allowedModels?: string[]
-}
-
-/**
- * 「可用渠道」候选由后端提供，只包含启用且有可用账号和上游模型的渠道。
- * 已保存的失效限制在独立摘要中保留，不反向补进候选列表。
- */
-type ProviderOption = { id: string; label?: string; removed?: boolean; unavailable?: boolean; enabled?: boolean; count?: number }
-
-/** 四个接口的响应；`created` 只在 POST 的响应里（新建后要立刻展开它） */
-type KeysPayload = {
-  keys?: KeyEntry[]
-  authRequired?: boolean
-  usableKeyCount?: number
-  providers?: ProviderOption[]
-  /** 每家 → 对外名清单，模型候选的**唯一**数据源（按当前勾选的提供商取并集） */
-  modelsByProvider?: Record<string, string[]>
-  created?: KeyEntry
-}
-
-/** 本岛用到的后端桥（见 bridge.rs 的「网关 Key」那一段） */
-type KeysBridge = {
-  getKeys(): Promise<KeysPayload | null | undefined>
-  createKey(payload: {
-    name: string
-    /** 留空 = 后端自动生成 */
-    key?: string
-    allowedProviders: string[]
-    allowedModels: string[]
-  }): Promise<KeysPayload | null | undefined>
-  updateKey(
-    id: string,
-    patch: { enabled?: boolean; allowedProviders?: string[]; allowedModels?: string[] },
-  ): Promise<KeysPayload | null | undefined>
-  deleteKey(id: string): Promise<KeysPayload | null | undefined>
-}
-
-/**
- * window 上由其它脚本 / 其它岛挂载的共享桥。
- *
- * 刻意用「局部窄类型 + 转型」而不是 declare global 往 Window 上加属性：
- * workbuddyDesktop / wbApp / wbColSettings / wbProviders 是多个岛共用的桥，若每个岛
- * 各 declare 一份，接口合并会因同名属性类型不一致直接报 TS2717。本文件只 declare
- * 自己独占的 wbKeysPanel（见文件末尾）。
- */
+// Keep the shared page/column bridge used by app.js and table-columns.js.
+type Align = 'left' | 'center' | 'right'
+type ColumnDecl = { key: string; label: string; align?: Align }
+type ColSettingsHandle = { apply<C extends { key: string }>(columns: C[]): (C & { align: Align })[] }
 type SharedWindow = {
   workbuddyDesktop?: KeysBridge
-  wbApp?: {
-    toast?: (message: string, kind?: 'err' | 'ok') => void
-    /** 时间戳 → 本地时间串（app.js 的 formatTime；createdAt 列用它） */
-    formatTime?: (value: unknown) => string
-    /** 顶栏状态区重画：本页徽标是顶栏那枚的镜像（按 id 读文案与 data-tone） */
-    renderTopbarStatus?: () => void
-    /** 当前页标识：首屏自持加载只在用户正看着本页时打后端 */
-    readonly currentPage?: string
-  }
-  wbConfirm?: {
-    ask?: (options: {
-      title?: string
-      /** 正文，允许 <strong> 等少量标记；内容由调用方负责转义 */
-      html?: string
-      okText?: string
-      /** danger = 不可恢复的危险操作（确认键走红） */
-      okClass?: string
-    }) => Promise<boolean>
-  }
+  wbApp?: { toast?: (message: string, kind?: 'err' | 'ok') => void; formatTime?: (value: unknown) => string; renderTopbarStatus?: () => void; readonly currentPage?: string }
+  wbConfirm?: { ask?: (options: { title?: string; html?: string; okText?: string; okClass?: string }) => Promise<boolean> }
   wbColSettings?: {
-    register(spec: {
-      id: string
-      label?: string
-      columns: readonly ColumnDecl[]
-      mount?: () => Element | null
-      onChange?: () => void
-    }): ColSettingsHandle
+    register(spec: { id: string; label?: string; columns: readonly ColumnDecl[]; mount?: () => Element | null; onChange?: () => void }): ColSettingsHandle
     syncStaticHead(id: string, table: Element | null | undefined): void
   }
-  /** 提供商显示名（注册表 + 自定义家的查找链，注册表里没有的 id 回落原样） */
-  wbProviders?: { labelOf?: (id: string) => string | undefined }
 }
-
-function shared(): SharedWindow {
-  return window as unknown as SharedWindow
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
-/** toast 的统一出口（运行期读 wbApp，不在模块顶层解构） */
-function toast(message: string, kind?: 'err' | 'ok'): void {
-  shared().wbApp?.toast?.(message, kind)
-}
-
-/** 确认框正文是 HTML 串，插值一律先转义（不借 wbApp.esc：那是 app.js 的私有函数） */
+const shared = () => window as unknown as SharedWindow
+const toast = (message: string, kind?: 'err' | 'ok') => shared().wbApp?.toast?.(message, kind)
 function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, ch => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[ch] ?? ch))
+  return value.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch] ?? ch))
 }
-
-/* ─── 常量与列声明 ───────────────────────────── */
-
-type Align = 'left' | 'center' | 'right'
-
-/** 列声明：key 与 index.html 里既有的 `data-col`、<col> 的 data-col 三处同名 */
-type ColumnDecl = { key: string; label: string; align?: Align }
-
 const COLUMNS: readonly ColumnDecl[] = [
-  { key: 'name', label: t('名称') },
-  // 「Key」是产品固定叫法（无中文），不进词典
-  { key: 'key', label: 'Key' },
-  { key: 'time', label: t('创建时间') },
-  { key: 'state', label: t('启用') },
+  { key: 'name', label: t('名称') }, { key: 'key', label: 'Key' },
+  { key: 'time', label: t('创建时间') }, { key: 'state', label: t('状态') },
   { key: 'act', label: t('操作'), align: 'right' },
 ]
-
-/** 每个单元格自己的类名（`state` / `r` 是既有 CSS 的钩子，见 page-gateway.css） */
-const CELL_CLASS: Record<string, string> = {
-  name: 'cell-name',
-  key: 'cell-key',
-  time: 'cell-time',
-  state: 'cell-state state',
-  act: 'cell-act r',
-}
-
-/** 页面区块（React root 直接建在它上面，见文件头） */
+const CELL_CLASS: Record<string, string> = { name: 'cell-name', key: 'cell-key', time: 'cell-time', state: 'cell-state state', act: 'cell-act r' }
 const SECTION = '.page[data-page="keys"]'
-
-/* ─── 列设置：能力层（register / apply / syncStaticHead）─── */
-
-type ColSettingsHandle = {
-  apply<C extends { key: string }>(columns: C[]): (C & { align: Align })[]
-  config(): unknown
-}
-
 let colSettings: ColSettingsHandle | null = null
-
-/** 列设置改动后的重画入口：组件挂载后登记（onChange 从 React 之外回调进来） */
 let onColumnsChanged: (() => void) | null = null
-
-/**
- * 该表当前可见的列（顺序即配置顺序；列设置未就绪时退回全部列）。
- * 导出给 table-columns.js：列宽那一层要按当前可见列算（覆盖值落到哪个 <col>、
- * 末列不给把手），两边读同一份配置才不会各算一个样。
- */
 function visibleColumns(): (ColumnDecl & { align: Align })[] {
-  if (colSettings) return colSettings.apply([...COLUMNS])
-  // 列设置没就绪（脚本加载失败等）：退回声明顺序，对齐取列上声明的默认值
-  return COLUMNS.map(column => ({ ...column, align: column.align ?? 'left' }))
+  return colSettings ? colSettings.apply([...COLUMNS]) : COLUMNS.map(column => ({ ...column, align: column.align ?? 'left' }))
 }
-
-/** 静态表头就地重排：顺序 / 显隐 / 对齐（末尾顺带让列宽层重对一遍把手） */
 function syncHead(): void {
   shared().wbColSettings?.syncStaticHead?.('keys', document.querySelector('table.keys-table'))
 }
-
-/** 登记列设置（只做一次）并同步表头；必须在 React 提交之后调用（见文件头） */
 function setupColumns(): void {
   if (colSettings) return
-  const handle = shared().wbColSettings?.register({
-    id: 'keys',
-    label: t('网关 Key 表'),
-    columns: COLUMNS,
+  colSettings = shared().wbColSettings?.register({
+    id: 'keys', label: t('网关 Key 表'), columns: COLUMNS,
     mount: () => document.querySelector('.page[data-page="keys"] .panel-head .head-actions'),
-    onChange: () => {
-      syncHead()
-      onColumnsChanged?.()
-    },
-  })
-  if (!handle) return
-  colSettings = handle
-  syncHead()
+    onChange: () => { syncHead(); onColumnsChanged?.() },
+  }) ?? null
+  if (colSettings) syncHead()
 }
-
-/* ─── 纯函数：文案与候选项 ───────────────────── */
-
-function keysOf(payload: KeysPayload | null): KeyEntry[] {
-  return Array.isArray(payload?.keys) ? payload.keys : []
+const keysOf = (payload: KeysPayload | null): KeyEntry[] => Array.isArray(payload?.keys) ? payload.keys : []
+const providersOf = (payload: KeysPayload | null): ProviderOption[] => Array.isArray(payload?.providers) ? payload.providers : []
+const modelsByProviderOf = (payload: KeysPayload | null): Record<string, string[]> => payload?.modelsByProvider || {}
+const channelLabel = (provider: ProviderOption): string => provider.removed ? t('已移除渠道：{id}', { id: provider.id }) : t(provider.label || provider.id)
+function restrictionText(key: KeyEntry, labelOf: (id: string) => string): string {
+  const channels = key.allowedProviders || []
+  const models = key.allowedModels || []
+  if (!channels.length && !models.length) return t('不限制')
+  return [channels.length ? channels.map(labelOf).join(t('、')) : '', models.length ? t('{n} 个模型', { n: models.length }) : ''].filter(Boolean).join(' / ')
 }
-
-/** 后端下发的提供商摘要（注册表顺序：workbuddy → raccoon → …，自定义家附在末尾） */
-function providersOf(payload: KeysPayload | null): ProviderOption[] {
-  return Array.isArray(payload?.providers) ? payload.providers : []
-}
-
-function modelsByProviderOf(payload: KeysPayload | null): Record<string, string[]> {
-  const map = payload?.modelsByProvider
-  return map && typeof map === 'object' ? map : {}
-}
-
-/** 提供商显示名：注册名过词典；注册表里没有的 id 回落原样（旧数据里可能有已下线的家） */
-function providerLabel(id: string): string {
-  return t(shared().wbProviders?.labelOf?.(id) || id)
-}
-
-/**
- * 按**当前勾选的提供商**取对外名并集，铺成多选选项。
- * 只展示后端确认可用的模型。暂不可用的已保存限制另行展示并保留，不能混入候选。
- * 一家都没勾代表全部可用渠道。
- */
-function modelOptions(
-  table: Record<string, string[]>,
-  selectedProviders: string[],
-  _selected: string[] = [],
-): MultiSelectOption[] {
-  const names = new Map<string, string>() // 小写 → 原始名（先到先得，保住后端给的大小写）
-  const put = (value: unknown) => {
-    const text = String(value ?? '').trim()
-    if (!text) return
-    const key = text.toLowerCase()
-    if (!names.has(key)) names.set(key, text)
-  }
-  ;(selectedProviders.length ? selectedProviders : Object.keys(table)).forEach(id => {
-    const list = table[id] ?? table[String(id).toLowerCase()]
-    if (Array.isArray(list)) list.forEach(put)
-  })
-  // 选项**值**是模型名（提交给后端的身份）不进词典；展示 label 走 t()
-  const out = [...names.values()].map(value => ({ value, label: t(value) }))
-  out.sort((a, b) => (a.value.toLowerCase() < b.value.toLowerCase() ? -1 : 1))
-  return out
-}
-
-/**
- * 一行 Key 名下的**限制摘要**。为什么要显示而不是留空：限制是**看不见的** —— 列表上
- * 不写，用户就只记得「我配过点什么」，客户端 404 时会去查模型、查账号，最后才想到是
- * Key 的限制。无限制时显示「不限制」而不是省略：省略与「没读到」长得一样。
- */
-function restrictionText(k: KeyEntry, labelOf: (id: string) => string = providerLabel): string {
-  const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
-  const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
-  if (!providers.length && !models.length) return t('不限制')
-  const parts: string[] = []
-  // providerLabel 的输出已是译文（注册名在这里过词典），原样透出
-  if (providers.length) parts.push(providers.map(labelOf).join(t('、')))
-  // 模型那半边只报个数：一屏 Row 里塞不下十几个模型名，悬停由 title 给全量
-  if (models.length) parts.push(t('{n} 个模型', { n: models.length }))
-  return t('限制：{text}', { text: parts.join(' / ') })
-}
-
-/** 限制摘要的完整说明（悬停 title 用；列不宽，详情只能挂这里） */
-function restrictionTitle(k: KeyEntry, labelOf: (id: string) => string = providerLabel): string {
-  const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
-  const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
-  if (!providers.length && !models.length) {
-    return t('这把 Key 可用全部渠道与全部已发布模型')
-  }
-  const lines: string[] = []
-  if (providers.length) lines.push(t('可用渠道：{names}', { names: providers.map(labelOf).join(t('、')) }))
-  if (models.length) lines.push(t('可用模型：{names}', { names: models.join(t('、')) }))
-  return lines.join('\n')
-}
-
-/**
- * 弹窗里「当前选的摘要」。为什么要有它：限制是**看不见的** —— 弹窗一关，列表上只剩
- * 「限制：…」一行；而多选的触发器只显示连接后的一行文案，清单长了会被省略号收掉。
- * 用户点完「保存范围」就看不到弹窗了，勾了哪几家 / 哪些模型得在这儿给他核对一遍。
- */
-function restrictionSummary(providers: readonly string[], models: readonly string[], labelOf: (id: string) => string = providerLabel): string {
-  if (!providers.length && !models.length) {
-    return t('当前不限制：这把 Key 可以用全部渠道与全部已发布模型')
-  }
-  const parts: string[] = []
-  if (providers.length) parts.push(t('渠道：{names}', { names: providers.map(labelOf).join(t('、')) }))
-  if (models.length) parts.push(t('模型：{names}', { names: models.join(t('、')) }))
-  if (!providers.length) {
-    parts.push(t('渠道未选择，允许全部渠道'))
-  }
-  return parts.join('　')
-}
-
-/* ─── 多选的选项与取值 ───────────────────────── */
-
-/** 白名单字段是后端给的，可能缺失 / 形状不对（非数组一律当空，与旧实现同口径） */
-function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(item => String(item)) : []
-}
-
-/** Canonicalize known values while retaining saved restrictions absent from the catalog. */
-function pickedFromOptions(values: readonly string[], options: readonly MultiSelectOption[]): string[] {
-  const canonical = new Map(options.map(option => [option.value.toLowerCase(), option.value]))
-  const chosen = new Map<string, string>()
-  values.forEach(value => {
-    const text = String(value).trim()
-    const key = text.toLowerCase()
-    if (text && !chosen.has(key)) chosen.set(key, canonical.get(key) || text)
-  })
-  return [...options.filter(option => chosen.has(option.value.toLowerCase())).map(option => option.value),
-    ...[...chosen].filter(([key]) => !canonical.has(key)).map(([, value]) => value)]
-}
-
-function channelLabel(item: ProviderOption): string {
-  return item.removed ? t('已移除渠道：{id}', { id: item.id }) : t(item.label || item.id)
-}
-
-/** Available options only; hidden saved restrictions are managed separately. */
-function channelOptions(providers: ProviderOption[], _retained: readonly string[] = []): MultiSelectOption[] {
-  return providers.filter(item => !item.removed && !item.unavailable && item.enabled !== false && item.count !== 0)
-    .map(item => ({ value: item.id, label: channelLabel(item) }))
-}
-
-function hiddenSelections(values: readonly string[], options: readonly MultiSelectOption[]): string[] {
-  const available = new Set(options.map(option => option.value.toLowerCase()))
-  return values.filter(value => !available.has(value.toLowerCase()))
-}
-
-/** Editing the visible dropdown must never erase a hidden permission restriction. */
-function retainHiddenSelections(current: readonly string[], next: string[], options: readonly MultiSelectOption[]): string[] {
-  return pickedFromOptions([...next, ...hiddenSelections(current, options)], options)
-}
-
-/* ─── 弹窗（新建 / 改可用范围共用）──────────────── */
-
-type KeyModalProps = {
-  /** 编辑形态的 Key；null = 新建 */
-  target: KeyEntry | null
-  providers: ProviderOption[]
-  modelsByProvider: Record<string, string[]>
-  onClose: () => void
-  /** 写接口返回的最新列表（与旧实现的 accept 同义）；revealId = 新建后要展开明文的那把 */
-  onSaved: (next: KeysPayload | null | undefined, revealId?: string) => void
-}
-
-function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: KeyModalProps) {
-  const editingId = target?.id ?? null
-  const editing = Boolean(editingId)
-
-  const [name, setName] = React.useState(target?.name ?? '')
-  const [keyValue, setKeyValue] = React.useState('')
-  const [status, setStatus] = React.useState('')
-  const [saving, setSaving] = React.useState(false)
-  /** 在途守卫：命令式的关闭判定（Esc / 点遮罩）必须能**同步**读到它 */
-  const savingRef = React.useRef(false)
-
-  /** 两个白名单的勾选（受控；**空数组 = 不限制**）。初值照抄后端给的数组，不在这里删改 */
-  const [pickedProviders, setPickedProviders] = React.useState<string[]>(
-    () => stringList(target?.allowedProviders),
-  )
-  const [pickedModels, setPickedModels] = React.useState<string[]>(
-    () => stringList(target?.allowedModels),
-  )
-
-  /**
-   * 提供商候选 = 后端下发的整张表（内置家 + 已建的自定义家）。自定义家必须在这一层
-   * 就进候选：`pickedFromOptions` 只认候选里有的 id，缺了它，已存的 `custom-xxx`
-   * 会在保存时被静默丢掉（见后端 `keys_api` 里 `providers` 候选表的说明）。
-   */
-  const providerOptions = React.useMemo<MultiSelectOption[]>(
-    // 值是提供商 id（提交给后端的身份）不包；展示 label 走 t()（后端下发的展示名）
-    () => channelOptions(providers, stringList(target?.allowedProviders)),
-    [providers, target?.allowedProviders],
-  )
-
-  /**
-   * 勾选值按候选表归一后的结果 —— 它是**唯一对外**的东西：MultiSelect 的受控值、摘要、
-   * 提交给后端的数组都用它，与旧实现从 `<select>` 的 selectedOptions 读值同一口径
-   * （见 pickedFromOptions 的说明）。
-   */
-  const allowedProviders = React.useMemo(
-    () => pickedFromOptions(pickedProviders, providerOptions),
-    [pickedProviders, providerOptions],
-  )
-  const hiddenProviders = hiddenSelections(allowedProviders, providerOptions)
-
-  /**
-   * 模型候选跟着「已勾选的提供商」重建：勾一家立刻多出这家的对外名，取消一家则收回去。
-   * 不可用的已选模型保留在状态和单独的限制摘要中，不再显示为可选模型。
-   */
-  const modelCandidates = React.useMemo(
-    () => modelOptions(modelsByProvider, allowedProviders, pickedModels),
-    [modelsByProvider, allowedProviders, pickedModels],
-  )
-
-  const allowedModels = React.useMemo(
-    () => pickedFromOptions(pickedModels, modelCandidates),
-    [pickedModels, modelCandidates],
-  )
-  const hiddenModels = hiddenSelections(allowedModels, modelCandidates)
-
-  const modelEmptyHint = modelCandidates.length
-    ? t('没有匹配的选项')
-    : allowedProviders.length
-      ? t('所选渠道暂无已发布模型，请先在模型管理中添加并关联上游模型')
-      : t('暂无已发布模型，请先在模型管理中手动添加')
-
-  /** 收尾：解除在途守卫（写两处，避免两边漂移） */
-  function stopSaving(): void {
-    savingRef.current = false
-    setSaving(false)
-  }
-
-  async function save(): Promise<void> {
-    if (savingRef.current) return
-    // 两个白名单直接用归一后的勾选（见 pickedFromOptions），字段名与取值口径都与旧实现一致
-    savingRef.current = true
-    setSaving(true)
-    setStatus(t('保存中…'))
-    try {
-      const api = shared().workbuddyDesktop
-      if (!api) throw new Error(t('后端桥不可用'))
-      if (editingId) {
-        // 只提交两个白名单：别名与启停都不动（部分更新语义，见后端 api_keys::update）
-        const next = await api.updateKey(editingId, { allowedProviders, allowedModels })
-        // 先解除守卫再关窗（旧实现同序：saving = false 在 closeModal 之前）
-        stopSaving()
-        onSaved(next)
-        onClose()
-        toast(t('✅ 可用范围已保存'))
-        return
-      }
-      const trimmedKey = keyValue.trim()
-      if (trimmedKey && trimmedKey.length < 8) {
-        setStatus(t('Key 至少需要 8 个字符'))
-        return
-      }
-      const next = await api.createKey({
-        name: name.trim(), key: trimmedKey || undefined, allowedProviders, allowedModels,
-      })
-      stopSaving()
-      onSaved(next, next?.created?.id)
-      onClose()
-      toast(t('✅ Key 已创建，记得复制给客户端'))
-    } catch (error) {
-      setStatus(t('保存失败：{reason}', { reason: errorMessage(error) }))
-    } finally {
-      stopSaving()
-    }
-  }
-
-  return (
-    <Dialog
-      open
-      onOpenChange={(next, eventDetails) => {
-        // 关闭请求（Esc / 点遮罩 / 右上角 ✕）全部汇到这里。保存中拒绝关闭必须走
-        // eventDetails.cancel()：光「不更新 open prop」拦不住 Base UI 的 store。
-        if (next) return
-        if (savingRef.current) {
-          eventDetails.cancel()
-          return
-        }
-        onClose()
-      }}
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
-            {editing
-              ? t('可用范围 · {name}', { name: target?.name || t('未命名') })
-              : t('新建 API Key')}
-          </DialogTitle>
-        </DialogHeader>
-        <DialogBody>
-          <DialogSection>
-            <div className='flex flex-wrap items-center gap-2.5'>
-              <Label htmlFor='key-name' className='text-[12.5px] whitespace-nowrap text-subtle'>{t('名称')}</Label>
-              <Input id='key-name' type='text' maxLength={60} placeholder={t('例如 Cursor / 公司电脑')}
-                autoComplete='off' value={name} disabled={editing}
-                onChange={event => setName(event.currentTarget.value)} />
-            </div>
-            {/* 编辑形态**不渲染** Key 输入行：那一行在改范围时没有意义（Key 值不可改）。
-                这里既没有常驻需求也没有状态要保，条件渲染最省事 —— 属性式显隐留给
-                节点必须常驻的场合（组件库 globals.css 的 [hidden][hidden] 已给它兜底）。 */}
-            {!editing && (
-              <div className='flex flex-wrap items-center gap-2.5'>
-                <Label htmlFor='key-value' className='text-[12.5px] whitespace-nowrap text-subtle'>Key</Label>
-                <Input id='key-value' type='text' placeholder={t('留空自动生成；手填至少 8 个字符')}
-                  autoComplete='off' spellCheck={false} value={keyValue}
-                  onChange={event => setKeyValue(event.currentTarget.value)}
-                  // 回车 = 提交（旧实现只绑在这一个输入框上）
-                  onKeyDown={event => { if (event.key === 'Enter') void save() }} />
-              </div>
-            )}
-            {/* 两个多选走组件库的 MultiSelect（受控）。宽度规则（min 180 / max 260）原先是
-                page-gateway.css 按 `#key-allowed-providers` / `#key-allowed-models` 给的，
-                而 MultiSelect 的触发器不吃 id（组件库不转发）—— 那条规则成了死规则，
-                等价的宽度锚只能自己带：flex-auto 就是旧 CSS 里的 `flex: 1 1 auto`。
-                触发器上没有可见 label 与之关联（同样没有 id 可给 htmlFor），所以 aria-label
-                必须给，否则读屏只念到一串连接起来的选项名。 */}
-            <div className='flex flex-wrap items-center gap-2.5'>
-              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用渠道')}</Label>
-              <MultiSelect
-                value={allowedProviders}
-                onValueChange={next => setPickedProviders(current => retainHiddenSelections(current, next, providerOptions))}
-                options={providerOptions}
-                placeholder={t('未选择 = 全部渠道')}
-                searchPlaceholder={t('搜索渠道…')}
-                aria-label={t('可用渠道')}
-                className='flex-auto min-w-[180px] max-w-[260px]'
-              />
-            </div>
-            <div className='flex flex-wrap items-center gap-2.5'>
-              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用模型')}</Label>
-              <MultiSelect
-                value={allowedModels}
-                onValueChange={next => setPickedModels(current => retainHiddenSelections(current, next, modelCandidates))}
-                options={modelCandidates}
-                placeholder={t('未选择 = 全部已发布模型')}
-                emptyHint={modelEmptyHint}
-                searchPlaceholder={t('搜索模型…')}
-                aria-label={t('可用模型')}
-                className='flex-auto min-w-[180px] max-w-[260px]'
-              />
-            </div>
-            <p>
-              {t('未选择渠道表示允许全部渠道；未选择模型表示允许全部已发布模型。同时选择时按交集生效。模型候选来自模型管理中手动添加的目录，并按所选渠道筛选。')}
-            </p>
-            {(hiddenProviders.length > 0 || hiddenModels.length > 0) && <div className='flex flex-col gap-2 rounded border border-border p-3'>
-              <p className='text-xs text-subtle'>{t('以下已保存的限制当前不可用，仍会保留；可手动移除。')}</p>
-              {hiddenProviders.map(id => <div key={`provider:${id}`} className='flex min-w-0 items-center justify-between gap-2 text-xs'>
-                <span className='break-all'>{t('渠道')} · {providers.find(item => item.id === id)?.label || id}</span>
-                <Button size='sm' variant='ghost' disabled={saving} aria-label={`${t('移除渠道限制')} ${id}`}
-                  onClick={() => setPickedProviders(current => current.filter(value => value !== id))}>{t('移除')}</Button>
-              </div>)}
-              {hiddenModels.map(id => <div key={`model:${id}`} className='flex min-w-0 items-center justify-between gap-2 text-xs'>
-                <span className='break-all'>{t('模型')} · {id}</span>
-                <Button size='sm' variant='ghost' disabled={saving} aria-label={`${t('移除模型限制')} ${id}`}
-                  onClick={() => setPickedModels(current => current.filter(value => value !== id))}>{t('移除')}</Button>
-              </div>)}
-            </div>}
-            {/* 当前选的摘要：多选的触发器上只显示「连接后的一行文案」，清单长了会被省略号
-                收掉 —— 勾了哪几家 / 哪些模型要在这儿摊开。id 沿用旧实现的：page-gateway.css
-                按它给这行加了上边距（它是「当前选择」而不是「使用说明」）。 */}
-            <p id='key-restrict-summary'>{restrictionSummary(allowedProviders, allowedModels,
-              id => providerOptions.find(option => option.value.toLowerCase() === id.toLowerCase())?.label || providerLabel(id))}</p>
-          </DialogSection>
-          <div className='min-h-[18px] text-[11.5px] text-muted-foreground'>{status}</div>
-        </DialogBody>
-        <DialogFooter>
-          <div className='mr-auto' />
-          <Button variant='outline' onClick={onClose} disabled={saving}>
-            {t('取消')}
-          </Button>
-          <Button variant='default' disabled={saving} onClick={() => void save()}>
-            {editing ? t('保存范围') : t('创建')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
+function restrictionTitle(key: KeyEntry, labelOf: (id: string) => string): string {
+  const channels = key.allowedProviders || []
+  const models = key.allowedModels || []
+  if (!channels.length && !models.length) return t('这把 Key 可用全部渠道与全部已发布模型')
+  return [channels.length ? t('可用渠道：{names}', { names: channels.map(labelOf).join(t('、')) }) : '',
+    models.length ? t('可用模型：{names}', { names: models.join(t('、')) }) : ''].filter(Boolean).join('\n')
 }
 
 /* ─── 页面本体 ───────────────────────────────── */
@@ -633,12 +90,11 @@ function render(): void {
 
 function KeysPage() {
   const [data, setData] = React.useState<KeysPayload | null>(null)
-  /** 已切到明文显示的 key id */
-  const [revealed, setRevealed] = React.useState<ReadonlySet<string>>(() => new Set())
+  const [search, setSearch] = React.useState('')
+  const [status, setStatus] = React.useState('all')
   /** 在途操作的行（按钮与开关禁用）；同步守卫读下面的 ref */
   const [pending, setPending] = React.useState<ReadonlySet<string>>(() => new Set())
-  /** 弹窗：null = 关着；{ key: null } = 新建 */
-  const [modal, setModal] = React.useState<{ key: KeyEntry | null } | null>(null)
+  const [modal, setModal] = React.useState<{ mode: 'create' | 'edit' | 'view' | 'scope'; key?: KeyEntry } | null>(null)
   /** 列设置改了 / 契约 render() 被调 → 强制重画（数据没变但可见列变了） */
   const [, setVersion] = React.useState(0)
 
@@ -686,15 +142,6 @@ function KeysPage() {
       pendingRef.current.delete(id)
       setPending(new Set(pendingRef.current))
     }
-  }
-
-  function toggleReveal(id: string): void {
-    setRevealed(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
   }
 
   /** 删除：原生 confirm 在 Tauri 的 WebView 里不弹窗、直接放行（等于没有确认） */
@@ -766,10 +213,11 @@ function KeysPage() {
     return option ? channelLabel(option) : channelLabel({ id, removed: true })
   }
   /** 客户端分页（通用表格外壳）：Key 通常只有几把，但口径与其它五张表保持一致 */
-  const paging = useClientPaging(keys.length, 'keys')
-  const list = paging.paged ? paging.slice(keys) : keys
+  const filtered = filterKeys(keys, search, status)
+  const paging = useClientPaging(filtered.length, 'keys')
+  const list = paging.paged ? paging.slice(filtered) : filtered
   const columns = visibleColumns()
-  const enabledCount = data?.usableKeyCount ?? keys.filter(item => item.enabled).length
+  const enabledCount = data?.usableKeyCount ?? keys.filter(item => item.enabled !== false).length
   const hasUsableKey = enabledCount > 0
   const badgeText = hasUsableKey
     ? t('已启用鉴权 · {n} 把 Key 生效', { n: enabledCount })
@@ -786,12 +234,11 @@ function KeysPage() {
           </>
         )
       case 'key': {
-        const shown = revealed.has(k.id)
         return (
           <div className='keycell'>
-            <code className='kv'>{shown ? k.key : k.masked}</code>
-            <Button size='sm' variant='ghost' onClick={() => toggleReveal(k.id)}>
-              {shown ? t('隐藏') : t('显示')}
+            <code className='kv'>{k.masked || '••••••••'}</code>
+            <Button size='sm' variant='ghost' onClick={() => setModal({ mode: 'view', key: k })}>
+              {t('查看')}
             </Button>
             {/* data-copy 是 clipboard.js 的委托钩子 */}
             <Button size='sm' variant='ghost' data-copy={k.key} title={t('复制 Key')}>{t('复制')}</Button>
@@ -804,14 +251,16 @@ function KeysPage() {
         )
       case 'state':
         return (
-          <Switch checked={k.enabled === true} disabled={busyRow}
+          <div className='inline-flex items-center gap-2'><Switch checked={k.enabled !== false} disabled={busyRow}
             aria-label={t('启用「{name}」', { name: k.name || t('未命名') })}
             onCheckedChange={next => toggleEnabled(k, next)} />
+            <span className='text-xs'>{k.enabled !== false ? t('已启用') : t('已停用')}</span></div>
         )
       case 'act':
         return (
           <div className='row-actions'>
-            <Button size='sm' variant='ghost' disabled={busyRow} onClick={() => setModal({ key: k })}>
+            <Button size='sm' variant='ghost' disabled={busyRow} onClick={() => setModal({ mode: 'edit', key: k })}>{t('编辑')}</Button>
+            <Button size='sm' variant='ghost' disabled={busyRow} onClick={() => setModal({ mode: 'scope', key: k })}>
               {t('可用范围')}
             </Button>
             <Button size='sm' variant='destructive' disabled={busyRow}
@@ -838,11 +287,21 @@ function KeysPage() {
         <div className='head-actions'>
           {/* 列设置的触发按钮由 wbColSettings.register 插进这个容器的最前面（命令式，
               与模型管理页同一手法：插入位置由那边决定，本岛只留容器） */}
-          <Button variant='default' onClick={() => setModal({ key: null })}>
+          <Button variant='default' onClick={() => setModal({ mode: 'create' })}>
             {t('＋ 新建 Key')}
           </Button>
         </div>
       </CardHeader>
+
+      <div className='flex flex-wrap items-center gap-2 border-b border-hairline px-4 py-3'>
+        <Input aria-label={t('搜索 Key')} placeholder={t('搜索 Key 名称…')} value={search} className='w-full sm:w-[260px]'
+          onChange={event => { setSearch(event.target.value); paging.goto(1) }} />
+        <Select value={status} onValueChange={value => { setStatus(value || 'all'); paging.goto(1) }} items={{ all: t('全部状态'), enabled: t('已启用'), disabled: t('已停用') }}>
+          <SelectTrigger aria-label={t('Key 状态')} className='w-[130px]'><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value='all'>{t('全部状态')}</SelectItem><SelectItem value='enabled'>{t('已启用')}</SelectItem><SelectItem value='disabled'>{t('已停用')}</SelectItem></SelectContent>
+        </Select>
+        {(search || status !== 'all') && <Button variant='ghost' onClick={() => { setSearch(''); setStatus('all'); paging.goto(1) }}>{t('重置筛选')}</Button>}
+      </div>
 
       <div className='models-table-wrap'>
         <Table container={false} className='models-table keys-table'>
@@ -861,7 +320,7 @@ function KeysPage() {
               {/* 「Key」是产品固定叫法（无中文），不进词典 */}
               <TableHead data-col='key'>Key</TableHead>
               <TableHead data-col='time'>{t('创建时间')}</TableHead>
-              <TableHead data-col='state'>{t('启用')}</TableHead>
+              <TableHead data-col='state'>{t('状态')}</TableHead>
               <TableHead className='r' data-col='act'>{t('操作')}</TableHead>
             </TableRow>
           </TableHeader>
@@ -869,7 +328,7 @@ function KeysPage() {
             {list.length ? list.map(k => {
               const busyRow = pending.has(k.id)
               return (
-                <TableRow key={k.id} className={k.enabled ? '' : 'off'} data-id={k.id}>
+                <TableRow key={k.id} className={k.enabled !== false ? '' : 'off'} data-id={k.id}>
                   {columns.map(column => (
                     <TableCell key={column.key} className={`${CELL_CLASS[column.key] ?? ''} ta-${column.align}`}>
                       {cell(column.key, k, busyRow)}
@@ -882,7 +341,7 @@ function KeysPage() {
               // 两格，把整张表顶出横向滚动
               <TableRow>
                 <TableCell colSpan={columns.length} className='empty'>
-                  {data ? t('没有可用的 API Key，请先在「网关 Key」页创建并启用') : t('加载中…')}
+                  {data ? keys.length ? t('没有匹配的 Key') : t('没有可用的 API Key，请先在「网关 Key」页创建并启用') : t('加载中…')}
                 </TableCell>
               </TableRow>
             )}
@@ -906,7 +365,7 @@ function KeysPage() {
             {t('（行内「可用范围」）：未选择渠道 = 全部渠道，未选择模型 = 全部已发布模型，两项同时设置时按交集生效。模型来自手动目录；删除渠道不会自动扩大已有 Key 的权限。')}
           </span>
         )}
-        total={keys.length}
+        total={filtered.length}
         range={paging.paged ? { start: paging.rangeStart, end: paging.rangeEnd } : null}
         page={paging.page}
         pageCount={paging.pageCount}
@@ -915,15 +374,19 @@ function KeysPage() {
         onPageChange={paging.goto}
       />
 
-      {modal ? (
-        <KeyModal
+      {modal?.mode === 'view' && modal.key ? <KeyViewDialog target={modal.key} onClose={() => setModal(null)} /> : modal ? (
+        <KeyEditorDialog
+          key={`${modal.mode}:${modal.key?.id || 'new'}`}
+          mode={modal.mode as 'create' | 'edit' | 'scope'}
           target={modal.key}
+          api={shared().workbuddyDesktop}
           providers={providersOf(data)}
           modelsByProvider={modelsByProviderOf(data)}
           onClose={() => setModal(null)}
-          onSaved={(next, revealId) => {
-            if (revealId) setRevealed(prev => new Set(prev).add(revealId))
+          onSaved={next => {
             accept(next)
+            setModal(next?.created ? { mode: 'view', key: next.created } : null)
+            toast(modal.mode === 'create' ? t('✅ Key 已创建，记得复制给客户端') : modal.mode === 'scope' ? t('✅ 可用范围已保存') : t('Key 已更新'))
           }}
         />
       ) : null}

@@ -5,8 +5,8 @@ import { test } from 'node:test'
 import ts from 'typescript'
 
 // Exercise the page's real pure selectors without mounting React or a browser.
-const source = readFileSync(new URL('./keys-page.tsx', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(`${source}\nexport { modelOptions, pickedFromOptions, channelOptions, retainHiddenSelections };`, {
+const source = readFileSync(new URL('./keys-data.ts', import.meta.url), 'utf8')
+const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const context = {
@@ -17,6 +17,27 @@ const context = {
 vm.runInNewContext(compiled, context)
 const { modelOptions, pickedFromOptions, channelOptions, retainHiddenSelections } = context.exports
 const plain = value => JSON.parse(JSON.stringify(value))
+
+test('name search and status filters combine without losing enabled legacy records', () => {
+  assert.equal(typeof context.exports.filterKeys, 'function', 'Key list needs a combined name/status filter')
+  const rows = [
+    { id: 'alpha', name: 'Office ALPHA', enabled: true },
+    { id: 'beta', name: 'Office Beta', enabled: false },
+    { id: 'legacy', name: 'Office Legacy' },
+    { id: 'home', name: 'Home', enabled: true },
+  ]
+  const filter = context.exports.filterKeys
+  assert.deepEqual(plain(filter(rows, ' office ', 'enabled').map(item => item.id)), ['alpha', 'legacy'])
+  assert.deepEqual(plain(filter(rows, 'OFFICE', 'disabled').map(item => item.id)), ['beta'])
+  assert.deepEqual(plain(filter(rows, 'absent', 'all')), [])
+  assert.deepEqual(plain(filter(rows, '', 'all').map(item => item.id)), ['alpha', 'beta', 'legacy', 'home'])
+})
+
+test('selecting or clearing available results keeps hidden permissions unchanged', () => {
+  const options = [{ value: 'public-a', label: 'A' }, { value: 'public-b', label: 'B' }]
+  assert.deepEqual(plain(retainHiddenSelections(['deleted-model'], ['public-a', 'public-b'], options)), ['public-a', 'public-b', 'deleted-model'])
+  assert.deepEqual(plain(retainHiddenSelections(['public-a', 'deleted-model'], [], options)), ['deleted-model'])
+})
 
 test('saving a missing selected channel never clears the last channel restriction', () => {
   assert.deepEqual(plain(pickedFromOptions(['custom-deleted'], [{ value: 'live', label: 'Live' }])), ['custom-deleted'])

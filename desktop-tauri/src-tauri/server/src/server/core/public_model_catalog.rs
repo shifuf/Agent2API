@@ -25,6 +25,14 @@ pub struct CatalogModel {
     pub id: String,
     pub name: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub model_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, rename = "modelCard", skip_serializing_if = "Option::is_none")]
+    pub model_card: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -226,6 +234,167 @@ struct SourceModel {
     kind: Option<String>,
     #[serde(default)]
     family: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default, rename = "modelCard")]
+    model_card: Option<serde_json::Value>,
+    #[serde(flatten)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+    // Old normalized caches have kind but no explicit type. Preserve that shape
+    // while allowing newly downloaded records to expose their richer metadata.
+    #[serde(skip)]
+    cached_kind: Option<String>,
+}
+
+fn metadata_text(value: Option<&str>, limit: usize) -> Option<String> {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.chars().count() <= limit
+                && !value.chars().any(char::is_control)
+        })
+        .map(str::to_string)
+}
+
+fn model_card(source: &SourceModel) -> Option<serde_json::Value> {
+    use serde_json::{Map, Value};
+    let cached = source.model_card.as_ref().and_then(Value::as_object);
+    let field = |public: &str, original: &str| {
+        cached
+            .and_then(|card| card.get(public))
+            .or_else(|| source.metadata.get(original))
+    };
+    let mut card = Map::new();
+    for (public, original) in [
+        ("toolCall", "tool_call"),
+        ("temperature", "temperature"),
+        ("vision", "vision"),
+    ] {
+        if let Some(value) = field(public, original).and_then(Value::as_bool) {
+            card.insert(public.into(), value.into());
+        }
+    }
+    if let Some(reasoning) = field("reasoning", "reasoning").and_then(Value::as_object) {
+        let values: Map<_, _> = ["supported", "default"]
+            .into_iter()
+            .filter_map(|key| {
+                reasoning
+                    .get(key)
+                    .and_then(Value::as_bool)
+                    .map(|value| (key.into(), value.into()))
+            })
+            .collect();
+        if !values.is_empty() {
+            card.insert("reasoning".into(), values.into());
+        }
+    }
+    let list = |value: &Value| -> Option<Value> {
+        let values = value.as_array()?;
+        Some(Value::Array(
+            values
+                .iter()
+                .filter_map(|value| metadata_text(value.as_str(), 64))
+                .take(16)
+                .map(Value::String)
+                .collect(),
+        ))
+    };
+    if let Some(modalities) = field("modalities", "modalities").and_then(Value::as_object) {
+        let values: Map<_, _> = ["input", "output"]
+            .into_iter()
+            .filter_map(|key| {
+                modalities
+                    .get(key)
+                    .and_then(list)
+                    .map(|value| (key.into(), value))
+            })
+            .collect();
+        if !card.contains_key("vision") {
+            if let Some(input) = values.get("input").and_then(Value::as_array) {
+                card.insert(
+                    "vision".into(),
+                    input.iter().any(|value| value == "image").into(),
+                );
+            }
+        }
+        if !values.is_empty() {
+            card.insert("modalities".into(), values.into());
+        }
+    }
+    if let Some(efforts) = field("reasoningEfforts", "reasoningEfforts").and_then(list) {
+        card.insert("reasoningEfforts".into(), efforts);
+    } else if let Some(options) = source
+        .metadata
+        .get("reasoning_options")
+        .and_then(Value::as_array)
+    {
+        let mut seen = HashSet::new();
+        let efforts: Vec<_> = options
+            .iter()
+            .filter(|option| option.get("type").and_then(Value::as_str) == Some("effort"))
+            .filter_map(|option| option.get("values").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|value| metadata_text(value.as_str(), 64))
+            .filter(|value| seen.insert(value.clone()))
+            .take(16)
+            .map(Value::String)
+            .collect();
+        if !efforts.is_empty() {
+            card.insert("reasoningEfforts".into(), efforts.into());
+        }
+    }
+    if let Some(cost) = field("cost", "cost").and_then(Value::as_object) {
+        let mut values = Map::new();
+        for (public, original) in [
+            ("input", "input"),
+            ("output", "output"),
+            ("cacheRead", "cache_read"),
+            ("cacheWrite", "cache_write"),
+        ] {
+            if let Some(value) = cost
+                .get(public)
+                .or_else(|| cost.get(original))
+                .filter(|value| {
+                    value.as_f64().is_some_and(|number| {
+                        number.is_finite() && (0.0..=1_000_000_000.0).contains(&number)
+                    })
+                })
+            {
+                values.insert(public.into(), value.clone());
+            }
+        }
+        if !values.is_empty() {
+            card.insert("cost".into(), values.into());
+        }
+    }
+    if let Some(limit) = field("limit", "limit").and_then(Value::as_object) {
+        let values: Map<_, _> = ["context", "output"]
+            .into_iter()
+            .filter_map(|key| {
+                limit
+                    .get(key)
+                    .filter(|value| {
+                        value
+                            .as_u64()
+                            .is_some_and(|number| number <= 1_000_000_000_000)
+                    })
+                    .map(|value| (key.into(), value.clone()))
+            })
+            .collect();
+        if !values.is_empty() {
+            card.insert("limit".into(), values.into());
+        }
+    }
+    for (public, original) in [
+        ("knowledge", "knowledge"),
+        ("releaseDate", "release_date"),
+        ("lastUpdated", "last_updated"),
+    ] {
+        if let Some(value) = metadata_text(field(public, original).and_then(Value::as_str), 64) {
+            card.insert(public.into(), value.into());
+        }
+    }
+    (!card.is_empty()).then_some(Value::Object(card))
 }
 
 fn label<'a>(values: &[Option<&'a str>], fallback: &'a str) -> String {
@@ -469,7 +638,15 @@ fn developer_catalog(source: BTreeMap<String, SourceProvider>) -> Vec<CatalogPro
                     &[raw_model.display_name.as_deref(), raw_model.name.as_deref()],
                     &model_id,
                 ),
-                kind: label(&[raw_model.kind.as_deref()], "chat"),
+                kind: label(
+                    &[raw_model.cached_kind.as_deref(), raw_model.kind.as_deref()],
+                    "chat",
+                ),
+                family: metadata_text(raw_model.family.as_deref(), 128),
+                model_type: metadata_text(raw_model.kind.as_deref(), 64)
+                    .map(|kind| kind.replace('-', "_")),
+                icon: metadata_text(raw_model.icon.as_deref(), 128),
+                model_card: model_card(&raw_model),
                 id: model_id,
             });
         }
@@ -566,8 +743,12 @@ async fn read_cache(path: &Path) -> Option<CatalogSnapshot> {
                                 id: Some(model.id),
                                 name: Some(model.name),
                                 display_name: None,
-                                kind: Some(model.kind),
-                                family: None,
+                                kind: model.model_type,
+                                cached_kind: Some(model.kind),
+                                family: model.family,
+                                icon: model.icon,
+                                model_card: model.model_card,
+                                metadata: Default::default(),
                             })
                             .collect(),
                     },
@@ -630,6 +811,55 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = CatalogCache::new(dir.path().join("public-model-catalog.json"));
         (dir, cache)
+    }
+
+    #[tokio::test]
+    async fn catalog_metadata_survives_parsing_and_offline_cache_normalization() {
+        let source = br#"{"providers":{"openai":{"name":"OpenAI","models":[{
+            "id":"Exact/Model","display_name":"Catalog model","type":"chat","family":"gpt",
+            "icon":"OpenAI","reasoning":{"supported":true,"default":false},
+            "reasoning_options":[{"type":"effort","values":["low","high"]}],
+            "tool_call":true,"temperature":false,"modalities":{"input":["text","image"],"output":["text"]},
+            "cost":{"input":2,"output":8,"cache_read":0.2,"cache_write":2.5},
+            "limit":{"context":200000,"output":16000},"knowledge":"2026-01",
+            "release_date":"2026-03-01","last_updated":"2026-04-01"
+        }]}}}"#;
+        let parsed = parse_catalog(source).unwrap();
+        let item = serde_json::to_value(&parsed.providers[0].models[0]).unwrap();
+        assert_eq!(item["family"], "gpt");
+        assert_eq!(item["type"], "chat");
+        assert_eq!(item["icon"], "OpenAI");
+        assert_eq!(
+            item["modelCard"]["reasoningEfforts"],
+            serde_json::json!(["low", "high"])
+        );
+        assert_eq!(item["modelCard"]["cost"]["cacheRead"], 0.2);
+        assert_eq!(item["modelCard"]["limit"]["output"], 16000);
+        assert_eq!(item["modelCard"]["vision"], true);
+        assert_eq!(item["modelCard"]["releaseDate"], "2026-03-01");
+        let (_dir, cache) = cache();
+        write_cache(&cache.path, &parsed).await.unwrap();
+        let restored = read_cache(&cache.path).await.unwrap();
+        assert_eq!(restored.providers, parsed.providers);
+    }
+
+    #[tokio::test]
+    async fn normalized_model_type_does_not_change_legacy_kind_on_cache_read() {
+        let parsed = parse_catalog(
+            br#"{"providers":{"openai":{"models":[{
+            "id":"image-model","type":"image-generation","family":"image-family"
+        }]}}}"#,
+        )
+        .unwrap();
+        let item = serde_json::to_value(&parsed.providers[0].models[0]).unwrap();
+        assert_eq!(item["kind"], "image-generation");
+        assert_eq!(item["type"], "image_generation");
+        let (_dir, cache) = cache();
+        write_cache(&cache.path, &parsed).await.unwrap();
+        assert_eq!(
+            read_cache(&cache.path).await.unwrap().providers,
+            parsed.providers
+        );
     }
 
     #[test]

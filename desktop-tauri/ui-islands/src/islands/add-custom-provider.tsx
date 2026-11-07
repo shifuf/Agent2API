@@ -83,6 +83,8 @@ export const REMOVE_BUTTON_ID = 'custom-existing-remove'
 /** 提交互斥锁：弹窗内的提交不占用账号列表的 busy 锁（与内置家的 addBusy 同一取向） */
 let submitBusy = false
 let activeCreatePreset: string | undefined
+const createFieldDrafts = new Map<string, { name: string; baseUrl: string; protocol: string; noAuth: boolean }>()
+const createDraftId = (presetKey: string) => `create-channel:${presetKey || 'custom'}`
 
 const protocolOptions = (): Array<{ value: string; label: string }> =>
   shared().wbProviders?.PROTOCOL_OPTIONS || FALLBACK_PROTOCOLS
@@ -241,6 +243,28 @@ function NoAuthCheckbox({
 
 export type CustomMode = 'create' | 'existing'
 
+export function ChannelProviderSelector({ presetKey, onSelect }: { presetKey: string; onSelect: (key: string) => void }) {
+  const [search, setSearch] = React.useState('')
+  const presets = shared().wbPresetProviders?.list || []
+  return <nav className='channel-provider-selector' aria-label={t('API 提供商')}>
+    <strong className='text-sm'>{t('API 提供商')}</strong>
+    <Input value={search} onChange={event => setSearch(event.target.value)} placeholder={t('搜索提供商')} aria-label={t('搜索提供商')} />
+    <div className='channel-provider-options'>
+      <Button variant={presetKey ? 'ghost' : 'outline'} className='channel-provider-option' data-channel-template=''
+        aria-pressed={!presetKey} onClick={() => onSelect('')}>{t('自定义提供商')}</Button>
+      {presets.filter(preset => preset.name.toLowerCase().includes(search.trim().toLowerCase())).map(preset => {
+        const icon = shared().wbPresetProviders?.iconOf?.(preset.key)
+        return <Button key={preset.key} variant={presetKey === preset.key ? 'outline' : 'ghost'}
+          className='channel-provider-option' data-channel-template={preset.key} aria-pressed={presetKey === preset.key}
+          onClick={() => onSelect(preset.key)}>
+          {icon && <img src={icon} alt='' className='h-5 w-5 shrink-0 object-contain' />}
+          <span>{preset.name}</span>
+        </Button>
+      })}
+    </div>
+  </nav>
+}
+
 export function CustomProviderBlock({
   mode,
   providerHint,
@@ -276,24 +300,27 @@ export function CustomProviderBlock({
   const selfHosted = mode === 'create' && Boolean(presetKey) && !shared().wbPresetProviders?.presetOf?.(presetKey)?.baseUrl
 
   React.useEffect(() => {
-    if (mode !== 'create' || !presetKey) return
-    const preset = shared().wbPresetProviders?.presetOf?.(presetKey)
-    if (!preset) return
-    const presetNoAuth = preset.account?.noAuth === true
+    if (mode !== 'create') return
+    const preset = presetKey ? shared().wbPresetProviders?.presetOf?.(presetKey) : undefined
+    if (presetKey && !preset) return
+    const presetNoAuth = preset?.account?.noAuth === true
     const restoreDraft = activeCreatePreset === presetKey
+    if (!restoreDraft && activeCreatePreset !== undefined) {
+      createFieldDrafts.set(activeCreatePreset, { name: readField(NAME_ID), baseUrl: readField(BASEURL_ID),
+        protocol: readField(PROTOCOL_ID) || options[0].value, noAuth: readNoAuthDraft(NOAUTH_ID) })
+    }
     activeCreatePreset = presetKey
     if (!restoreDraft) {
-      setDraftValue(NAME_ID, preset.baseUrl ? preset.name : '')
-      setDraftValue(BASEURL_ID, preset.baseUrl || '')
-      if (preset.protocol) {
-        setProtocol(preset.protocol)
-        setDraftValue(PROTOCOL_ID, preset.protocol)
-      }
-      setNoAuth(presetNoAuth)
-      writeNoAuthDraft(NOAUTH_ID, presetNoAuth)
+      const previous = createFieldDrafts.get(presetKey)
+      setDraftValue(NAME_ID, previous?.name ?? (preset?.baseUrl ? preset.name : ''))
+      setDraftValue(BASEURL_ID, previous?.baseUrl ?? preset?.baseUrl ?? '')
+      setProtocol(previous?.protocol || preset?.protocol || options[0].value)
+      setDraftValue(PROTOCOL_ID, previous?.protocol || preset?.protocol || options[0].value)
+      setNoAuth(previous?.noAuth ?? presetNoAuth)
+      writeNoAuthDraft(NOAUTH_ID, previous?.noAuth ?? presetNoAuth)
     }
-    setBaseHintOverride(readField(PROTOCOL_ID) === preset.protocol ? preset.hint || '' : '')
-    setBasePlaceholderOverride(preset.placeholder || '')
+    setBaseHintOverride(readField(PROTOCOL_ID) === preset?.protocol ? preset?.hint || '' : '')
+    setBasePlaceholderOverride(preset?.placeholder || '')
     // showToken 仍刷新模板提示；只有切换模板或成功提交后才重置用户输入。
   }, [mode, presetKey, providerHint, showToken])
 
@@ -413,7 +440,7 @@ export function CustomProviderBlock({
         </div>
         <div data-channel-section='keys' className='mt-5 scroll-mt-4'>
           {noAuth ? <p className='text-xs text-subtle'>{t('不需要 Key：转发与拉取模型都不发送鉴权头')}</p>
-            : <ChannelKeyGroups key={`create-${showToken}`} draftId='create-channel'
+            : <ChannelKeyGroups key={`create-${presetKey}-${showToken}`} draftId={createDraftId(presetKey)} fieldPrefix='create-channel'
               baseUrl={() => readField(BASEURL_ID)} protocol={() => readField(PROTOCOL_ID) || protocol} />}
         </div>
       </DialogSection>
@@ -551,20 +578,21 @@ async function submitCreate(context: FootContext, allowDuplicate = false, target
     if (balanceQuery) payload.balanceQuery = balanceQuery
     // 两个凭证字段互斥（后端也这么归一）：勾了无需鉴权就不带 apiKey 上去
     if (noAuth) payload.noAuth = true
-    else payload.keyGroups = readChannelGroups('create-channel')
+    else payload.keyGroups = readChannelGroups(createDraftId(context.presetKey))
     context.setHint('')
     try {
       if (target && !noAuth) {
         const existing = await shared().wbProviders?.customRequest?.('GET', '/api/custom-providers') as {providers?:Array<{id:string;keyGroups?:KeyGroupDraft[]}>}
         const groups = existing.providers?.find(item => item.id === target.id)?.keyGroups || []
         payload.id = target.id
-        payload.keyGroups = [...groups.map(group => ({ ...group, apiKeys: [] })), ...readChannelGroups('create-channel')]
+        payload.keyGroups = [...groups.map(group => ({ ...group, apiKeys: [] })), ...readChannelGroups(createDraftId(context.presetKey))]
       } else if (target && apiKey) payload.apiKey = apiKey
       const data = (await shared().wbProviders?.customRequest?.(
         'POST', target ? noAuth ? '/api/accounts' : '/api/custom-providers/update' : '/api/custom-providers', payload,
       )) as { provider?: { name?: string }; account?: { name?: string }; created?: boolean } | null
       clearFields([NAME_ID, BASEURL_ID, APIKEY_ID])
-      clearChannelGroups('create-channel')
+      clearChannelGroups(createDraftId(context.presetKey))
+      createFieldDrafts.delete(context.presetKey)
       activeCreatePreset = undefined
       clearBalanceFields(scheme, BALANCE_CREATE_PREFIX)
       // 勾选框与草稿一起复位（下次进来是干净的默认态，不被上一家预勾影响）

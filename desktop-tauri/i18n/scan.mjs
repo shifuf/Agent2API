@@ -87,7 +87,7 @@ const DOMAIN_RULES = [
   // 对话页、工具集、设置面板三块
   { domain: 'assistant', files: ['AssistantPage.tsx', 'AssistantHistory.tsx', 'AssistantModelPicker.tsx', 'assistant.ts', 'assistantTools.ts', 'MarkdownLite.tsx'], prefixes: ['assistant-'] },
   { domain: 'update', files: ['upgrade-panel.js', 'GithubAccessSettings.tsx', 'RequiredUpdateGate.tsx', 'updates.ts', 'github-access-editor.tsx'], prefixes: ['update-'] },
-  { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx', 'model-api-key.ts', 'model-api-key-field.tsx', 'model-api-key-memory.ts', 'use-model-api-keys.ts'] },
+  { domain: 'keys', files: ['keys-page.tsx', 'KeysPage.tsx', 'model-api-key.ts', 'model-api-key-field.tsx', 'model-api-key-memory.ts', 'use-model-api-keys.ts'], prefixes: ['keys-'] },
   { domain: 'proxies', files: ['proxies-kernel-dialog.tsx', 'proxies-kernel-import.tsx', 'proxies-sub-state.ts', 'proxies-sub-view.tsx', 'KernelImportSheet.tsx', 'kernel-import.ts', 'proxy-usage.ts', 'ProxiesPage.tsx', 'proxies-page.tsx', 'proxies-columns.ts', 'proxies-state.ts', 'proxies-dialogs.tsx', 'proxy-editor-sheet.tsx', 'sponsor.ts'] },
   { domain: 'docs', files: ['docs-page.tsx', 'DocsPage.tsx', 'DocsProviderData.ts', 'provider-docs-view.tsx'], prefixes: ['docs-provider-', 'docs-api-'] },
   { domain: 'report', files: ['report-page.tsx', 'report-charts.ts', 'ReportPage.tsx', 'HomePage.tsx', 'chart-data.ts', 'chart-labels.tsx', 'chart-tooltips.tsx', 'report-recharts.tsx', 'source-stats.tsx', 'api-key-detail.tsx', 'daily-trend-panel.tsx', 'SourceUsageSection.tsx', 'MobileReportTrend.tsx'] },
@@ -137,7 +137,7 @@ function islandSources() {
   walk(ISLANDS_SRC)
   if (fs.existsSync(SHARED_SRC)) {
     for (const entry of fs.readdirSync(SHARED_SRC, { withFileTypes: true })) {
-      if (entry.isFile() && (entry.name === 'logs.ts' || entry.name === 'credit-expiry.ts' || entry.name === 'credential-expiry.ts' || entry.name === 'usage-readings.ts' || entry.name === 'usage-query-state.ts' || entry.name === 'zcode-plans.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || entry.name === 'kernel-import.ts' || entry.name === 'proxy-usage.ts' || /^(assistant-|agent-|docs-api-|model-api-key|client-identification).*\.tsx?$/.test(entry.name))) {
+      if (entry.isFile() && (entry.name === 'logs.ts' || entry.name === 'credit-expiry.ts' || entry.name === 'credential-expiry.ts' || entry.name === 'usage-readings.ts' || entry.name === 'usage-query-state.ts' || entry.name === 'zcode-plans.ts' || entry.name === 'use-model-api-keys.ts' || entry.name === 'updates.ts' || entry.name === 'kernel-import.ts' || entry.name === 'proxy-usage.ts' || /^(assistant-|agent-|docs-api-|models-|public-model-|model-api-key|client-identification).*\.tsx?$/.test(entry.name))) {
         out.push(path.join(SHARED_SRC, entry.name))
       }
     }

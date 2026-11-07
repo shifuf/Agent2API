@@ -153,6 +153,25 @@ try {
 
 
   await nav('accounts');
+  await step('accounts page opens the custom channel editor directly with provider choices', async () => {
+    await desktop.getByRole('button', { name: '添加自定义渠道', exact: true }).click();
+    await desktop.getByRole('navigation', { name: 'API 提供商', exact: true }).waitFor();
+    await desktop.locator('[data-channel-template="openai"]').click();
+    assert.equal(await desktop.locator('#custom-baseurl-input').inputValue(), 'https://api.openai.com/v1');
+    await desktop.locator('[data-channel-template=""]').click();
+    await desktop.locator('#custom-name-input').fill('Dormant channel');
+    await desktop.locator('#custom-baseurl-input').fill(`${upstreamBase}/dormant`);
+    await desktop.locator('#create-channel-0-keys').fill('smoke-dormant-key');
+    await desktop.getByText('尚未选择模型，可先保存渠道，稍后配置模型。', { exact: true }).waitFor();
+    await desktop.locator('#custom-create-button').click();
+    await desktop.locator('#custom-name-input').waitFor({ state: 'hidden' });
+    const provider = (await api('/api/custom-providers')).providers.find(item => item.name === 'Dormant channel');
+    assert(provider, 'A credentialed channel with no models must be saved');
+    assert.deepEqual(provider.models, []);
+    assert.deepEqual(provider.keyGroups[0].models, []);
+    assert.equal(provider.keyGroups[0].accountIds.length, 1);
+    assert.deepEqual(await api('/v1/models'), []);
+  });
   await desktop.getByRole('button', { name: /添加账号/ }).first().click();
   await desktop.locator('[data-provider="preset:openai"]').click();
 
@@ -160,6 +179,8 @@ try {
   const modelPanel = desktop.locator('[data-channel-panel="models"]:visible');
   const keyPanel = desktop.locator('[data-channel-panel="keys"]:visible');
   const group = index => form.locator(`[data-channel-group="${index}"]:visible`);
+  const modelGroup = index => form.locator(`[data-channel-model-group="${index}"]:visible`);
+  const selectedModels = async index => (await modelGroup(index).locator('code').allTextContents()).join('\n');
   const assertCentered = async locator => {
     await locator.waitFor();
     await pause(300);
@@ -176,6 +197,10 @@ try {
     await assertCentered(form);
     assert.equal(await form.locator('[data-channel-panel]:visible').count(), 0);
     await form.getByRole('heading', { name: '添加渠道', exact: true }).waitFor();
+    await form.locator('[data-channel-models]').waitFor();
+    assert.equal(await group(0).getByRole('button', { name: '选择模型', exact: true }).count(), 0,
+      'Credential editing must not contain model controls');
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).waitFor();
     await screenshot(desktop, 'channel-dialog-create');
   });
 
@@ -197,6 +222,11 @@ try {
     assert.equal(await desktop.locator('#create-channel-1-keys').inputValue(), 'smoke-key-c');
     assert.equal(await desktop.locator('#custom-name-input').inputValue(), 'Panel smoke channel');
     assert.equal(await desktop.locator('#custom-baseurl-input').inputValue(), upstreamBase);
+    await desktop.locator('[data-channel-template="anthropic"]').click();
+    assert.equal(await keys.inputValue(), '', 'Switching provider must not copy another provider\'s keys');
+    await desktop.locator('[data-channel-template="openai"]').click();
+    assert.equal(await keys.inputValue(), 'smoke-key-a\nsmoke-key-b');
+    assert.equal(await desktop.locator('#custom-name-input').inputValue(), 'Panel smoke channel');
   });
 
   await step('group Key inspection expands beside the centered form and Escape returns focus', async () => {
@@ -219,9 +249,9 @@ try {
   });
 
   await step('fetched models require confirmation and search actions leave canceled drafts unchanged', async () => {
-    await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+    await modelGroup(0).getByRole('button', { name: '获取模型', exact: true }).click();
     await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
-    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
+    assert.equal(await selectedModels(0), '');
     assert.equal(await modelPanel.getByRole('checkbox', { checked: true }).count(), 0, 'Fetching must not select models');
     await modelPanel.getByRole('textbox', { name: '搜索模型', exact: true }).fill('shared');
     assert.equal(await modelPanel.getByRole('checkbox').count(), 1);
@@ -233,7 +263,7 @@ try {
     await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).click();
     await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
     await modelPanel.waitFor({ state: 'hidden' });
-    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
+    assert.equal(await selectedModels(0), '');
   });
 
   await step('late model discovery cannot replace another group selection or reopen a dismissed panel', async () => {
@@ -247,15 +277,15 @@ try {
         await gate;
         await route.continue();
       }, { times: 1 });
-      await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+      await modelGroup(0).getByRole('button', { name: '获取模型', exact: true }).click();
       await received;
       return async () => {
         release();
-        await group(0).getByRole('button', { name: '获取模型', exact: true }).waitFor();
+        await modelGroup(0).getByRole('button', { name: '获取模型', exact: true }).waitFor();
       };
     };
     let finish = await delayDiscovery();
-    await group(1).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelGroup(1).getByRole('button', { name: '选择模型', exact: true }).click();
     await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Pending/B-draft');
     await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
     await finish();
@@ -263,7 +293,7 @@ try {
       'Late discovery must preserve the other group\'s tentative selection');
     assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).count(), 0);
     await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
-    await group(1).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelGroup(1).getByRole('button', { name: '选择模型', exact: true }).click();
     finish = await delayDiscovery();
     await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Active/B-draft');
     await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
@@ -272,7 +302,7 @@ try {
       'Editing an already-open panel must supersede an unrelated pending discovery');
     await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
     finish = await delayDiscovery();
-    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).click();
     await desktop.keyboard.press('Escape');
     await finish();
     assert.equal(await modelPanel.count(), 0, 'Late discovery must not reopen a dismissed panel');
@@ -280,8 +310,8 @@ try {
   });
 
   await step('each credential retains its own fetched candidates after closing and reopening', async () => {
-    await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
-    await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+    await modelGroup(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
+    await modelGroup(0).getByRole('button', { name: '获取模型', exact: true }).click();
     await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).waitFor();
     assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).count(), 0);
     await desktop.keyboard.press('Escape');
@@ -290,13 +320,13 @@ try {
     await desktop.keyboard.press('Escape');
     await desktop.getByRole('button', { name: /添加账号/ }).first().click();
     await desktop.locator('[data-provider="preset:openai"]').click();
-    assert.equal(await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).inputValue(), 'new:1');
-    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    assert.equal(await modelGroup(0).getByRole('combobox', { name: '用于获取模型的 Key' }).inputValue(), 'new:1');
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).click();
     await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).waitFor();
     assert.equal(await modelPanel.getByRole('checkbox', { checked: true }).count(), 0);
     await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
-    await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:0');
-    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelGroup(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:0');
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).click();
     await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
     assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).count(), 0);
     await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
@@ -305,39 +335,67 @@ try {
   await step('refresh failure preserves fetched candidates and leaves selection unchanged', async () => {
     await desktop.route('**/api/custom-providers/fetch-models', route => route.fulfill({ status: 200,
       contentType: 'application/json', body: JSON.stringify({ success: false, error: 'Expected discovery failure' }) }), { times: 1 });
-    await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+    await modelGroup(0).getByRole('button', { name: '获取模型', exact: true }).click();
     await form.getByText('Expected discovery failure', { exact: true }).waitFor();
-    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
-    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    assert.equal(await selectedModels(0), '');
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).click();
     await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
     await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
   });
 
   await step('changing the endpoint invalidates an open model selection before it is applied', async () => {
-    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).click();
     await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).click();
     await desktop.locator('#custom-baseurl-input').fill(`${upstreamBase}/changed`);
     await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
     await form.getByText('Base URL、协议或 Key 已变化，请重新获取模型。', { exact: true }).waitFor();
-    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
+    assert.equal(await selectedModels(0), '');
     await desktop.locator('#custom-baseurl-input').fill(upstreamBase);
   });
 
-  await step('creation saves explicitly selected group models and exact custom IDs without publishing them', async () => {
-    await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
-    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
-    await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).click();
+  await step('fetching all groups keeps model sources separate and requires confirmation', async () => {
+    await modelGroup(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
+    await form.getByRole('button', { name: '获取全部分组模型', exact: true }).click();
+    await modelPanel.getByRole('heading', { name: '全部分组模型', exact: true }).waitFor();
+    assert.equal(await selectedModels(0), '');
+    assert.equal(await selectedModels(1), '');
+    await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).check();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).check();
     await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
-    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), 'upstream-b');
-    await group(1).getByRole('button', { name: '获取模型', exact: true }).click();
+    assert.equal(await selectedModels(0), 'upstream-b');
+    assert.equal(await selectedModels(1), 'upstream-a');
+  });
+
+  await step('a failed group fetch preserves its selection while other groups remain selectable', async () => {
+    const partialFailure = route => route.request().postDataJSON()?.apiKey === 'smoke-key-c'
+      ? route.fulfill({ json: { success: false, error: 'Expected group discovery failure' } }) : route.continue();
+    await desktop.route('**/api/custom-providers/fetch-models', partialFailure);
+    try {
+      await form.getByRole('button', { name: '获取全部分组模型', exact: true }).click();
+      await form.getByText(/Expected group discovery failure/).waitFor();
+      await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).waitFor();
+      assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).count(), 0);
+      await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
+      assert.equal(await selectedModels(0), 'upstream-b');
+      assert.equal(await selectedModels(1), 'upstream-a');
+    } finally { await desktop.unroute('**/api/custom-providers/fetch-models', partialFailure); }
+  });
+
+  await step('creation saves explicitly selected group models and exact custom IDs without publishing them', async () => {
+    await modelGroup(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).check();
+    await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
+    assert.equal(await selectedModels(0), 'upstream-b');
+    await modelGroup(1).getByRole('button', { name: '获取模型', exact: true }).click();
     await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
     assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).count(), 0);
-    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).check();
     await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Custom/Case-v1');
     await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
     await screenshot(desktop, 'channel-dialog-models');
     await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
-    assert.equal(await desktop.locator('#create-channel-1-models').inputValue(), 'upstream-a\nCustom/Case-v1');
+    assert.equal(await selectedModels(1), 'upstream-a\nCustom/Case-v1');
     await desktop.locator('#custom-create-button').click();
     await desktop.locator('#custom-name-input').waitFor({ state: 'hidden' });
     const saved = await api('/api/custom-providers');
@@ -357,13 +415,15 @@ try {
     await desktop.getByRole('button', { name: /添加账号/ }).first().click();
     await desktop.locator('button[data-provider="' + results.providerId + '"]').click();
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).click();
-    const editor = desktop.locator('[role="dialog"]').filter({ has: desktop.locator('[id="edit-channel-' + results.providerId + '-0-models"]') }).last();
+    const editor = desktop.locator('[role="dialog"]').filter({ has: desktop.getByRole('heading', { name: /编辑渠道/ }) }).last();
     await assertCentered(editor);
     await editor.getByRole('heading', { name: /编辑渠道/ }).waitFor();
-    const models = desktop.locator('[id="edit-channel-' + results.providerId + '-0-models"]');
-    await models.fill('upstream-b\nshared-model');
+    await editor.locator('[data-channel-model-group="0"]').getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('shared-model');
+    await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
+    await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
     await editor.getByRole('button', { name: '保存', exact: true }).click();
-    await models.waitFor({ state: 'hidden' });
+    await editor.waitFor({ state: 'hidden' });
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).waitFor();
     const provider = (await api('/api/custom-providers')).providers.find(item => item.id === results.providerId);
     assert.deepEqual(provider.keyGroups[0].models, ['upstream-b', 'shared-model']);
@@ -374,13 +434,18 @@ try {
   await step('nested editor preserves drafts and its backdrop closes only its own layer', async () => {
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).click();
     await desktop.getByRole('heading', { name: /编辑渠道/ }).waitFor();
-    const models = desktop.locator('[id="edit-channel-' + results.providerId + '-0-models"]');
-    await models.fill('upstream-b\nshared-model\nCustom/Edit-draft');
+    const editor = desktop.locator('[role="dialog"]').filter({ has: desktop.getByRole('heading', { name: /编辑渠道/ }) }).last();
+    const models = editor.locator('[data-channel-model-group="0"]');
+    await models.getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Custom/Edit-draft');
+    await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
+    await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
     await desktop.mouse.click(1350, 500);
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).waitFor();
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).click();
-    assert.equal(await models.inputValue(), 'upstream-b\nshared-model\nCustom/Edit-draft');
-    const editor = desktop.locator('[role="dialog"]').filter({ has: models }).last();
+    // Reopening fetches the saved provider before mounting its retained group draft.
+    await models.waitFor({ state: 'visible' });
+    assert.deepEqual(await models.locator('code').allTextContents(), ['upstream-b', 'shared-model', 'Custom/Edit-draft']);
     await editor.locator('[data-channel-group="0"]').getByRole('button', { name: '查看分组 Key', exact: true }).click();
     assert.equal(await keyPanel.getByRole('combobox', { name: '移动到分组' }).count(), 2);
     await desktop.keyboard.press('Escape');
@@ -415,7 +480,7 @@ try {
     await desktop.locator('#custom-name-input').fill('Narrow window draft');
     await pause(300);
     await assertCentered(form);
-    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelGroup(0).getByRole('button', { name: '选择模型', exact: true }).click();
     await modelPanel.waitFor();
     await assertCentered(form);
     assert.equal(await form.evaluate(node => node.scrollWidth > node.clientWidth), false, 'Dialog horizontally overflows');
@@ -424,7 +489,7 @@ try {
     await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Narrow/Custom-ID');
     await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
     await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
-    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), 'Narrow/Custom-ID');
+    assert.equal(await selectedModels(0), 'Narrow/Custom-ID');
     await screenshot(desktop, 'channel-dialog-narrow');
   });
 

@@ -1,6 +1,6 @@
-import type { ManagedModel } from './managed-models'
+import type { ManagedModel, ModelCard, ModelType } from './managed-models'
 
-export type PublicModel = { id: string; name: string; kind: string }
+export type PublicModel = { id: string; name: string; kind: string; family?: string; type?: ModelType; icon?: string; modelCard?: ModelCard }
 export type PublicProvider = { id: string; name: string; models: PublicModel[] }
 export type PublicModelCatalog = {
   providers: PublicProvider[]; sourceUrl: string; fetchedAt: string; updatedAt: string; stale: boolean; error?: string

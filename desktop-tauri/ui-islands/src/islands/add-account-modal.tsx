@@ -40,7 +40,7 @@ import {
   WORKBUDDY_PROVIDER,
   configOf,
 } from './add-account-configs'
-import { CustomFootActions, CustomProviderBlock, type CustomMode } from './add-custom-provider'
+import { ChannelProviderSelector, CustomFootActions, CustomProviderBlock, type CustomMode } from './add-custom-provider'
 import { ChannelDialogContent } from './channel-dialog'
 import { ImportFootActions, ImportPanel } from './add-provider-import'
 import {
@@ -323,7 +323,9 @@ function AddAccountModal({
         </Dialog>
         {/* 两种表单各自常驻，登录引擎与渠道草稿均由原来的生命周期保留。 */}
         <Dialog open={state.step === 'form' && isCustom} onOpenChange={next => { if (!next) backToPick() }}>
-          <ChannelDialogContent keepMounted title={heading} open={state.step === 'form' && isCustom} scope={String(state.showToken)}
+          <ChannelDialogContent keepMounted title={heading} open={state.step === 'form' && isCustom} scope={`${state.showToken}-${state.presetKey}`}
+            sidebar={customMode === 'create' ? <ChannelProviderSelector presetKey={state.presetKey}
+              onSelect={presetKey => setState(previous => ({ ...previous, presetKey }))} /> : undefined}
             description={state.presetKey ? t('使用 {name} 模板新建提供商', { name: customLabel }) : undefined}
             footer={<div className='acct-add-foot-host'>
               <CustomFootActions mode={customMode} presetKey={state.presetKey} providerId={state.providerHint} />

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Alert, Badge, Button, Input, Label } from '@ui'
-import { modelCandidates, type CandidateOrigin, type ModelSource, type PublicModel, type PublicModelCatalog } from './public-model-catalog'
+import { modelCandidates, type CandidateOrigin, type ModelCandidate, type ModelSource, type PublicModel, type PublicModelCatalog } from './public-model-catalog'
 import type { ManagedModel } from './managed-models'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
@@ -26,13 +26,13 @@ export function usePublicModelCatalog(request: CatalogRequest) {
   return { catalog, loading, error, refresh }
 }
 
-export function PublicModelPicker({ state, selectedId, disabled, sources = [], saved = [], onSelect, t }: {
+export function PublicModelPicker({ state, selectedId, disabled, sources = [], saved = [], initialManufacturer = '', onSelect, t }: {
   state: ReturnType<typeof usePublicModelCatalog>; selectedId: string; disabled?: boolean
-  sources?: ModelSource[]; saved?: ManagedModel[]
-  onSelect: (model: PublicModel, existing?: ManagedModel) => void; t: Translate
+  sources?: ModelSource[]; saved?: ManagedModel[]; initialManufacturer?: string
+  onSelect: (model: PublicModel, existing?: ManagedModel, candidate?: ModelCandidate) => void; t: Translate
 }) {
   const id = useId()
-  const [manufacturer, setManufacturer] = useState('')
+  const [manufacturer, setManufacturer] = useState(initialManufacturer)
   const [origin, setOrigin] = useState<CandidateOrigin | ''>('')
   const [query, setQuery] = useState('')
   const [limit, setLimit] = useState(60)
@@ -85,7 +85,7 @@ export function PublicModelPicker({ state, selectedId, disabled, sources = [], s
     <div className='max-h-52 min-w-0 overflow-y-auto rounded-md border border-border bg-surface' aria-busy={loading}>
       {rows.slice(0, limit).map(({ provider, model, origins, labels, existing }) => <button type='button' key={model.id}
         disabled={disabled} aria-label={`${provider.name || t('已有自定义模型')} / ${model.id}`} aria-pressed={selectedId === model.id}
-        onClick={() => onSelect(model, existing)}
+        onClick={() => onSelect(model, existing, { provider, model, origins, labels, existing })}
         className='flex w-full items-start gap-2 border-b border-hairline px-3 py-2 text-left text-sm last:border-b-0 hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 aria-pressed:bg-surface-2 disabled:opacity-50'>
         <span className='min-w-0 flex-1'><span className='block break-all font-mono'>{model.id}</span>
           <span className='block break-words text-xs text-subtle'>{labels.length ? `${labels.join(' · ')} · ` : ''}{model.name}</span>

@@ -460,6 +460,8 @@ function AccountsPage() {
                 shared().wbAddAccountModal?.open?.()
                 shared().wbAccountAddForms?.syncAddProvider?.()
               }}>{t('添加账号')}</Button>
+            <Button id='btn-add-custom-channel' variant='outline'
+              onClick={() => shared().wbAccountAddForms?.openNewCustomForm?.()}>{t('添加自定义渠道')}</Button>
             <Button id='btn-query-usage' variant='outline'
               disabled={store.usageBusy || !all.some(supportsUsage)}
               title={t('查询全部账号的余额（含已禁用账号 —— 禁用只表示不参与转发）')}
