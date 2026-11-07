@@ -27,7 +27,7 @@ Escolha a linha que corresponde à sua máquina:
 | **Desktop Linux** | `Agent2API_<versão>_amd64.deb` ou `Agent2API_<versão>_amd64.AppImage` | Janela do app | O deb instala no sistema (requer webkit2gtk-4.1 / gtk3); o AppImage é um único arquivo autossuficiente que roda em qualquer distribuição |
 | **Servidor Windows** (sem GUI) | `agent2api-server-windows-amd64.zip` | **Painel no navegador** | Instalação por linha de comando, registrado como serviço do Windows — veja [Servidor](#servidor-windows--linux-sem-interface) |
 | **Servidor Linux** (sem GUI) | `agent2api-server-linux-<arch>.tar.gz` | **Painel no navegador** | Instalação por linha de comando, sob systemd; o mesmo pacote também é o payload da atualização dentro do contêiner |
-| **Docker** | `aimodcc/agent2api:latest` | **Painel no navegador** | Imagens amd64 / arm64, veja [Implantação com Docker](#docker) |
+| **Docker** | `ghcr.io/shifuf/agent2api:latest` | **Painel no navegador** | Imagens amd64 / arm64, veja [Implantação com Docker](#docker) |
 
 > Qual escolher: **você tem um desktop** (quer bandeja, iniciar com o sistema, importar o estado de login local) → app de desktop;
 > **o servidor não tem interface gráfica** (Windows Server / servidor Linux) → o pacote de servidor;
@@ -159,12 +159,21 @@ No Linux coloque-as em `/etc/agent2api/agent2api.env`; no Windows edite a chave 
 
 ## Docker
 
-Tags da imagem: `latest` acompanha a versão estável mais recente, enquanto `beta` acompanha a pré-versão beta mais recente. Use uma versão completa, como `3.3.0-beta.3`, para fixá-la. Para usar beta, troque `aimodcc/agent2api:latest` por `aimodcc/agent2api:beta` no comando ou na configuração do Compose abaixo; atualize com `docker compose pull && docker compose up -d`. Versões beta não alteram `latest`, e builds manuais de desenvolvimento atualizam apenas `dev`. A mesma imagem também é publicada no GitHub Container Registry: troque o nome da imagem por `ghcr.io/aimod-cc/agent2api` (as regras de tag são idênticas).
+Este fork publica imagens em `ghcr.io/shifuf/agent2api`. Um push em `main` atualiza `latest`; um push em `beta` atualiza `beta`. Cada build também publica `sha-<SHA completo do commit>` para fixar a versão. Execute **Docker package** manualmente no Actions: main/beta atualizam a tag correspondente; outras branches atualizam apenas `dev`. As imagens oferecem amd64 / arm64 e recompilam o painel desktop, login, interface móvel e traduções a partir do código.
+
+O workflow publica no GHCR com o `GITHUB_TOKEN` deste repositório, sem credenciais do Docker Hub ou do builder upstream. Em outro fork, o caminho muda automaticamente para `ghcr.io/<proprietário>/<repositório>`, em minúsculas. Ative Actions, envie o código e confira **Actions → Docker package**. Para permitir pull anônimo após a primeira publicação, altere a visibilidade do pacote para Public. O workflow publica somente pacotes de contêiner; não cria tags Git ou GitHub Releases nem altera números de versão.
+
+O Compose do repositório aceita `AGENT2API_IMAGE` (padrão `ghcr.io/shifuf/agent2api`) e `AGENT2API_VERSION` (padrão `latest`). As variáveis selecionam a imagem e não são passadas ao aplicativo. Baixe e implante:
+
+```bash
+docker compose up -d --pull always --no-build
+AGENT2API_VERSION=beta docker compose up -d --pull always --no-build
+```
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 Abra `http://<host>:3065` no navegador: a primeira visita guia o **cadastro do administrador**; depois de entrar, crie uma API key na página "Gateway Keys" para os clientes — `http://<host>:3065/v1` é o endpoint compatível com OpenAI (sem nenhuma chave ele recusa o encaminhamento). Todo o estado (banco SQLite / configuração / logs) fica em um único volume `./data`.
@@ -174,7 +183,7 @@ Para quem usa compose (há imagens amd64 e arm64):
 ```yaml
 services:
   agent2api:
-    image: aimodcc/agent2api:latest
+    image: ghcr.io/shifuf/agent2api:latest
     container_name: agent2api
     restart: unless-stopped
     ports:
@@ -192,12 +201,12 @@ Variáveis de ambiente (todas opcionais):
 | `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | Endereço de escuta (padrão `0.0.0.0`) / porta (padrão `3065`) |
 | `AGENT2API_ALLOW_NO_KEY` | `1` desativa o fail-closed (serve `/v1` mesmo sem chave configurada — só para redes internas) |
 | `AGENT2API_CAPTCHA_ENABLED` | Widget de verificação humana na tela de login: `1` ativado (padrão), `0` desativado |
-| `AGENT2API_SELF_UPDATE` | Ponto de atualização dentro do contêiner: `1` ativado por padrão (o painel oferece "Baixar e atualizar"); `0` desativa e deixa apenas a atualização manual |
+| `AGENT2API_SELF_UPDATE` | Atualização interna: este fork usa `0` por padrão; atualize pelo Compose com sua própria imagem. Configure sua fonte de Release antes de habilitar explicitamente com `1` |
 | `AGENT2API_IMAGE_CACHE_MB` | Limite do cache em memória de download das imagens geradas (MiB, padrão `128`, faixa 8–4096). Valores inválidos ou fora da faixa voltam ao padrão |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | Limite do cache em memória do resultado da compactação de imagens de sessão (MiB, padrão `128`, faixa 8–4096, mesmas regras) |
 | `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | Avançado: aponte "verificar atualizações / baixar atualizações" para a sua própria fonte. O primeiro troca o repositório (por padrão segue o upstream `aimod-cc/Agent2API`; em fork, sobrescreva), o segundo troca a raiz da API (padrão `https://api.github.com`; deve devolver um JSON de release no formato do GitHub). Com uma fonte própria configurada, a lista de permissões de download passa a aceitar, além disso, apenas **o próprio host dessa fonte** (o esquema segue a fonte: uma fonte `http://` também permite download em texto puro — só para ensaios locais / espelhos internos) |
 
-Compilar a partir do código: clone o repositório e rode `docker compose up -d --build` (a imagem contém apenas o gateway e o painel, sem toolchain Rust).
+Para compilar do código, clone este repositório e execute `docker compose up -d --build --pull never`. O Dockerfile instala dependências pelos lockfiles e recompila a interface. A imagem final contém o gateway e o painel, sem as toolchains Node ou Rust.
 
 ### Uso de memória
 
@@ -209,7 +218,7 @@ Em máquinas com pouca memória, vale limitar a memória do contêiner: ao ultra
 # docker run
 docker run -d --name agent2api --restart unless-stopped --memory=1g \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 No compose, adicione `mem_limit: 1g` ao serviço (há um exemplo comentado no `docker-compose.yml`); em swarm ou `docker compose --compatibility`, use `deploy.resources.limits.memory`. Encare o 1g como ponto de partida e ajuste à sua concorrência.
@@ -222,7 +231,9 @@ Ajustes de alocador glibc como `MALLOC_ARENA_MAX=2` só fazem sentido em builds 
 
 ### Atualização dentro do contêiner (opcional)
 
-A página "Atualização de software" do painel consegue baixar e aplicar atualizações de dentro do contêiner: busca `agent2api-server-linux-<arch>.tar.gz` no Release oficial (validando o `.sha256`), substitui o executável e a pasta `ui/` e encerra o processo de forma graciosa, para que a política de `restart` suba o mesmo contêiner de novo. Controlado por `AGENT2API_SELF_UPDATE` (`1` no Dockerfile); defina `0` para atualizar apenas manualmente.
+Este fork usa `AGENT2API_SELF_UPDATE=0` por padrão. Atualize com `docker compose up -d --pull always --no-build`, preservando `./data`. O código em execução corresponde à tag da imagem e seus recursos não são substituídos por um Release upstream.
+
+Se precisar de atualizações internas, defina explicitamente `AGENT2API_SELF_UPDATE=1` e aponte `WORKBUDDY_UPDATE_REPO` / `WORKBUDDY_UPDATE_API_BASE` para sua própria fonte de releases. O painel baixa `agent2api-server-linux-<arch>.tar.gz`, verifica `.sha256`, substitui o executável e `ui/` e usa a política restart para iniciar o novo processo.
 
 O mesmo `agent2api-server-linux-<arch>.tar.gz` também é o pacote de instalação do [servidor Linux](#linux-systemd): os itens `agent2api-server` e `ui/` são exatamente o que a cadeia de atualização lê pelo nome, e ele ainda traz `install.sh` / `agent2api.service` / `agent2api.env.example`. A cadeia de atualização lê apenas os dois primeiros (o resto é descartado — veja `selfupdate::extract_bundle`), então um artefato serve aos dois propósitos: extrair e substituir dentro do contêiner, extrair e rodar `install.sh` em máquina física.
 

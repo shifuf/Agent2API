@@ -18,6 +18,34 @@
 # 编译时刻，cargo 的增量判断会误判「没变」而跳过重编，所以真源码层先
 # find touch 再编。
 
+FROM --platform=$BUILDPLATFORM node:22-bookworm AS ui-builder
+WORKDIR /build
+
+# The checked-in `ui/` directory is a generated deployment artifact. Build it
+# in the image so a local compose build and the published image both include
+# the current React/TypeScript sources instead of whatever artifact happened to
+# be present in the checkout.
+COPY desktop-tauri/ui-kit/package.json desktop-tauri/ui-kit/package-lock.json ui-kit/
+COPY desktop-tauri/ui-islands/package.json desktop-tauri/ui-islands/package-lock.json ui-islands/
+COPY desktop-tauri/mobile/package.json desktop-tauri/mobile/package-lock.json mobile/
+COPY desktop-tauri/i18n/package.json desktop-tauri/i18n/package-lock.json i18n/
+RUN npm --prefix ui-kit ci \
+    && npm --prefix ui-islands ci \
+    && npm --prefix mobile ci \
+    && npm --prefix i18n ci
+
+COPY desktop-tauri/ui-kit ui-kit
+COPY desktop-tauri/ui-islands ui-islands
+COPY desktop-tauri/mobile/src mobile/src
+COPY desktop-tauri/mobile/public mobile/public
+COPY desktop-tauri/mobile/tsconfig.json desktop-tauri/mobile/vite.config.ts mobile/
+COPY desktop-tauri/i18n i18n
+COPY desktop-tauri/ui-shared ui-shared
+COPY desktop-tauri/ui ui
+RUN npm --prefix ui-islands run build \
+    && npm --prefix mobile run build \
+    && npm --prefix i18n run build
+
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 WORKDIR /build
 
@@ -58,10 +86,10 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 RUN { echo '#!/bin/sh -e'; \
       echo 'cd /build/src-tauri'; \
       echo 'if [ "$TARGETARCH" = "arm64" ]; then'; \
-      echo '  cargo build --release -p agent2api-server --target aarch64-unknown-linux-gnu --target-dir /build/target'; \
+      echo '  cargo build --locked --release -p agent2api-server --target aarch64-unknown-linux-gnu --target-dir /build/target'; \
       echo '  cp /build/target/aarch64-unknown-linux-gnu/release/agent2api-server /build/agent2api-server'; \
       echo 'else'; \
-      echo '  cargo build --release -p agent2api-server --target-dir /build/target'; \
+      echo '  cargo build --locked --release -p agent2api-server --target-dir /build/target'; \
       echo '  cp /build/target/release/agent2api-server /build/agent2api-server'; \
       echo 'fi'; \
     } > /build/cargo-build.sh && chmod +x /build/cargo-build.sh
@@ -87,7 +115,7 @@ COPY desktop-tauri/src-tauri/server/build.rs src-tauri/server/
 #
 # 放在这一层而不是桩依赖层：这些文件与源码一起变，缓存失效的时机一致；
 # 放进桩层会让「只改了一行 Rust」也把整棵依赖树重编一遍。
-COPY desktop-tauri/ui ui
+COPY --from=ui-builder /build/ui ui
 RUN cd src-tauri \
     && find server/src -type f -exec touch {} + \
     && touch server/build.rs \
@@ -116,20 +144,20 @@ RUN cd src-tauri \
 #   musl 静态（那样就与发行版彻底解耦），不要跟着运行时一起换代。
 FROM scratch AS bundle
 COPY --from=builder /build/agent2api-server /bundle/agent2api-server
-COPY desktop-tauri/ui /bundle/ui
+COPY --from=ui-builder /build/ui /bundle/ui
 COPY LICENSE /bundle/LICENSE
 COPY licenses/ /bundle/licenses/
 
 # ── 运行时 ──────────────────────────────────────────────────
 # bookworm-slim + ca-certificates（出站 HTTPS）+ curl（HEALTHCHECK）。
 # 网关链的是 rustls（纯 Rust），运行时没有任何额外的共享库要求。
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/agent2api-server /usr/local/bin/agent2api-server
-COPY desktop-tauri/ui /app/ui
+COPY --from=ui-builder /build/ui /app/ui
 COPY LICENSE /app/LICENSE
 COPY licenses/ /app/licenses/
 
@@ -142,12 +170,13 @@ COPY licenses/ /app/licenses/
 # 由 restart 策略拉起**同一个容器**（可写层保留，刚换上去的版本随之生效）。
 # 容器以 root 运行、可写层可写，这条路才成立；裸机 / systemd 部署不要设这个
 # 变量（那里退出进程等于把服务停掉，见 core/update/selfupdate.rs 的模块头）。
-# 想关掉容器内的更新入口（例如自行管理镜像版本），把它设成 0 即可。
+# 此 fork 默认关闭容器内自更新，避免运行中的容器被上游 Release 覆盖。
+# 需要时可通过 compose 环境变量显式打开，并将更新源指向自己维护的 Release。
 ENV AGENT2API_HOST=0.0.0.0 \
     AGENT2API_PROXY_HOME=/data \
     AGENT2API_UI_DIR=/app/ui \
     AGENT2API_CAPTCHA_ENABLED=1 \
-    AGENT2API_SELF_UPDATE=1
+    AGENT2API_SELF_UPDATE=0
 VOLUME ["/data"]
 EXPOSE 3065
 WORKDIR /app

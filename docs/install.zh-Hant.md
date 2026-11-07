@@ -27,7 +27,7 @@
 | **Linux 桌面端** | `Agent2API_<版本>_amd64.deb` 或 `Agent2API_<版本>_amd64.AppImage` | 應用程式視窗 | deb 裝進系統（依賴 webkit2gtk-4.1 / gtk3）；AppImage 免安裝單檔，任何發行版可用 |
 | **Windows 伺服器端**（無 GUI） | `agent2api-server-windows-amd64.zip` | **瀏覽器面板** | 命令列安裝、註冊成 Windows 服務，見 [伺服器端](#伺服器端windows--linux無介面) |
 | **Linux 伺服器端**（無 GUI） | `agent2api-server-linux-<arch>.tar.gz` | **瀏覽器面板** | 命令列安裝、systemd 代管；同一個包也是容器內更新載荷 |
-| **Docker** | `aimodcc/agent2api:latest` | **瀏覽器面板** | amd64 / arm64 雙架構，見 [Docker 部署](#docker) |
+| **Docker** | `ghcr.io/shifuf/agent2api:latest` | **瀏覽器面板** | amd64 / arm64 雙架構，見 [Docker 部署](#docker) |
 
 > 選哪個：**自己有桌面**（要系統匣、開機自動啟動、本機登入狀態匯入）→ 桌面端；
 > **伺服器上沒有圖形介面**（Windows Server / Linux 伺服器）→ 伺服器端包；
@@ -175,12 +175,21 @@ Linux 寫在 `/etc/agent2api/agent2api.env`；Windows 改服務登錄檔的
 
 ## Docker
 
-映像標籤：`latest` 跟隨最新正式版，`beta` 跟隨最新 beta 預發布版；也可使用完整版本號（例如 `3.3.0-beta.3`）固定版本。要使用 beta，將下方命令或 Compose 設定中的 `aimodcc/agent2api:latest` 改為 `aimodcc/agent2api:beta`；更新時執行 `docker compose pull && docker compose up -d`。beta 發布不會改動 `latest`，手動開發建置只更新 `dev`。同一份映像也同步發布在 GitHub Container Registry：把映像名稱換成 `ghcr.io/aimod-cc/agent2api` 即可，標籤規則完全相同。
+此 fork 的映像發布到 `ghcr.io/shifuf/agent2api`。推送至 `main` 後更新 `latest`，推送至 `beta` 後更新 `beta`；每次建置也會發布 `sha-<完整提交 SHA>`，可用來固定版本。Actions 頁的 **Docker package** 可手動建置：選擇 main/beta 更新對應標籤，其他分支只更新 `dev`。映像包含 amd64 / arm64 兩種架構，建置時重新產生桌面、登入頁、手機端和多語言資源。
+
+工作流程使用目前儲存庫的 `GITHUB_TOKEN` 發布至 GHCR，不需要 Docker Hub 或上游建置儲存庫的金鑰。fork 至其他帳號後，映像路徑自動變為 `ghcr.io/<帳號>/<儲存庫名稱>`（全小寫）。首次啟用儲存庫的 Actions 並推送程式碼後，在 **Actions → Docker package** 查看結果；若需匿名拉取，請在套件設定中將可見性改為 Public。此工作流程只發布容器套件，不建立 tag 或 GitHub Release，也不修改版本號。
+
+本儲存庫的 Compose 檔案支援 `AGENT2API_IMAGE`（預設 `ghcr.io/shifuf/agent2api`）與 `AGENT2API_VERSION`（預設 `latest`）；兩項僅用於選擇映像，不傳入應用程式。拉取並部署：
+
+```bash
+docker compose up -d --pull always --no-build
+AGENT2API_VERSION=beta docker compose up -d --pull always --no-build
+```
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 瀏覽器開啟 `http://<主機>:3065`，首次進入會引導**註冊管理員帳號**；登入後在「閘道 Key」頁建立一把 API Key 給客戶端用 —— `http://<主機>:3065/v1` 即 OpenAI 相容端點（未建立 Key 前拒絕轉發）。所有狀態（SQLite 資料庫 / 設定 / 日誌）都落在 `./data` 一個卷裡。
@@ -190,7 +199,7 @@ compose 使用者（amd64 / arm64 都有映像）：
 ```yaml
 services:
   agent2api:
-    image: aimodcc/agent2api:latest
+    image: ghcr.io/shifuf/agent2api:latest
     container_name: agent2api
     restart: unless-stopped
     ports:
@@ -208,12 +217,12 @@ services:
 | `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | 監聽位址（預設 `0.0.0.0`）/ 連接埠（預設 `3065`） |
 | `AGENT2API_ALLOW_NO_KEY` | 設 `1` 關閉 fail-closed（未設 Key 也放行 `/v1`，僅限純內網） |
 | `AGENT2API_CAPTCHA_ENABLED` | 登入頁人機驗證元件：預設 `1` 開啟，`0` 關閉 |
-| `AGENT2API_SELF_UPDATE` | 容器內的更新入口：預設 `1` 開啟（面板可「下載並更新」）；設 `0` 關閉，只走手動升級 |
+| `AGENT2API_SELF_UPDATE` | 容器內的更新入口：此 fork 預設 `0` 關閉，使用 Compose 拉取自己的映像升級；明確設為 `1` 前應將更新來源設為自己的 Release |
 | `AGENT2API_IMAGE_CACHE_MB` | 生成圖片的下載記憶體快取上限（MiB，預設 `128`，範圍 8~4096）。寫壞 / 越界回落預設值 |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | 工作階段圖片壓縮結果的記憶體快取上限（MiB，預設 `128`，範圍 8~4096，口徑同上） |
 | `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | 進階：把「檢查更新 / 下載更新」換成自建源。前者換儲存庫（預設跟上游 `aimod-cc/Agent2API`，fork 後可改），後者換 API 根（預設 `https://api.github.com`，需返回與 GitHub 同形的 release JSON）。配了自建源後，下載白名單只額外放行**該源自己的網域**（按源的 scheme：配 `http://` 就允許明文下載，僅建議本地演練 / 內網映像用） |
 
-從原始碼建置：複製本專案後 `docker compose up -d --build`（映像裡只有閘道與面板，不含 Rust 工具鏈）。
+從原始碼建置：複製本儲存庫後執行 `docker compose up -d --build --pull never`。Dockerfile 依 lock 檔安裝相依套件並重建前端，最終映像只包含閘道和面板，不含 Node / Rust 工具鏈。
 
 ### 記憶體佔用
 
@@ -225,7 +234,7 @@ services:
 # docker run
 docker run -d --name agent2api --restart unless-stopped --memory=1g \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 compose 使用者在服務裡加一行 `mem_limit: 1g`（`docker-compose.yml` 已附註解示例）；swarm 或 `docker compose --compatibility` 用 `deploy.resources.limits.memory`。1g 只是起點，依實際併發量調整。
@@ -238,7 +247,9 @@ compose 使用者在服務裡加一行 `mem_limit: 1g`（`docker-compose.yml` �
 
 ### 容器內更新（選用）
 
-面板的「軟體更新」頁在容器裡能直接「下載並更新」：下載官方 Release 裡的 `agent2api-server-linux-<arch>.tar.gz`（校驗 `.sha256`）→ 替換執行檔與 `ui/` → 行程優雅結束、由 `restart` 策略拉起同一個容器。由 `AGENT2API_SELF_UPDATE` 控制（Dockerfile 預設 `1`），設為 `0` 則只走手動升級。
+此 fork 預設設定 `AGENT2API_SELF_UPDATE=0`，透過 `docker compose up -d --pull always --no-build` 更新容器並保留 `./data`。映像標籤與執行程式碼因此保持一致，也避免將自行維護的功能替換成上游 Release。
+
+若需要容器內原地更新，可明確設定 `AGENT2API_SELF_UPDATE=1`，並將 `WORKBUDDY_UPDATE_REPO` / `WORKBUDDY_UPDATE_API_BASE` 指向自行維護的發布來源。面板會下載 `agent2api-server-linux-<arch>.tar.gz` 並驗證 `.sha256`，替換執行檔與 `ui/`，再由 restart 策略啟動新行程。
 
 同一個 `agent2api-server-linux-<arch>.tar.gz` 也是 [Linux 伺服器端](#linuxsystemd) 的安裝包：包內的 `agent2api-server` 與 `ui/` 是這條更新鏈按名取得的項目，另外還帶著 `install.sh` / `agent2api.service` / `agent2api.env.example`。容器更新鏈只認前兩個項目（其餘讀完即丟，見 `selfupdate::extract_bundle`），所以一份產物同時服務兩種用途 —— 容器裡解包替換，裸機上解包跑 `install.sh`。
 

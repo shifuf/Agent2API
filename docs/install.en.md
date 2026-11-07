@@ -27,7 +27,7 @@ Releases ship the artifacts below; pick the row that matches your machine:
 | **Linux desktop** | `Agent2API_<version>_amd64.deb` or `Agent2API_<version>_amd64.AppImage` | App window | deb installs system-wide (needs webkit2gtk-4.1 / gtk3); the AppImage is a single self-contained file that runs on any distro |
 | **Windows server** (no GUI) | `agent2api-server-windows-amd64.zip` | **Browser panel** | Command-line install, registered as a Windows service — see [Server](#server-windows--linux-headless) |
 | **Linux server** (no GUI) | `agent2api-server-linux-<arch>.tar.gz` | **Browser panel** | Command-line install, run under systemd; the same package is also the in-container update payload |
-| **Docker** | `aimodcc/agent2api:latest` | **Browser panel** | amd64 / arm64 images — see [Docker](#docker) |
+| **Docker** | `ghcr.io/shifuf/agent2api:latest` | **Browser panel** | amd64 / arm64 images — see [Docker](#docker) |
 
 > Which one: **you have a desktop** (want the tray, launch-at-login, local login-state import) → the desktop app;
 > **the server has no graphical interface** (Windows Server / a Linux box) → the server package;
@@ -159,12 +159,21 @@ On Linux put them in `/etc/agent2api/agent2api.env`; on Windows edit the service
 
 ## Docker
 
-Image tags: `latest` follows the latest stable release, while `beta` follows the latest beta prerelease. Use a full version such as `3.3.0-beta.3` to pin a version. To use beta, replace `aimodcc/agent2api:latest` with `aimodcc/agent2api:beta` in the command or Compose configuration below; update with `docker compose pull && docker compose up -d`. Beta releases never move `latest`, and manual development builds only update `dev`. The same image is also published to the GitHub Container Registry: replace the image name with `ghcr.io/aimod-cc/agent2api` (the tag rules are identical).
+This fork publishes images to `ghcr.io/shifuf/agent2api`. A push to `main` updates `latest`; a push to `beta` updates `beta`. Every build also publishes `sha-<full commit SHA>` for pinning. Run **Docker package** manually from Actions to build a selected branch: main/beta update their matching tag, and other branches update only `dev`. Images support amd64 / arm64 and rebuild the desktop panel, login page, mobile UI and translations from source.
+
+The workflow publishes to GHCR with this repository’s `GITHUB_TOKEN`; no Docker Hub or upstream builder credentials are needed. In another fork the path automatically becomes `ghcr.io/<owner>/<repository>` in lowercase. Enable Actions and push code, then check **Actions → Docker package**. To allow anonymous pulls after the first publication, change the package visibility to Public. The workflow publishes container packages only; it creates no Git tag or GitHub Release and does not change version numbers.
+
+The repository Compose file accepts `AGENT2API_IMAGE` (default `ghcr.io/shifuf/agent2api`) and `AGENT2API_VERSION` (default `latest`). These select the image and are not passed to the application. Pull and deploy:
+
+```bash
+docker compose up -d --pull always --no-build
+AGENT2API_VERSION=beta docker compose up -d --pull always --no-build
+```
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 Open `http://<host>:3065` in a browser — the first visit walks you through **registering the admin account**; log in and create an API key in the "Gateway Keys" page for your clients — `http://<host>:3065/v1` is the OpenAI-compatible endpoint (it refuses to forward until the first key exists). All state (SQLite database / config / logs) lives in the `./data` volume.
@@ -174,7 +183,7 @@ Compose users (images are published for amd64 and arm64):
 ```yaml
 services:
   agent2api:
-    image: aimodcc/agent2api:latest
+    image: ghcr.io/shifuf/agent2api:latest
     container_name: agent2api
     restart: unless-stopped
     ports:
@@ -192,12 +201,12 @@ Environment variables (all optional):
 | `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | Listen address (default `0.0.0.0`) / port (default `3065`) |
 | `AGENT2API_ALLOW_NO_KEY` | Set to `1` to serve `/v1` without any key — private networks only |
 | `AGENT2API_CAPTCHA_ENABLED` | Login-page human verification widget: `1` enabled (default), `0` disabled |
-| `AGENT2API_SELF_UPDATE` | In-container update entry: `1` enabled by default (the panel offers "Download and update"); set `0` to upgrade manually only |
+| `AGENT2API_SELF_UPDATE` | In-container update entry: this fork defaults to `0`; update by pulling your own image with Compose. Configure your own Release source before explicitly enabling it with `1` |
 | `AGENT2API_IMAGE_CACHE_MB` | Upper bound of the in-memory download cache for generated images (MiB, default `128`, range 8–4096). Invalid or out-of-range values fall back to the default |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | Upper bound of the in-memory cache for compressed session images (MiB, default `128`, range 8–4096, same rules) |
 | `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | Advanced: point update checks/downloads at your own source. The first swaps the repository (defaults to the upstream `aimod-cc/Agent2API`; forks should override it), the second swaps the API root (default `https://api.github.com`, must return a GitHub-shaped release JSON). With a custom source set, the download allowlist additionally admits only **that source's own host** (scheme follows the source: an `http://` source also allows plaintext downloads — for local drills / internal mirrors only) |
 
-Build from source: clone the repo and run `docker compose up -d --build` (the image contains only the gateway and the panel, no Rust toolchain).
+Build from source: clone this repository and run `docker compose up -d --build --pull never`. The Dockerfile installs dependencies from lockfiles and rebuilds the UI. The final image contains the gateway and panel, without the Node or Rust toolchains.
 
 ### Memory usage
 
@@ -209,7 +218,7 @@ On small machines, cap the container's memory: when it goes over, the kernel kil
 # docker run
 docker run -d --name agent2api --restart unless-stopped --memory=1g \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 For compose, add `mem_limit: 1g` to the service (a commented example is in `docker-compose.yml`); on swarm or `docker compose --compatibility`, use `deploy.resources.limits.memory`. Treat 1g as a starting point and tune it to your concurrency.
@@ -222,7 +231,9 @@ glibc allocator tuning such as `MALLOC_ARENA_MAX=2` only matters for builds **wi
 
 ### In-container updates (optional)
 
-The panel's "Software update" page can download and apply updates from inside the container: it fetches `agent2api-server-linux-<arch>.tar.gz` from the official Release (verifying the `.sha256`), replaces the executable and `ui/`, then exits gracefully so the `restart` policy brings the same container back up. Controlled by `AGENT2API_SELF_UPDATE` (set to `1` in the Dockerfile); set it to `0` to upgrade manually only.
+This fork defaults to `AGENT2API_SELF_UPDATE=0`. Update with `docker compose up -d --pull always --no-build`, retaining `./data`. The running code then matches the image tag and your maintained features are not replaced with an upstream Release.
+
+If you need in-place container updates, explicitly set `AGENT2API_SELF_UPDATE=1` and point `WORKBUDDY_UPDATE_REPO` / `WORKBUDDY_UPDATE_API_BASE` at your own release source. The panel downloads `agent2api-server-linux-<arch>.tar.gz`, verifies `.sha256`, replaces the executable and `ui/`, then relies on the restart policy to start the new process.
 
 The same `agent2api-server-linux-<arch>.tar.gz` is also the installer package for the [Linux server](#linux-systemd): its `agent2api-server` and `ui/` entries are exactly what the update chain reads by name, and it additionally ships `install.sh` / `agent2api.service` / `agent2api.env.example`. The update chain only reads the first two (the rest are discarded — see `selfupdate::extract_bundle`), so one artifact serves both purposes: unpack and replace inside a container, unpack and run `install.sh` on a bare-metal host.
 

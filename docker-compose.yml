@@ -1,6 +1,7 @@
 # Agent2API 部署（单容器：默认一个 3065 端口，既是管理面板也是 OpenAI 兼容网关）。
 #
-#   docker compose up -d --build
+#   docker compose up -d --pull always --no-build  # 拉取已发布镜像
+#   docker compose up -d --build --pull never      # 从本地源码构建
 #
 #   面板     http://<主机>:3065    （首次打开注册管理员账号，之后账号密码登录）
 #   网关     http://<主机>:3065/v1 （API Key 在面板「网关 Key」页创建；OpenAI 兼容）
@@ -18,7 +19,9 @@
 services:
   agent2api:
     build: .
-    image: agent2api:local
+    # 默认使用本 fork 的 GHCR 镜像；保留 build 以便源码检出后直接本地构建。
+    # 可通过 AGENT2API_IMAGE / AGENT2API_VERSION 切换仓库和版本。
+    image: ${AGENT2API_IMAGE:-ghcr.io/shifuf/agent2api}:${AGENT2API_VERSION:-latest}
     container_name: agent2api
     restart: unless-stopped
     # 可选：给容器设内存上限。超限时内核杀掉进程，再由上面的 restart 策略拉起 ——
@@ -44,9 +47,9 @@ services:
       # 登录页人机验证组件环境变量，默认为1开启，0为关闭
       AGENT2API_CAPTCHA_ENABLED: ${AGENT2API_CAPTCHA_ENABLED:-1}
       # 可选：AGENT2API_VERBOSE / AGENT2API_ALLOW_NO_KEY / AGENT2API_PROXY_PORT
-      # 容器内更新入口（面板「设置 → 软件更新」一键下载并替换）：镜像里默认 1 开启，
-      # 置 0 关闭。注意它替换的是容器里的文件，compose 里的镜像标签不变 —— 见 README「升级」。
-      AGENT2API_SELF_UPDATE: ${AGENT2API_SELF_UPDATE:-1}
+      # fork 默认关闭容器内更新，避免运行中的容器被上游 Release 覆盖；
+      # 如需开启，请同时把更新源改为自己的 Release。
+      AGENT2API_SELF_UPDATE: ${AGENT2API_SELF_UPDATE:-0}
       # 可选：两处常驻内存图片缓存的上限（MiB），默认各 128。小内存机器可调小；
       # 写坏 / 越界会回落默认值，不会让服务起不来（详见 install 文档）。
       # AGENT2API_IMAGE_CACHE_MB: "64"

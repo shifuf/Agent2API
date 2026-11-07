@@ -27,7 +27,7 @@
 | **Linux 데스크톱** | `Agent2API_<버전>_amd64.deb` 또는 `Agent2API_<버전>_amd64.AppImage` | 앱 창 | deb는 시스템에 설치(webkit2gtk-4.1 / gtk3 필요), AppImage는 설치가 필요 없는 단일 파일로 모든 배포판에서 실행 |
 | **Windows 서버** (GUI 없음) | `agent2api-server-windows-amd64.zip` | **브라우저 패널** | 명령줄로 설치하고 Windows 서비스로 등록 —— [서버](#서버windows--linux-헤드리스) 참고 |
 | **Linux 서버** (GUI 없음) | `agent2api-server-linux-<arch>.tar.gz` | **브라우저 패널** | 명령줄로 설치하고 systemd 로 상주. 같은 패키지가 컨테이너 내 업데이트 페이로드도 겸합니다 |
-| **Docker** | `aimodcc/agent2api:latest` | **브라우저 패널** | amd64 / arm64 이미지, [Docker 배포](#docker) 참고 |
+| **Docker** | `ghcr.io/shifuf/agent2api:latest` | **브라우저 패널** | amd64 / arm64 이미지, [Docker 배포](#docker) 참고 |
 
 > 무엇을 고를까: **데스크톱이 있다**(트레이, 부팅 시 자동 시작, 본机 로그인 상태 가져오기가 필요) → 데스크톱 버전.
 > **서버에 그래픽 인터페이스가 없다**(Windows Server / Linux 서버) → 서버 패키지.
@@ -159,12 +159,21 @@ Linux 에서는 `/etc/agent2api/agent2api.env` 에, Windows 에서는 서비스 
 
 ## Docker
 
-이미지 태그: `latest`는 최신 정식 버전을, `beta`는 최신 beta 사전 출시 버전을 따릅니다. `3.3.0-beta.3` 같은 전체 버전 번호로 버전을 고정할 수도 있습니다. beta를 사용하려면 아래 명령이나 Compose 설정의 `aimodcc/agent2api:latest`를 `aimodcc/agent2api:beta`로 바꾸고, 업데이트할 때 `docker compose pull && docker compose up -d`를 실행하세요. beta 출시 시 `latest`는 변경되지 않으며, 수동 개발 빌드는 `dev`만 업데이트합니다. 동일한 이미지가 GitHub Container Registry에도 게시됩니다. 이미지 이름을 `ghcr.io/aimod-cc/agent2api`로 바꾸면 됩니다(태그 규칙은 동일합니다).
+이 fork는 `ghcr.io/shifuf/agent2api`에 이미지를 게시합니다. `main`에 push하면 `latest`, `beta`에 push하면 `beta`가 갱신됩니다. 각 빌드는 버전 고정용 `sha-<전체 커밋 SHA>`도 게시합니다. Actions의 **Docker package**를 수동 실행하면 main/beta는 해당 태그를, 다른 브랜치는 `dev`만 갱신합니다. amd64 / arm64를 지원하며 데스크톱, 로그인, 모바일 UI와 번역을 소스에서 다시 빌드합니다.
+
+워크플로는 현재 저장소의 `GITHUB_TOKEN`으로 GHCR에 게시하므로 Docker Hub 또는 상위 빌드 저장소 자격 증명이 필요 없습니다. 다른 fork에서는 경로가 소문자 `ghcr.io/<소유자>/<저장소>`로 자동 변경됩니다. Actions를 활성화하고 코드를 push한 다음 **Actions → Docker package**에서 결과를 확인하세요. 첫 게시 후 익명 pull을 허용하려면 패키지 공개 범위를 Public으로 변경하세요. 컨테이너 패키지만 게시하며 Git tag / GitHub Release를 만들거나 버전 번호를 변경하지 않습니다.
+
+저장소의 Compose 파일은 `AGENT2API_IMAGE`(기본 `ghcr.io/shifuf/agent2api`)와 `AGENT2API_VERSION`(기본 `latest`)을 지원합니다. 이미지 선택에만 사용되며 앱에는 전달하지 않습니다. 가져오기 및 배포:
+
+```bash
+docker compose up -d --pull always --no-build
+AGENT2API_VERSION=beta docker compose up -d --pull always --no-build
+```
 
 ```bash
 docker run -d --name agent2api --restart unless-stopped \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 브라우저에서 `http://<호스트>:3065`를 열면 첫 방문 시 **관리자 계정 등록**으로 안내합니다. 로그인 후 "게이트웨이 키" 페이지에서 클라이언트용 API 키를 만들면 됩니다 — `http://<호스트>:3065/v1`이 OpenAI 호환 엔드포인트이며, 키를 만들기 전에는 전달을 거부합니다. 모든 상태(SQLite 데이터베이스 / 설정 / 로그)는 `./data` 볼륨 하나에 저장됩니다.
@@ -174,7 +183,7 @@ compose 사용자용(amd64 / arm64 이미지 모두 제공):
 ```yaml
 services:
   agent2api:
-    image: aimodcc/agent2api:latest
+    image: ghcr.io/shifuf/agent2api:latest
     container_name: agent2api
     restart: unless-stopped
     ports:
@@ -192,12 +201,12 @@ services:
 | `AGENT2API_HOST` / `AGENT2API_PROXY_PORT` | 수신 주소(기본 `0.0.0.0`) / 포트(기본 `3065`) |
 | `AGENT2API_ALLOW_NO_KEY` | `1`이면 fail-closed 해제(키 미설정이어도 `/v1` 허용, 순수 내부망 한정) |
 | `AGENT2API_CAPTCHA_ENABLED` | 로그인 페이지 사람 확인 위젯: 기본 `1`(켜짐), `0`은 끔 |
-| `AGENT2API_SELF_UPDATE` | 컨테이너 안의 업데이트 창구: 기본 `1`(켜짐. 패널에서 "다운로드 후 업데이트" 가능). `0`이면 꺼지고 수동 업그레이드만 가능 |
+| `AGENT2API_SELF_UPDATE` | 컨테이너 내부 업데이트: 이 fork의 기본값은 `0`이며 Compose로 자신의 이미지를 가져와 업데이트합니다. `1`로 활성화하기 전에 자신의 Release 소스를 설정하세요 |
 | `AGENT2API_IMAGE_CACHE_MB` | 생성 이미지의 다운로드 메모리 캐시 상한(MiB, 기본 `128`, 범위 8~4096). 잘못된 값 / 범위 밖은 기본값으로 폴백 |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | 세션 이미지 압축 결과의 메모리 캐시 상한(MiB, 기본 `128`, 범위 8~4096, 기준 동일) |
 | `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | 심화: "업데이트 확인 / 업데이트 다운로드"를 자체 소스로 교체합니다. 전자는 저장소를 바꾸고(기본값은 업스트림 `aimod-cc/Agent2API`, fork 후 변경 가능), 후자는 API 루트를 바꿉니다(기본 `https://api.github.com`, GitHub와 같은 형태의 release JSON을 반환해야 함). 자체 소스 설정 후 다운로드 허용 목록은 **그 소스 자신의 호스트**만 추가로 허용합니다(스킴은 소스를 따름: `http://`를 설정하면 평문 다운로드도 허용. 로컬 연습 / 내부 미러용) |
 
-소스에서 빌드하려면: 이 저장소를 클론한 뒤 `docker compose up -d --build`(이미지에는 게이트웨이와 패널만 들어가며 Rust 도구 체인은 포함되지 않습니다).
+소스에서 빌드하려면 저장소를 clone하고 `docker compose up -d --build --pull never`를 실행하세요. Dockerfile은 lock 파일로 의존성을 설치하고 UI를 다시 빌드합니다. 최종 이미지는 게이트웨이와 패널만 포함하며 Node / Rust 도구 체인은 포함하지 않습니다.
 
 ### 메모리 사용량
 
@@ -209,7 +218,7 @@ services:
 # docker run
 docker run -d --name agent2api --restart unless-stopped --memory=1g \
   -p 3065:3065 -v ./data:/data \
-  aimodcc/agent2api:latest
+  ghcr.io/shifuf/agent2api:latest
 ```
 
 compose 사용자는 서비스에 `mem_limit: 1g` 한 줄을 추가하세요(`docker-compose.yml` 에 주석 예시가 있습니다). swarm 또는 `docker compose --compatibility` 에서는 `deploy.resources.limits.memory` 를 씁니다. 1g 는 출발점일 뿐이며 실제 동시 처리량에 맞춰 조정하세요.
@@ -222,7 +231,9 @@ compose 사용자는 서비스에 `mem_limit: 1g` 한 줄을 추가하세요(`do
 
 ### 컨테이너 내 업데이트(선택)
 
-패널의 "소프트웨어 업데이트" 페이지에서 컨테이너 안에서 바로 "다운로드 후 업데이트"를 실행할 수 있습니다. 공식 Release의 `agent2api-server-linux-<arch>.tar.gz`를 받아(`.sha256` 검증) 실행 파일과 `ui/`를 교체한 뒤 프로세스가 정상 종료되면 `restart` 정책이 같은 컨테이너를 다시 띄웁니다. `AGENT2API_SELF_UPDATE`로 제어하며(Dockerfile에서 기본 `1`), `0`으로 두면 수동 업그레이드만 사용합니다.
+이 fork의 기본값은 `AGENT2API_SELF_UPDATE=0`입니다. `docker compose up -d --pull always --no-build`로 업데이트하며 `./data`를 유지합니다. 실행 코드가 이미지 태그와 일치하고 자체 기능이 상위 Release로 바뀌는 일을 방지합니다.
+
+컨테이너 내부 업데이트가 필요하면 `AGENT2API_SELF_UPDATE=1`을 명시하고 `WORKBUDDY_UPDATE_REPO` / `WORKBUDDY_UPDATE_API_BASE`를 자체 배포 소스로 설정하세요. 패널이 `agent2api-server-linux-<arch>.tar.gz`를 내려받아 `.sha256`을 검증하고 실행 파일과 `ui/`를 교체한 후 restart 정책으로 새 프로세스를 시작합니다.
 
 같은 `agent2api-server-linux-<arch>.tar.gz` 는 [Linux 서버](#linux-systemd) 의 설치 패키지이기도 합니다: 안의 `agent2api-server` 와 `ui/` 가 이 업데이트 경로가 이름으로 가져가는 항목이고, `install.sh` / `agent2api.service` / `agent2api.env.example` 도 함께 들어 있습니다. 업데이트 경로는 앞의 두 항목만 읽고 나머지는 버리므로(`selfupdate::extract_bundle` 참고), 하나의 산출물이 두 용도를 겸합니다 —— 컨테이너에서는 풀어서 교체, 베어메탈에서는 풀어서 `install.sh` 실행.
 
