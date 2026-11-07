@@ -77,7 +77,7 @@ type KeyEntry = {
  * 「可用提供商」的候选项：后端拼好的整张表 —— 注册表（内置家）+ 已建的自定义家
  * （项目禁止维护第二份 provider 清单；自定义家是运行期数据，只有后端拿得到）。
  */
-type ProviderOption = { id: string; label?: string }
+type ProviderOption = { id: string; label?: string; removed?: boolean }
 
 /** 四个接口的响应；`created` 只在 POST 的响应里（新建后要立刻展开它） */
 type KeysPayload = {
@@ -269,7 +269,7 @@ function providerLabel(id: string): string {
  * 按**当前勾选的提供商**取对外名并集，铺成多选选项。
  * `selected` 里的名字即使不在并集里也照样保留（铺成已勾选状态）—— 用户取消勾选某家
  * 之后，那家独有的模型仍要看得见、能自己取消，否则「保存范围」会变成一次静默的
- * 数据修改。一家都没勾时返回**空数组**（没有约束范围就没有候选）。
+ * 数据修改。一家都没勾代表全渠道，因此列出手动目录里全部模型。
  */
 function modelOptions(
   table: Record<string, string[]>,
@@ -283,7 +283,7 @@ function modelOptions(
     const key = text.toLowerCase()
     if (!names.has(key)) names.set(key, text)
   }
-  selectedProviders.forEach(id => {
+  ;(selectedProviders.length ? selectedProviders : Object.keys(table)).forEach(id => {
     const list = table[id] ?? table[String(id).toLowerCase()]
     if (Array.isArray(list)) list.forEach(put)
   })
@@ -300,27 +300,27 @@ function modelOptions(
  * 不写，用户就只记得「我配过点什么」，客户端 404 时会去查模型、查账号，最后才想到是
  * Key 的限制。无限制时显示「不限制」而不是省略：省略与「没读到」长得一样。
  */
-function restrictionText(k: KeyEntry): string {
+function restrictionText(k: KeyEntry, labelOf: (id: string) => string = providerLabel): string {
   const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
   const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
   if (!providers.length && !models.length) return t('不限制')
   const parts: string[] = []
   // providerLabel 的输出已是译文（注册名在这里过词典），原样透出
-  if (providers.length) parts.push(providers.map(providerLabel).join(t('、')))
+  if (providers.length) parts.push(providers.map(labelOf).join(t('、')))
   // 模型那半边只报个数：一屏 Row 里塞不下十几个模型名，悬停由 title 给全量
   if (models.length) parts.push(t('{n} 个模型', { n: models.length }))
   return t('限制：{text}', { text: parts.join(' / ') })
 }
 
 /** 限制摘要的完整说明（悬停 title 用；列不宽，详情只能挂这里） */
-function restrictionTitle(k: KeyEntry): string {
+function restrictionTitle(k: KeyEntry, labelOf: (id: string) => string = providerLabel): string {
   const providers = Array.isArray(k.allowedProviders) ? k.allowedProviders : []
   const models = Array.isArray(k.allowedModels) ? k.allowedModels : []
   if (!providers.length && !models.length) {
-    return t('这把 Key 不限制提供商与模型（可用全部上游与全部对外模型）')
+    return t('这把 Key 可用全部渠道与全部已发布模型')
   }
   const lines: string[] = []
-  if (providers.length) lines.push(t('可用提供商：{names}', { names: providers.map(providerLabel).join(t('、')) }))
+  if (providers.length) lines.push(t('可用渠道：{names}', { names: providers.map(labelOf).join(t('、')) }))
   if (models.length) lines.push(t('可用模型：{names}', { names: models.join(t('、')) }))
   return lines.join('\n')
 }
@@ -330,18 +330,15 @@ function restrictionTitle(k: KeyEntry): string {
  * 「限制：…」一行；而多选的触发器只显示连接后的一行文案，清单长了会被省略号收掉。
  * 用户点完「保存范围」就看不到弹窗了，勾了哪几家 / 哪些模型得在这儿给他核对一遍。
  */
-function restrictionSummary(providers: readonly string[], models: readonly string[]): string {
+function restrictionSummary(providers: readonly string[], models: readonly string[], labelOf: (id: string) => string = providerLabel): string {
   if (!providers.length && !models.length) {
-    return t('当前不限制：这把 Key 可以用全部提供商与全部对外模型')
+    return t('当前不限制：这把 Key 可以用全部渠道与全部已发布模型')
   }
   const parts: string[] = []
-  if (providers.length) parts.push(t('提供商：{names}', { names: providers.map(providerLabel).join(t('、')) }))
+  if (providers.length) parts.push(t('渠道：{names}', { names: providers.map(labelOf).join(t('、')) }))
   if (models.length) parts.push(t('模型：{names}', { names: models.join(t('、')) }))
-  // 只限制了模型、没限制提供商（旧数据里可能存在这种组合）：模型候选此刻只剩已勾的
-  // 那几个（没有提供商就没有并集可铺），要说清怎么把候选拿回来 —— 否则用户会以为
-  // 「模型清单坏了，加不了新的」
   if (!providers.length) {
-    parts.push(t('（模型候选需先选提供商；不选则沿用当前这几项，保存后仍按模型白名单生效）'))
+    parts.push(t('渠道未选择，允许全部渠道'))
   }
   return parts.join('　')
 }
@@ -353,21 +350,34 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.map(item => String(item)) : []
 }
 
-/**
- * 把 state 里的勾选值按**候选表**归一：只留候选里存在的项、顺序照候选表、写法以候选
- * 为准（模型名的大小写可能与清单不一致，旧实现就是按小写比对后把候选的写法写回 DOM）。
- * 这就是旧实现 `[...select.selectedOptions].map(option => option.value)` 的口径 ——
- * 那时「勾选」只存在于渲染出来的 option 上，候选里没有的 id 落不到 DOM 里，提交时自然
- * 被丢掉。**提交给后端的两个数组必须逐字保持这个口径**。
- */
+/** Canonicalize known values while retaining saved restrictions absent from the catalog. */
 function pickedFromOptions(values: readonly string[], options: readonly MultiSelectOption[]): string[] {
   const canonical = new Map(options.map(option => [option.value.toLowerCase(), option.value]))
-  const chosen = new Set<string>()
+  const chosen = new Map<string, string>()
   values.forEach(value => {
-    const hit = canonical.get(String(value).toLowerCase())
-    if (hit) chosen.add(hit)
+    const text = String(value).trim()
+    const key = text.toLowerCase()
+    if (text && !chosen.has(key)) chosen.set(key, canonical.get(key) || text)
   })
-  return options.filter(option => chosen.has(option.value)).map(option => option.value)
+  return [...options.filter(option => chosen.has(option.value.toLowerCase())).map(option => option.value),
+    ...[...chosen].filter(([key]) => !canonical.has(key)).map(([, value]) => value)]
+}
+
+function channelLabel(item: ProviderOption): string {
+  return item.removed ? t('已移除渠道：{id}', { id: item.id }) : t(item.label || item.id)
+}
+
+/** Existing removed restrictions can be kept or removed; new keys cannot select them. */
+function channelOptions(providers: ProviderOption[], retained: readonly string[]): MultiSelectOption[] {
+  const saved = new Set(retained.map(id => id.toLowerCase()))
+  const options = providers.filter(item => !item.removed || saved.has(item.id.toLowerCase()))
+    .map(item => ({ value: item.id, label: channelLabel(item) }))
+  for (const id of retained) {
+    if (!options.some(option => option.value.toLowerCase() === id.toLowerCase())) {
+      options.push({ value: id, label: channelLabel({ id, removed: true }) })
+    }
+  }
+  return options
 }
 
 /* ─── 弹窗（新建 / 改可用范围共用）──────────────── */
@@ -408,8 +418,8 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
    */
   const providerOptions = React.useMemo<MultiSelectOption[]>(
     // 值是提供商 id（提交给后端的身份）不包；展示 label 走 t()（后端下发的展示名）
-    () => providers.map(item => ({ value: String(item.id), label: t(String(item.label ?? item.id)) })),
-    [providers],
+    () => channelOptions(providers, stringList(target?.allowedProviders)),
+    [providers, target?.allowedProviders],
   )
 
   /**
@@ -421,6 +431,8 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
     () => pickedFromOptions(pickedProviders, providerOptions),
     [pickedProviders, providerOptions],
   )
+  const hasRemovedChannels = allowedProviders.some(id => !providers.some(item =>
+    item.id.toLowerCase() === id.toLowerCase() && !item.removed))
 
   /**
    * 模型候选跟着「已勾选的提供商」重建：勾一家立刻多出这家的对外名，取消一家则收回去。
@@ -437,16 +449,11 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
     [pickedModels, modelCandidates],
   )
 
-  /**
-   * 空候选的说明文案分两种：没勾提供商时是「先选提供商」，勾了却是空才是「这几家
-   * 现在没有可用模型」（后端没给该家的清单 = 没登录态）。有候选时不写这句 ——
-   * 那时浮层里空只可能是搜索没匹配上。
-   */
   const modelEmptyHint = modelCandidates.length
     ? t('没有匹配的选项')
     : allowedProviders.length
-      ? t('这几家当前没有可用模型（账号未登录或清单为空）')
-      : t('请先在上面选择可用提供商')
+      ? t('所选渠道暂无已发布模型，请先在模型管理中添加并关联上游模型')
+      : t('暂无已发布模型，请先在模型管理中手动添加')
 
   /** 收尾：解除在途守卫（写两处，避免两边漂移） */
   function stopSaving(): void {
@@ -542,14 +549,14 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
                 触发器上没有可见 label 与之关联（同样没有 id 可给 htmlFor），所以 aria-label
                 必须给，否则读屏只念到一串连接起来的选项名。 */}
             <div className='flex flex-wrap items-center gap-2.5'>
-              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用提供商')}</Label>
+              <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用渠道')}</Label>
               <MultiSelect
                 value={allowedProviders}
                 onValueChange={setPickedProviders}
                 options={providerOptions}
-                placeholder={t('留空 = 不限制')}
-                searchPlaceholder={t('搜索提供商…')}
-                aria-label={t('可用提供商')}
+                placeholder={t('未选择 = 全部渠道')}
+                searchPlaceholder={t('搜索渠道…')}
+                aria-label={t('可用渠道')}
                 className='flex-auto min-w-[180px] max-w-[260px]'
               />
             </div>
@@ -559,7 +566,7 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
                 value={allowedModels}
                 onValueChange={setPickedModels}
                 options={modelCandidates}
-                placeholder={t('留空 = 不限制')}
+                placeholder={t('未选择 = 全部已发布模型')}
                 emptyHint={modelEmptyHint}
                 searchPlaceholder={t('搜索模型…')}
                 aria-label={t('可用模型')}
@@ -567,12 +574,16 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
               />
             </div>
             <p>
-              {t('留空表示不限制；同时设置时请求需同时满足两个条件（模型在白名单内且路由到允许的提供商）。 「可用模型」的候选跟着上面勾选的提供商走：没勾提供商时它是空的（还没有约束范围）， 勾了几家就列出这几家能收的全部对外名。')}
+              {t('未选择渠道表示允许全部渠道；未选择模型表示允许全部已发布模型。同时选择时按交集生效。模型候选来自模型管理中手动添加的目录，并按所选渠道筛选。')}
             </p>
+            {hasRemovedChannels && <p>
+              {t('已移除渠道的限制会继续保留。只有该渠道的 Key 将无法转发；可手动取消该项，取消全部渠道限制后将允许全部渠道。')}
+            </p>}
             {/* 当前选的摘要：多选的触发器上只显示「连接后的一行文案」，清单长了会被省略号
                 收掉 —— 勾了哪几家 / 哪些模型要在这儿摊开。id 沿用旧实现的：page-gateway.css
                 按它给这行加了上边距（它是「当前选择」而不是「使用说明」）。 */}
-            <p id='key-restrict-summary'>{restrictionSummary(allowedProviders, allowedModels)}</p>
+            <p id='key-restrict-summary'>{restrictionSummary(allowedProviders, allowedModels,
+              id => providerOptions.find(option => option.value.toLowerCase() === id.toLowerCase())?.label || providerLabel(id))}</p>
           </DialogSection>
           <div className='min-h-[18px] text-[11.5px] text-muted-foreground'>{status}</div>
         </DialogBody>
@@ -741,6 +752,10 @@ function KeysPage() {
   /* ─── 渲染 ─────────────────────────────── */
 
   const keys = keysOf(data)
+  const labelOfChannel = (id: string): string => {
+    const option = providersOf(data).find(item => item.id.toLowerCase() === id.toLowerCase())
+    return option ? channelLabel(option) : channelLabel({ id, removed: true })
+  }
   /** 客户端分页（通用表格外壳）：Key 通常只有几把，但口径与其它五张表保持一致 */
   const paging = useClientPaging(keys.length, 'keys')
   const list = paging.paged ? paging.slice(keys) : keys
@@ -758,7 +773,7 @@ function KeysPage() {
         return (
           <>
             <div className='mid'><span className='t'>{k.name || t('未命名')}</span></div>
-            <div className='mname' title={restrictionTitle(k)}>{restrictionText(k)}</div>
+            <div className='mname' title={restrictionTitle(k, labelOfChannel)}>{restrictionText(k, labelOfChannel)}</div>
           </>
         )
       case 'key': {
@@ -876,10 +891,10 @@ function KeysPage() {
             {t(' 或 ')}
             <code>{'x-api-key: <key>'}</code>
             {t('；修改后立即生效。模型测试、助手和日活保活必须选择 Key，受限 Key 不能访问管理接口。每把 Key 可单独限制')}
-            <b>{t('可用提供商')}</b>
+            <b>{t('可用渠道')}</b>
             {t('与')}
             <b>{t('可用模型')}</b>
-            {t('（行内「可用范围」）：留空 = 不限制，两个都设时 按交集生效 —— 被限制的模型对这把 Key 表现为「不存在」（拉 /v1/models 也看不到它）， 提供它的家不在可用列表里时请求同样被拒。')}
+            {t('（行内「可用范围」）：未选择渠道 = 全部渠道，未选择模型 = 全部已发布模型，两项同时设置时按交集生效。模型来自手动目录；删除渠道不会自动扩大已有 Key 的权限。')}
           </span>
         )}
         total={keys.length}

@@ -637,61 +637,12 @@ pub fn remove(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 把某个 provider id 从**所有** Key 的「可用提供商」白名单里摘掉（级联清理）。
-///
-/// 调用点在「删除一个家」之后（`api::custom_providers::remove_custom_provider`）：
-/// 家没了，白名单里那条 id 就成了一条**永远命中不了**的限制 —— 只限制了这一家的
-/// Key 会变成「谁都进不来」（每个请求都被 `key_scope` 拒掉），而 Key 行上显示的
-/// 还是一串看不出所以然的 `custom-xxxx`。清理动作让这件事回到用户能理解的状态。
-///
-/// ── 为什么在这里、而不在 `custom_providers::remove` 里 ──────────
-/// `custom_providers` 是配置层的一个数据模块，它认识 `AccountStore` 已经是为了
-/// 级联账号（同一条取舍，见那边的说明）；再让它认识 apiKeys 这张表的写入，就是
-/// 把两张表的写入耦合进一个数据模块。多表协调住在管理 API 层更合适 ——
-/// 那里也正是「新建家 + 首个账号」做两步回滚的地方。
-///
-/// ── 返回值与「可能放宽成不限制」这件事 ───────────────────────
-/// 返回**被改动的**记录（摘完后的形态；没提过这家的 Key 不在其中），调用方按
-/// `allowed_providers.is_empty()` 就能数出「其中几把已恢复为不限制」。这一点必须
-/// 让调用方看见并说出去：白名单**空 = 不限制**（见模块头），一把只限制了这一家的
-/// Key 被摘完就是空 —— 它从「谁都进不来」变成「哪家都能进」。这是删掉该家必然带来
-/// 的语义变化，不是本函数能消灭的东西；两种坏结局里，留一个死 id 让这把 Key 永远
-/// 404（且界面上看不出原因）更难查，所以如实放宽、由调用方在日志与界面上点名。
-///
-/// 比对忽略大小写（与 `key_scope` 的判定、写入侧的去重同一口径）：手改配置塞进来
-/// 的 `CUSTOM-xxx` 在转发时照样命中这一家（判定会归一成小写），清理时不认它就会漏
-/// 掉一条。只改**真的提到过这家**的记录 —— 其余记录一个字节都不动（一次删除不该
-/// 顺手重写别的 Key）。
-pub fn strip_provider_from_allowlists(provider_id: &str) -> Vec<ApiKeyEntry> {
-    let id = provider_id.trim();
-    if id.is_empty() {
-        return Vec::new();
-    }
-    let mut entries = list();
-    let mut touched: Vec<ApiKeyEntry> = Vec::new();
-    for entry in entries.iter_mut() {
-        let before = entry.allowed_providers.len();
-        entry
-            .allowed_providers
-            .retain(|known| !known.eq_ignore_ascii_case(id));
-        if entry.allowed_providers.len() == before {
-            continue;
-        }
-        touched.push(entry.clone());
-    }
-    if !touched.is_empty() {
-        if let Err(error) = save(&entries) {
-            // 这条路径返回 `Vec`（不给调用方 Result），失败只能在这里记日志。
-            // 只记日志、**不改变返回值**：调用方（删除自定义家）不该因为一次
-            // 白名单清理没落盘而回滚整个删家动作 —— 那个动作本身是另一回事，
-            // 而白名单的清理下次删除/编辑时会再来一遍（幂等）。
-            logging::log(
-                "[Keys]",
-                &format!("⚠️  网关 Key 白名单清理未落盘（改动仅本次运行生效）: {error}"),
-            );
-        }
-    }
-    touched
+/// Compatibility hook for channel deletion. A removed channel must remain in
+/// existing key allowlists: turning the last restriction into [] would grant
+/// access to every channel. The management API lists missing IDs as removed
+/// choices, and only an explicit key edit can clear them. No key was updated.
+pub fn strip_provider_from_allowlists(_provider_id: &str) -> Vec<ApiKeyEntry> {
+    Vec::new()
 }
 
 /// WorkBuddy 拆家（2026-10）的白名单补齐：把提到过 `workbuddy` 的 Key 补上
@@ -738,7 +689,7 @@ pub fn add_intl_to_workbuddy_allowlists() -> Vec<ApiKeyEntry> {
     }
     if !touched.is_empty() {
         if let Err(error) = save(&entries) {
-            // 与 `strip_provider_from_allowlists` 同一处置：返回 `Vec`、不阻断
+            // 返回 `Vec`、不阻断
             // 调用方（`account_bootstrap` 的启动序列）；失败只影响「重启后还在
             // 不在」，而这条补齐本身幂等，下次启动会再来一遍。
             logging::log(
@@ -748,4 +699,43 @@ pub fn add_intl_to_workbuddy_allowlists() -> Vec<ApiKeyEntry> {
         }
     }
     touched
+}
+
+#[cfg(test)]
+mod removed_channel_tests {
+    use super::*;
+
+    #[test]
+    fn deleting_a_channel_keeps_existing_key_restrictions() {
+        // Configuration is process-wide. Isolate this integration test from other tests.
+        const MARKER: &str = "AGENT2API_TEST_REMOVED_CHANNEL";
+        if std::env::var_os(MARKER).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("server::core::api_keys::removed_channel_tests::deleting_a_channel_keeps_existing_key_restrictions")
+                .arg("--exact").arg("--test-threads=1")
+                .env(MARKER, "1")
+                .env("AGENT2API_ACCOUNT_KEY", "1111111111111111111111111111111111111111111111111111111111111111")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let (db, _temp) = crate::server::db::test_temp::TempDb::open("removed-channel-allowlists");
+        db.with(|conn| conn.execute("INSERT INTO kv (key,value) VALUES ('configMigrated','true')", []))
+            .unwrap().unwrap();
+        config::init(Some(db));
+        assert!(config::replace_api_keys(json!([
+            {"id":"only", "key":"only-key-value", "enabled":true, "allowedProviders":["custom-deleted"]},
+            {"id":"mixed", "key":"mixed-key-value", "enabled":true, "allowedProviders":["custom-deleted","live"]},
+            {"id":"open", "key":"open-key-value", "enabled":true, "allowedProviders":[]}
+        ])));
+        let before: Vec<_> = list().iter().map(ApiKeyEntry::public_json).collect();
+        assert!(strip_provider_from_allowlists("custom-deleted").is_empty());
+        assert_eq!(list().iter().map(ApiKeyEntry::public_json).collect::<Vec<_>>(), before);
+        let entries = list();
+        let restricted = crate::server::core::key_scope::KeyScope::from_entry(&entries[0]);
+        assert!(!restricted.allows_provider("live"));
+        let mixed = crate::server::core::key_scope::KeyScope::from_entry(&entries[1]);
+        assert!(mixed.allows_provider("live"));
+        assert!(!mixed.allows_provider("new-channel"));
+    }
 }

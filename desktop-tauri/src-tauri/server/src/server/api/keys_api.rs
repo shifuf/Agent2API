@@ -20,12 +20,9 @@
 //!     是运行期数据、前端自己凑要另拉一次 `/api/custom-providers` 并对时序（见
 //!     `list_json`）。项目里明确禁止维护第二份 provider 清单（见 `account_store`
 //!     模块头那段），前端不该烤一份写死的 id 列表；
-//!   · `modelsByProvider`（每家 → 对外名清单）—— 「可用模型」多选的候选项。
-//!     界面按用户当前勾了哪几家取并集（一家没勾就是空，见 `keys-panel.js`）。
-//!     这张表必须由后端给：模型名是各家清单 + 映射别名的合并结果，前端拿不到
-//!     这层信息，而 `/api/session` 的 `models` 是跨家**去重**后的对外视图 ——
-//!     按家过滤它会漏掉被别家认领的同名模型（论证见
-//!     `catalog::models_by_provider` 的说明）。
+//!   · `modelsByProvider`（渠道 → 手动发布的对外模型名）——「可用模型」候选。
+//!     界面按所选渠道取并集；渠道未选择 = 全渠道，因此展示完整手动目录。
+//!     已保存的失效渠道 ID 追加为 `removed: true` 候选，用户可保留或明确移除。
 //!
 //! 写入侧在这一层做校验（`is_allowed_provider_id` 判 id 认不认识、元素必须是
 //! 字符串），读取侧则一律宽容（理由见 `core::api_keys` 的模块头那条硬不变量：
@@ -81,6 +78,7 @@ fn list_json(state: &ServerState) -> Value {
     let mut providers =
         crate::server::core::providers::summary_json(&count_accounts, &account_providers);
     providers.extend(crate::server::core::custom_providers::summary_json(&count_accounts));
+    append_saved_provider_options(&mut providers, &entries);
     json!({
         "keys": keys,
         "authRequired": true,
@@ -92,6 +90,15 @@ fn list_json(state: &ServerState) -> Value {
         // 也避免了「响应回来时用户已经改了勾选」的竞态。
         "modelsByProvider": crate::server::core::providers::catalog::models_by_provider(&state.store()),
     })
+}
+
+/// Deleted channel IDs remain visible so editing a key cannot erase a restriction.
+fn append_saved_provider_options(providers: &mut Vec<Value>, entries: &[api_keys::ApiKeyEntry]) {
+    for id in entries.iter().flat_map(|entry| &entry.allowed_providers) {
+        if providers.iter().any(|provider| provider.get("id").and_then(Value::as_str)
+            .is_some_and(|known| known.eq_ignore_ascii_case(id))) { continue; }
+        providers.push(json!({"id": id, "label": id, "count": 0, "removed": true}));
+    }
 }
 
 /// 「可用提供商」白名单里的一个 id 算不算数。
@@ -120,12 +127,13 @@ fn is_allowed_provider_id(id: &str) -> bool {
 /// 有内容 → `Some(list)`。一律按「空 = 清空」处理会让旧版前端（它不发这两个键）
 /// 每次改名都顺手把限制抹掉 —— 那是静默的数据丢失。
 ///
-/// 元素校验（未知 provider id / 空串）：认不出就 400，而不是静默丢弃 ——
-/// 用户勾了一个界面上不存在的 id 只可能是数据坏了，静默丢掉会让他以为设置生效了。
+/// 新增的未知渠道 ID 返回 400；PATCH 可以保留当前 Key 已保存的未知 ID。
+/// 删除渠道不会改变授权范围，只有用户明确清除最后一项时才变为不限制。
 fn parse_allowlist(
     object: &serde_json::Map<String, Value>,
     key: &str,
     check_provider: bool,
+    retained_providers: &[String],
 ) -> Result<Option<Vec<String>>, Response> {
     let Some(value) = object.get(key) else {
         return Ok(None);
@@ -145,8 +153,9 @@ fn parse_allowlist(
         if text.is_empty() {
             continue;
         }
-        if check_provider && !is_allowed_provider_id(text) {
-            return Err(errors::management_error(400, format!("未知的提供商: {text}")));
+        if check_provider && !is_allowed_provider_id(text)
+            && !retained_providers.iter().any(|known| known.eq_ignore_ascii_case(text)) {
+            return Err(errors::management_error(400, format!("未知的渠道: {text}")));
         }
         if out.iter().any(|known: &String| known.eq_ignore_ascii_case(text)) {
             continue;
@@ -209,11 +218,11 @@ pub async fn create_key(State(state): State<ServerState>, body: Bytes) -> Respon
     let key = object.get("key").and_then(Value::as_str);
     // 新建时两个键缺失 = 空列表（= 不限制）；这里与 PATCH 的三态不同：
     // 新建的记录本来就没有旧值可保护，「没给」与「给空」结果相同
-    let allowed_providers = match parse_allowlist(&object, "allowedProviders", true) {
+    let allowed_providers = match parse_allowlist(&object, "allowedProviders", true, &[]) {
         Ok(value) => value.unwrap_or_default(),
         Err(response) => return response,
     };
-    let allowed_models = match parse_allowlist(&object, "allowedModels", false) {
+    let allowed_models = match parse_allowlist(&object, "allowedModels", false, &[]) {
         Ok(value) => value.unwrap_or_default(),
         Err(response) => return response,
     };
@@ -238,19 +247,23 @@ pub async fn update_key(State(state): State<ServerState>, Path(id): Path<String>
     };
     let name = object.get("name").and_then(Value::as_str);
     let enabled = object.get("enabled").and_then(Value::as_bool);
+    let entries = api_keys::list();
+    let Some(current) = entries.iter().find(|entry| entry.id == id) else {
+        return errors::management_error(404, "Key 不存在");
+    };
     // 三态：键缺失 → None（不动）。旧版前端只发 name/enabled，走的就是这条路
     //（所以升级后「改个名字」不会把限制清掉，见 `api_keys::update` 的说明）
-    let allowed_providers = match parse_allowlist(&object, "allowedProviders", true) {
+    let allowed_providers = match parse_allowlist(&object, "allowedProviders", true, &current.allowed_providers) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    let allowed_models = match parse_allowlist(&object, "allowedModels", false) {
+    let allowed_models = match parse_allowlist(&object, "allowedModels", false, &[]) {
         Ok(value) => value,
         Err(response) => return response,
     };
     if let Some(false) = enabled {
         // 停用受与删除同一道约束：它同样会让「启用的 Key」归零
-        if let Err(response) = guard_last_active_key(&api_keys::list(), &id, "停用") {
+        if let Err(response) = guard_last_active_key(&entries, &id, "停用") {
             return response;
         }
     }
@@ -277,5 +290,38 @@ pub async fn delete_key(State(state): State<ServerState>, Path(id): Path<String>
             ok_json(list_json(&state))
         }
         Err(message) => errors::management_error(404, message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_key_may_keep_its_deleted_channel_but_new_keys_may_not_select_it() {
+        let body = json!({"allowedProviders":[" CUSTOM-deleted ", "custom-deleted"]});
+        let object = body.as_object().unwrap();
+        let retained = vec!["custom-deleted".to_string()];
+        assert_eq!(parse_allowlist(object, "allowedProviders", true, &retained).unwrap(), Some(vec!["CUSTOM-deleted".into()]));
+        assert!(parse_allowlist(object, "allowedProviders", true, &[]).is_err());
+        assert!(parse_allowlist(object, "allowedProviders", true, &["custom-other".into()]).is_err());
+    }
+
+    #[test]
+    fn patch_preserves_omission_and_explicit_clear_semantics() {
+        let retained = vec!["custom-deleted".to_string()];
+        assert_eq!(parse_allowlist(json!({}).as_object().unwrap(), "allowedProviders", true, &retained).unwrap(), None);
+        assert_eq!(parse_allowlist(json!({"allowedProviders":[]}).as_object().unwrap(), "allowedProviders", true, &retained).unwrap(), Some(vec![]));
+    }
+
+    #[test]
+    fn list_includes_saved_missing_channels_once_as_removed_options() {
+        let raw = json!({"apiKeys":[{"id":"k", "key":"test-key-value", "allowedProviders":["custom-deleted", "LIVE"]}]});
+        let entries = api_keys::entries_from(raw.as_object().unwrap());
+        let mut providers = vec![json!({"id":"live","label":"Live","count":1})];
+        append_saved_provider_options(&mut providers, &entries);
+        append_saved_provider_options(&mut providers, &entries);
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[1], json!({"id":"custom-deleted","label":"custom-deleted","count":0,"removed":true}));
     }
 }

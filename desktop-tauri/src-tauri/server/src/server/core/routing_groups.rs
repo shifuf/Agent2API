@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use crate::server::config::{self, RoutingGroup};
+use crate::server::config::{self, RoutingGroup, RoutingMember};
 use super::{account_store::AccountStore, capability, custom_providers, key_scope::{self, KeyScope}, models::model_id, providers, routing};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -108,6 +108,15 @@ fn provider_active(provider: &str) -> bool {
         && custom_providers::get(provider).map_or_else(|| providers::adapter::adapter_by_id(provider).is_some(), |owner| owner.get("enabled") != Some(&Value::Bool(false)))
 }
 
+fn member_account_unavailable(account: &Value, upstream_model: &str) -> Option<&'static str> {
+    if account.get("enabled") == Some(&Value::Bool(false)) { return Some("参与账号已停用"); }
+    if account.get("hasCredentials") != Some(&Value::Bool(true)) { return Some("参与账号未配置可用凭证"); }
+    if !super::account_store::custom_accounts::key_groups::allows_model(account, upstream_model) {
+        return Some("此 Key 分组未启用或未选择当前上游模型");
+    }
+    None
+}
+
 pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>) -> GroupProjection {
     let mut result = GroupProjection::default();
     let by_id: HashMap<_, _> = accounts.iter().filter_map(|account| routing::account_id(account).map(|id| (id, account))).collect();
@@ -137,6 +146,11 @@ pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, s
                     "name": id, "state": "unavailable", "reason": "参与账号已移除或不属于此提供商" }));
                 continue;
             };
+            if let Some(reason) = member_account_unavailable(account, &actual) {
+                result.blocked.push(json!({ "id": id, "memberId": member.id, "provider": member.provider, "model": actual,
+                    "name": account.get("name").and_then(Value::as_str).unwrap_or(id), "state": "unavailable", "reason": reason }));
+                continue;
+            }
             let mut account = (*account).clone();
             account["routingCandidateId"] = candidate_key(&member.id, id).into();
             account["routingMemberId"] = member.id.clone().into();
@@ -165,15 +179,24 @@ pub fn validate_members(group: &RoutingGroup, old: Option<&RoutingGroup>, accoun
     Ok(())
 }
 
+/// Shared by the public catalog and gateway-key choices. An explicitly selected
+/// member is available only when at least one of its own accounts can use it.
+pub fn available_member_model(member: &RoutingMember, accounts: &[std::sync::Arc<Value>], scope: Option<&KeyScope>) -> Option<Value> {
+    if !member.included || !key_scope::allows_provider(scope, &member.provider) || !provider_active(&member.provider)
+        || !member.accounts.iter().any(|id| accounts.iter().any(|account|
+            routing::account_id(account) == Some(id) && routing::provider_of(account) == member.provider
+                && member_account_unavailable(account, &member.model).is_none())) {
+        return None;
+    }
+    catalog_model(&member.provider, &member.model).filter(|item| !providers::images::model_is_image(item))
+}
+
 pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut Vec<Value>) {
     let accounts = store.routing_snapshot();
     for group in config::routing_profiles().groups.values() {
         if !key_scope::allows_model(scope, &group.model) || data.iter().any(|item| model_id(item).eq_ignore_ascii_case(&group.model)) { continue; }
-        let members: Vec<_> = group.members.iter().filter(|member| member.included && key_scope::allows_provider(scope, &member.provider)
-            && provider_active(&member.provider)
-            && accounts.available_providers.contains(&member.provider) && member.accounts.iter().any(|id|
-                accounts.accounts.iter().any(|account| routing::account_id(account) == Some(id) && routing::provider_of(account) == member.provider && account.get("enabled") != Some(&Value::Bool(false)))))
-            .filter_map(|member| catalog_model(&member.provider, &member.model)).filter(|item| !providers::images::model_is_image(item)).collect();
+        let members: Vec<_> = group.members.iter()
+            .filter_map(|member| available_member_model(member, &accounts.accounts, scope)).collect();
         if members.is_empty() { continue; }
         let mut item = json!({ "id": group.model, "name": group.name, "object": "model", "owned_by": "routing-group", "kind": "chat", "routing_group": true });
         for (key, public) in [("supportsToolCall", "supports_tool_call"), ("supportsImages", "supports_images"),
@@ -192,5 +215,31 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
         item["created"] = 0.into();
         item["is_default"] = false.into();
         data.push(item);
+    }
+}
+
+#[cfg(test)]
+mod key_group_tests {
+    use super::*;
+
+    #[test]
+    fn group_candidates_require_credentials_and_the_selected_upstream_model() {
+        let account = json!({"enabled":true,"hasCredentials":true,
+            "keyGroup":{"enabled":true,"models":["upstream-a"]}});
+        assert_eq!(member_account_unavailable(&account, "upstream-a"), None);
+        assert!(member_account_unavailable(&account, "upstream-b").is_some());
+        for patch in [json!({"enabled":false}), json!({"hasCredentials":false}),
+            json!({"keyGroup":{"enabled":false,"models":["upstream-a"]}}),
+            json!({"keyGroup":{"enabled":true,"models":[]}})] {
+            let mut unavailable = account.clone();
+            for (key, value) in patch.as_object().unwrap() { unavailable[key] = value.clone(); }
+            assert!(member_account_unavailable(&unavailable, "upstream-a").is_some());
+        }
+    }
+
+    #[test]
+    fn legacy_accounts_keep_working_but_accounts_without_credentials_are_hidden() {
+        assert_eq!(member_account_unavailable(&json!({"enabled":true,"hasCredentials":true}), "upstream-a"), None);
+        assert!(member_account_unavailable(&json!({"enabled":true}), "upstream-a").is_some());
     }
 }
