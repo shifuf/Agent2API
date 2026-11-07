@@ -122,6 +122,7 @@ pub mod model_meta;
 // 只把候选收窄到「这一家 × 这一个账号」并把流量标成测试，见该文件模块头
 pub mod model_test;
 pub mod models;
+pub mod public_model_catalog;
 // Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
 pub mod onboarding;
 pub mod panel;

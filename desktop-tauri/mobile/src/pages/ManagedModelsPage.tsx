@@ -2,14 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Card, Checkbox, Input, Label, Sheet, SheetBody, SheetContent,
   SheetFooter, SheetHeader, SheetTitle, Switch, confirmDialog } from '@ui'
 import { type ManagedModel, upsertBinding, validateManagedModel } from '../../../ui-shared/managed-models'
+import { selectPublicModel, type PublicModelCatalog } from '../../../ui-shared/public-model-catalog'
+import { PublicModelPicker, usePublicModelCatalog } from '../../../ui-shared/public-model-picker'
 import { apiCall } from '../api/client'
 import { ErrorNote, Empty, SkeletonList } from '../components/ui'
 import { t } from '../i18n'
 
 type Source = { id: string; name: string; models: Array<{ id: string; name?: string }> }
 type Catalog = { models: ManagedModel[]; sources: Source[]; revision: string; routingGroups?: Array<{ model: string }> }
+const fetchPublicCatalog = (refresh: boolean) => apiCall<PublicModelCatalog>('/api/models/public-catalog', { method: refresh ? 'POST' : 'GET' })
 
 export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
+  const publicCatalog = usePublicModelCatalog(fetchPublicCatalog)
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [query, setQuery] = useState('')
   const [sourceQuery, setSourceQuery] = useState('')
@@ -85,6 +89,8 @@ export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
       <SheetContent><SheetHeader><SheetTitle>{original ? t('编辑模型') : t('添加模型')}</SheetTitle></SheetHeader>
         <SheetBody className='flex flex-col gap-3'>
           {error && <ErrorNote text={error} />}
+          <PublicModelPicker state={publicCatalog} selectedId={draft.id} disabled={busy} t={t}
+            onSelect={model => setDraft(current => current ? selectPublicModel(current, model) : current)} />
           <Label htmlFor='mobile-model-id'>{t('对外模型 ID')}</Label>
           <Input id='mobile-model-id' disabled={busy} value={draft.id} onChange={event => setDraft({ ...draft, id: event.target.value })} />
           <Label htmlFor='mobile-model-name'>{t('名称')}</Label>

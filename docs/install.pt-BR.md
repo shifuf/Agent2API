@@ -11,9 +11,11 @@ Depois de instalar, qualquer forma é gerenciada pelo **painel no navegador** (c
 Este fork usa um catálogo manual de modelos em todo o gateway. Contas, chaves e catálogos upstream existentes são preservados, mas os modelos upstream não são publicados automaticamente. Adicione modelos públicos após atualizar; os grupos de roteamento existentes são mantidos.
 
 1. Em Adicionar conta → Modelo de API, crie um canal com a URL da API e grupos de Key nomeados. Cada grupo aceita várias chaves e sua própria seleção de modelos upstream consultados com essas chaves. Grupos vazios ou desativados não encaminham solicitações.
-2. Em Gerenciamento de modelos → Adicionar modelo, informe o ID público e selecione os canais e modelos upstream. Um modelo público pode usar vários canais, com um modelo upstream por canal. A edição funciona no desktop e no celular.
+2. Em Gerenciamento de modelos → Adicionar modelo, pesquise por fornecedor e selecione um modelo para preencher seu ID público e nome; depois selecione os canais e modelos upstream. IDs personalizados continuam disponíveis. Um modelo público pode usar vários canais, com um modelo upstream por canal. A edição funciona no desktop e no celular.
 3. Selecione os canais e modelos públicos permitidos para cada Key do gateway. As duas restrições se aplicam juntas. Sem canais selecionados, todos são permitidos; sem modelos selecionados, todos os modelos publicados são permitidos. Excluir um canal preserva as restrições existentes das Keys.
 4. Gerencie assinaturas e instale ou importe o núcleo na página Proxies. Os nós podem ser usados por contas e pools de proxies. Parar o núcleo ou desativar um nó não faz as solicitações vinculadas usarem uma conexão direta.
+
+A criação e edição de canais usam um painel à esquerda com navegação entre configurações básicas e grupos de API Key. Os candidatos são pré-carregados de `dist/all.json` do PublicProviderConf e mantidos em cache por uma hora. Atualizar catálogo de modelos busca os dados imediatamente; o cache é preservado durante falhas de rede. Selecionar um candidato não o publica nem altera permissões dos canais.
 
 
 ## Sumário

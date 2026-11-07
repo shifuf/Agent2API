@@ -87,6 +87,8 @@ type SheetContentProps = DialogPrimitive.Popup.Props & {
    * （登录引擎的容器、发码冷却）时需要它。
    */
   keepMounted?: boolean
+  /** 嵌套抽屉也显示自己的遮罩，支持点空白处只关闭当前层。 */
+  overlayForceRender?: boolean
 }
 
 function SheetContent({
@@ -96,6 +98,7 @@ function SheetContent({
   showHandle = true,
   side = 'bottom',
   keepMounted = false,
+  overlayForceRender = false,
   ...props
 }: SheetContentProps) {
   const centered = side === 'center'
@@ -103,7 +106,7 @@ function SheetContent({
   const left = side === 'left'
   return (
     <SheetPortal keepMounted={keepMounted}>
-      <SheetOverlay />
+      <SheetOverlay forceRender={overlayForceRender} />
       <DialogPrimitive.Popup
         data-slot='sheet-content'
         className={cn(

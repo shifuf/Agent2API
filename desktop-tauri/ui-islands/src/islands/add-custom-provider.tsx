@@ -319,8 +319,8 @@ export function CustomProviderBlock({
   return (
     <>
       <DialogSection hidden={mode !== 'create'}>
-        <div className='add-panel-head'>
-          <h3>{t('上游信息')}</h3>
+        <div data-channel-section='details' className='add-panel-head scroll-mt-4'>
+          <h3>{t('基本配置')}</h3>
           <span>{t('创建渠道，并按 Key 分组添加账号。')}</span>
         </div>
         <div className='add-form'>
@@ -405,13 +405,16 @@ export function CustomProviderBlock({
           />
           {/* 余额查询：只有预置卡带方案的家才出现（新建时方案随记录写入） */}
           <BalanceFields scheme={createScheme} prefix={BALANCE_CREATE_PREFIX} />
-          {!noAuth && <div className='col-span-full'><ChannelKeyGroups key={`create-${showToken}`} draftId='create-channel'
-            baseUrl={() => readField(BASEURL_ID)} protocol={() => readField(PROTOCOL_ID) || protocol} /></div>}
+        </div>
+        <div data-channel-section='keys' className='mt-5 scroll-mt-4'>
+          {noAuth ? <p className='text-xs text-subtle'>{t('不需要 Key：转发与拉取模型都不发送鉴权头')}</p>
+            : <ChannelKeyGroups key={`create-${showToken}`} draftId='create-channel'
+              baseUrl={() => readField(BASEURL_ID)} protocol={() => readField(PROTOCOL_ID) || protocol} />}
         </div>
       </DialogSection>
 
       <DialogSection hidden={mode !== 'existing'}>
-        <div className='add-panel-head'>
+        <div data-channel-section='details' className='add-panel-head scroll-mt-4'>
           <h3>{t('账号信息')}</h3>
           {/* 提供商名是用户数据，留在 JSX 里交给 React 转义（不进 dangerouslySetInnerHTML）；
               两边的中文碎片各自走 t()，全角空格是原文的一部分 */}
@@ -455,9 +458,6 @@ export function CustomProviderBlock({
           />
           {/* 余额查询：这一家登记了方案才出现（方案来自提供商记录，不能改） */}
           <BalanceFields scheme={existingScheme} prefix={BALANCE_EXISTING_PREFIX} />
-          {!existingNoAuth && pickedProvider && <div className='col-span-full'><ChannelKeyGroups
-            key={`existing-${current}-${showToken}`} draftId={`append-channel-${current}`} providerId={current}
-            baseUrl={() => pickedProvider.baseUrl || ''} protocol={() => pickedProvider.protocol || 'chat_completions'} /></div>}
           <div className='add-field' hidden={!existingNoAuth}>
             <Label htmlFor={EXISTING_NAME_ID}>{t('备注名')}</Label>
             <Input
@@ -469,6 +469,12 @@ export function CustomProviderBlock({
             />
             <span className='hint'>{t('留空则用提供商名称')}</span>
           </div>
+        </div>
+        <div data-channel-section='keys' className='mt-5 scroll-mt-4'>
+          {existingNoAuth ? <p className='text-xs text-subtle'>{t('不需要 Key：转发与拉取模型都不发送鉴权头')}</p>
+            : pickedProvider && <ChannelKeyGroups key={`existing-${current}-${showToken}`}
+              draftId={`append-channel-${current}`} providerId={current}
+              baseUrl={() => pickedProvider.baseUrl || ''} protocol={() => pickedProvider.protocol || 'chat_completions'} />}
         </div>
       </DialogSection>
       {editGroups && current && <ChannelKeyGroupsDialog providerId={current} onClose={() => setEditGroups(false)} />}
@@ -681,7 +687,7 @@ export function CustomFootActions({
           disabled={busy}
           onClick={() => { void submitCreate(context) }}
         >
-          {busy && mode === 'create' ? t('提交中…') : t('创建并添加账号')}
+          {busy && mode === 'create' ? t('提交中…') : t('添加渠道')}
         </Button>
         <Button
           id={EXISTING_BUTTON_ID}

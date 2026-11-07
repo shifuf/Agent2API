@@ -502,5 +502,18 @@
   "：": ": ",
   "：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。": ": the models here won't appear under other providers, and aliases take effect only within this provider. To change the name / protocol / Base URL, use the “Settings” → Provider section of this provider's account on the Accounts page; to remove the whole provider, hover over it in the left rail and click × to delete it (along with its accounts).",
   "；其中 {keys} 由 models.dev 补齐": "; {keys} filled in by models.dev",
-  "；首个失败：{error}": "; first failure: {error}"
+  "；首个失败：{error}": "; first failure: {error}",
+  "预加载模型目录": "Preloaded model catalog",
+  "从厂商目录选择模型": "Choose a model from the provider catalog",
+  "选择后自动填写模型 ID 和名称，再选择渠道中的上游模型。": "Select a model to fill its ID and name, then choose upstream models from your channels.",
+  "更新模型目录": "Refresh model catalog",
+  "模型厂商": "Model provider",
+  "全部厂商": "All providers",
+  "搜索模型目录": "Search model catalog",
+  "搜索厂商、模型名称或 ID…": "Search provider, model name or ID…",
+  "目录更新失败，继续使用已缓存的模型。": "Catalog refresh failed. Cached models are still available.",
+  "模型目录暂时无法加载，请重试或填写自定义模型 ID。": "The model catalog is unavailable. Retry or enter a custom model ID.",
+  "正在使用缓存的模型目录。": "Using the cached model catalog.",
+  "共 {n} 个候选模型": "{n} candidate models",
+  "目录更新于 {time}": "Catalog updated {time}"
 }

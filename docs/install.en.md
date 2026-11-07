@@ -11,9 +11,11 @@ Every form is managed from the **browser panel** afterwards (accounts, gateway k
 This fork uses a manual model catalog across the gateway. Existing accounts, keys and upstream catalogs are retained, but upstream models are not published automatically. Add public models after upgrading; existing routing groups remain available.
 
 1. Under Add account → API template, create a channel with an API URL and named Key groups. Each group accepts multiple keys and its own discovered or selected upstream models. Empty or disabled groups do not forward requests.
-2. Under Model management → Add model, enter a public model ID and select its channels and upstream models. A public model can use several channels, with one upstream model per channel. Both desktop and mobile support editing.
+2. Under Model management → Add model, search by provider and select a model to fill its public ID and name, then select its channels and upstream models. Custom IDs remain supported. A public model can use several channels, with one upstream model per channel. Both desktop and mobile support editing.
 3. Select allowed channels and public models for each gateway Key. Both restrictions apply together. An empty channel selection allows all channels; an empty model selection allows all published models. Deleting a channel preserves existing Key restrictions.
 4. Manage subscriptions and install or import the proxy kernel on the Proxies page. Subscription nodes can serve accounts and proxy pools. Stopping the kernel or disabling a node does not make bound requests fall back to a direct connection.
+
+Channel creation and editing use a left drawer with Basic settings and API Key groups navigation. Model candidates preload from PublicProviderConf `dist/all.json` with a one-hour cache. Refresh model catalog updates them immediately; cached data remains available during network failures. Selecting a candidate does not publish it or change channel permissions.
 
 
 ## Contents

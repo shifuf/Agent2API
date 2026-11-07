@@ -13,13 +13,11 @@
  *
  * ── 两层弹窗（与旧实现的对应关系）──────────────────────────
  *   第 1 步 #add-modal       → 这里的列表 Dialog（选提供商），宽 1100px；
- *   第 2 步 #add-form-modal  → 这里的表单 Dialog（选方式 + 填凭证），宽 620px。
- * 两层都用组件库的 Dialog：Esc / 点遮罩 / 焦点陷阱 / 关闭后焦点归位由 Base UI
+ *   第 2 步 #add-form-modal  → 登录表单 Dialog；API 渠道使用左侧 Sheet。
+ * 两种形态都基于 Base UI Dialog：Esc / 点遮罩 / 焦点陷阱 / 关闭后焦点归位由 Base UI
  * 内建，嵌套弹窗的 Esc 只收最上面那层（旧实现靠 document 上的 keydown +
- * closeFormStep 手工分流）。**一处行为差异**：关掉表单层时旧实现只是把它的 DOM
- * 藏起来（表单内容与登录引擎的闭包都还在），这里会随之卸载 —— 输入框内容由
- * 模块级草稿（add-account-bridge 的 draftProps）保住，手机验证码那一步的
- * deviceId 会丢（用户回到同一家重填验证码即可，链路上的服务端行为不变）。
+ * closeFormStep 手工分流）。两种表单都 keepMounted：退回列表不会卸载登录引擎；
+ * 整个弹窗关闭后，输入框与 Key 分组仍由模块级草稿保留。
  *
  * ── 对外接口（调用点逐个 grep 确认过，见最终报告）────────────
  *   window.wbAddAccountModal  = { open, close }   —— 跨模块打开这张弹窗的唯一入口
@@ -32,7 +30,7 @@
 
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@ui'
+import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Sheet } from '@ui'
 
 import { shared, type CustomProviderRecord, type SharedWindow } from './add-account-bridge'
 import {
@@ -43,6 +41,7 @@ import {
   configOf,
 } from './add-account-configs'
 import { CustomFootActions, CustomProviderBlock, type CustomMode } from './add-custom-provider'
+import { ChannelDrawerContent } from './channel-drawer'
 import { ImportFootActions, ImportPanel } from './add-provider-import'
 import {
   IMPORT_SEGMENT_ENABLED,
@@ -195,9 +194,7 @@ function AddAccountModal({
   const heading = isCustom
     ? (state.providerHint
       ? t('登录 / 添加 {name} 账号', { name: customLabel || t('自定义提供商') })
-      : state.presetKey
-        ? t('使用 {name} 模板新建提供商', { name: customLabel })
-        : t('新建自定义提供商'))
+      : t('添加渠道'))
     : isDeepseek ? t('添加 DeepSeek 账号') : t('登录 / 添加 {name} 账号', { name: providerLabel })
 
   /** 第 1 步点一张卡：三种特殊取值分别落到自定义块的哪种模式（见 pickProvider 的旧注释） */
@@ -278,7 +275,7 @@ function AddAccountModal({
             退回列表，与旧实现 #add-form-modal 那层遮罩同义）。Base UI 对嵌套弹窗默认
             不画子层遮罩，遮罩同时是「点空白处」的落点（useDialogRoot 的 outsidePress
             认遮罩本身），所以这一档不能省。 */}
-        <Dialog open={state.step === 'form'} onOpenChange={next => { if (!next) backToPick() }}>
+        <Dialog open={state.step === 'form' && !isCustom} onOpenChange={next => { if (!next) backToPick() }}>
           <DialogContent keepMounted overlayForceRender className={isDeepseek
             ? 'compact-login-dialog acct-add-form-dialog w-[min(540px,calc(100vw-48px))]'
             : 'acct-add-form-dialog w-[min(620px,calc(100vw-48px))]'}>
@@ -298,18 +295,6 @@ function AddAccountModal({
                   footerHost={formFootHost}
                 />
               ))}
-              <div
-                className='add-provider-block'
-                style={isCustom ? undefined : { display: 'none' }}
-              >
-                <CustomProviderBlock
-                  mode={customMode}
-                  providerHint={state.providerHint}
-                  presetKey={state.presetKey}
-                  showToken={state.showToken}
-                  version={version}
-                />
-              </div>
               <DeepseekAccountBlock active={isDeepseek && state.step === 'form'}
                 footerHost={formFootHost} onClose={backToPick} />
               {hasBlock ? null : (
@@ -324,24 +309,29 @@ function AddAccountModal({
               )}
             </DialogBody>
             {/* 这一层统一一条底栏：各家段落把主按钮与说明 portal 进来（见 add-account-kit
-                的 AddFoot），自定义块本来就把按钮渲染在这里。宿主为空时整条收起 ——
+                的 AddFoot）。宿主为空时整条收起 ——
                 判据是样式表里的 `:has()`，不需要额外状态。 */}
             <DialogFooter className='acct-add-foot'>
-              {isCustom ? (
-                <div className='acct-add-foot-host'>
-                  <CustomFootActions mode={customMode} presetKey={state.presetKey} providerId={state.providerHint} />
-                </div>
-              ) : (
-                <div
-                  className='acct-add-foot-mount'
-                  ref={node => {
-                    if (node && formFootHost.parentElement !== node) node.append(formFootHost)
-                  }}
-                />
-              )}
+              <div
+                className='acct-add-foot-mount'
+                ref={node => {
+                  if (node && formFootHost.parentElement !== node) node.append(formFootHost)
+                }}
+              />
             </DialogFooter>
           </DialogContent>
         </Dialog>
+        {/* 与登录 Dialog 并列：抽屉不进入关闭 Dialog 的 inert 子树，登录引擎仍常驻。 */}
+        <Sheet open={state.step === 'form' && isCustom} onOpenChange={next => { if (!next) backToPick() }}>
+          <ChannelDrawerContent keepMounted title={heading}
+            description={state.presetKey ? t('使用 {name} 模板新建提供商', { name: customLabel }) : undefined}
+            footer={<div className='acct-add-foot-host'>
+              <CustomFootActions mode={customMode} presetKey={state.presetKey} providerId={state.providerHint} />
+            </div>}>
+            <CustomProviderBlock mode={customMode} providerHint={state.providerHint}
+              presetKey={state.presetKey} showToken={state.showToken} version={version} />
+          </ChannelDrawerContent>
+        </Sheet>
       </DialogContent>
     </Dialog>
   )

@@ -100,6 +100,7 @@ pub mod limiter;
 pub mod login;
 pub mod model_meta;
 pub mod model_rules;
+pub mod public_model_catalog;
 pub mod models;
 /// 提供商插件宿主：子进程监管 + RPC 客户端 + 包安装。
 ///

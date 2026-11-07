@@ -1,6 +1,7 @@
 import * as React from 'react'
-import { Alert, Button, Checkbox, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Input, Label, Textarea } from '@ui'
+import { Alert, Button, Checkbox, Input, Label, Sheet, Textarea } from '@ui'
 import { shared, describeError } from './add-account-bridge'
+import { ChannelDrawerContent } from './channel-drawer'
 import { t } from '../i18n'
 
 export type KeyGroupDraft = {
@@ -148,10 +149,25 @@ export function ChannelKeyGroupsDialog({ providerId, onClose }: { providerId: st
     } catch(error) { setError(describeError(error)) }
     finally { setBusy(false) }
   }
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent className='max-w-2xl'>
-    <DialogHeader><DialogTitle>{t('渠道 Key 分组')} · {provider?.name || ''}</DialogTitle></DialogHeader>
-    <DialogBody>{error && <Alert variant='destructive'>{error}</Alert>}{provider && <ChannelKeyGroups draftId={draftId} providerId={providerId}
-      baseUrl={() => provider.baseUrl || ''} protocol={() => provider.protocol || 'chat_completions'} initial={provider.keyGroups?.map(row => ({...row,apiKeys:[]}))} />}</DialogBody>
-    <DialogFooter><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button><Button disabled={busy || !provider} onClick={() => void save()}>{busy ? t('保存中…') : t('保存')}</Button></DialogFooter>
-  </DialogContent></Dialog>
+  return <Sheet open onOpenChange={open => { if (!open && !busy) onClose() }}>
+    <ChannelDrawerContent title={t('编辑渠道')} description={provider?.name}
+      footer={<><Button variant='outline' disabled={busy} onClick={onClose}>{t('取消')}</Button>
+        <Button disabled={busy || !provider} onClick={() => void save()}>{busy ? t('保存中…') : t('保存')}</Button></>}>
+      {error && <Alert variant='destructive'>{error}</Alert>}
+      {provider && <>
+        <section data-channel-section='details' className='scroll-mt-4'>
+          <h3 className='mb-3 text-sm font-semibold'>{t('基本配置')}</h3>
+          <div className='add-form'>
+            <div className='add-field'><Label htmlFor='edit-channel-name'>{t('名称')}</Label><Input id='edit-channel-name' readOnly value={provider.name || ''} /></div>
+            <div className='add-field'><Label htmlFor='edit-channel-base-url'>Base URL</Label><Input id='edit-channel-base-url' readOnly value={provider.baseUrl || ''} /></div>
+            <div className='add-field'><Label htmlFor='edit-channel-protocol'>{t('协议')}</Label><Input id='edit-channel-protocol' readOnly value={provider.protocol || 'chat_completions'} /></div>
+          </div>
+        </section>
+        <section data-channel-section='keys' className='scroll-mt-4'>
+          <ChannelKeyGroups draftId={draftId} providerId={providerId}
+            baseUrl={() => provider.baseUrl || ''} protocol={() => provider.protocol || 'chat_completions'} initial={provider.keyGroups?.map(row => ({...row,apiKeys:[]}))} />
+        </section>
+      </>}
+    </ChannelDrawerContent>
+  </Sheet>
 }

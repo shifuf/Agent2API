@@ -4,13 +4,17 @@ import { Alert, Badge, Button, Card, CardHeader, Checkbox, Dialog, DialogBody, D
   TableHead, TableHeader, TableRow } from '@ui'
 import { accountRequest, describeError, shared } from './add-account-bridge'
 import { type ManagedModel, upsertBinding, validateManagedModel } from '../../../ui-shared/managed-models'
+import { selectPublicModel, type PublicModelCatalog } from '../../../ui-shared/public-model-catalog'
+import { PublicModelPicker, usePublicModelCatalog } from '../../../ui-shared/public-model-picker'
 import { t } from '../i18n'
 
 type Source = { id: string; name: string; accountCount: number; models: Array<{ id: string; name?: string; kind?: string }> }
 type Catalog = { models: ManagedModel[]; sources: Source[]; revision: string; routingGroups?: Array<{ id: string; model: string; name: string }> }
 const blank = (): ManagedModel => ({ id: '', name: '', enabled: true, bindings: [] })
+const fetchPublicCatalog = (refresh: boolean) => accountRequest(refresh ? 'POST' : 'GET', '/api/models/public-catalog') as Promise<PublicModelCatalog>
 
 export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
+  const publicCatalog = usePublicModelCatalog(fetchPublicCatalog)
   const [catalog, setCatalog] = React.useState<Catalog | null>(null)
   const [query, setQuery] = React.useState('')
   const [error, setError] = React.useState('')
@@ -101,6 +105,8 @@ export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
     {draft && <Dialog open onOpenChange={open => { if (!open && !saving.current) setDraft(null) }}>
       <DialogContent className='max-w-[860px]'><DialogHeader><DialogTitle>{original ? t('编辑模型') : t('添加模型')}</DialogTitle></DialogHeader>
         <DialogBody className='gap-4'>
+          <PublicModelPicker state={publicCatalog} selectedId={draft.id} disabled={busy} t={t}
+            onSelect={model => setDraft(current => current ? selectPublicModel(current, model) : current)} />
           <div className='grid gap-4 sm:grid-cols-2'>
             <div className='flex flex-col gap-2'><Label htmlFor='managed-model-id'>{t('对外模型 ID')}</Label>
               <Input id='managed-model-id' maxLength={128} value={draft.id} disabled={busy} placeholder='my-model'

@@ -50,6 +50,16 @@ const out = path.join(root, runId);
 fs.mkdirSync(out, { recursive: true });
 const apiKey = `smoke-${randomUUID()}`;
 const results = { runId, binary, steps: [], consoleErrors: [], pageErrors: [], failedRequests: [], responseErrors: [], screenshots: [] };
+const publicCatalog = { providers: [
+  { id: 'maker-a', name: 'Maker A', models: [{ id: 'Alpha/Latest', name: 'Alpha Latest', kind: 'chat' }] },
+  { id: 'maker-b', name: 'Maker B', models: [{ id: 'shared', name: 'Shared B', kind: 'chat' }] },
+], sourceUrl: 'https://raw.githubusercontent.com/ThinkInAIXYZ/PublicProviderConf/refs/heads/dev/dist/all.json', fetchedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stale: false };
+let directoryRequests = 0;
+const mockCatalog = async context => context.route('**/api/models/public-catalog', route => {
+  directoryRequests++;
+  const refreshed = route.request().method() === 'POST';
+  return route.fulfill({ json: { success: true, data: { ...publicCatalog, stale: refreshed, ...(refreshed ? { error: 'upstream unavailable' } : {}) } } });
+});
 const serverLog = fs.openSync(path.join(out, 'server.log'), 'a');
 const mock = http.createServer((request, response) => {
   const key = request.headers.authorization || '';
@@ -128,6 +138,7 @@ try {
   results.base = base;
   browser = await chromium.launch({ ...(browserPath ? { executablePath: browserPath } : {}), headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' });
+  await mockCatalog(context);
   await context.addInitScript(key => {
     localStorage.setItem('agent2api.webKey', key);
     localStorage.setItem('agent2api.webKey.origin', key);
@@ -152,6 +163,26 @@ try {
     await desktop.getByText('选择渠道 / 上游模型', { exact: true }).waitFor();
     await screenshot(desktop, 'desktop-model-editor-empty');
     await desktop.getByRole('button', { name: '取消', exact: true }).click();
+  });
+
+  await step('preloaded manufacturer catalog fills model IDs and preserves draft on refresh failure', async () => {
+    try {
+      await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
+      await desktop.getByRole('combobox', { name: '模型厂商', exact: true }).selectOption('maker-a');
+      await desktop.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).click();
+      assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
+      assert.equal(await desktop.locator('#managed-model-name').inputValue(), 'Alpha Latest');
+      await desktop.getByRole('button', { name: '更新模型目录', exact: true }).click();
+      await desktop.getByText('目录更新失败，继续使用已缓存的模型。', { exact: true }).waitFor();
+      assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
+      await desktop.getByRole('combobox', { name: '模型厂商', exact: true }).selectOption('maker-b');
+      assert.equal(await desktop.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).count(), 0);
+      await desktop.getByRole('button', { name: 'Maker B / shared', exact: true }).click();
+      assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'shared');
+      assert(directoryRequests >= 2, 'Model page did not preload and refresh the directory');
+      assert.deepEqual((await api('/api/models/catalog')).models, []);
+      await screenshot(desktop, 'desktop-public-model-catalog');
+    } finally { await desktop.getByRole('button', { name: '取消', exact: true }).click(); }
   });
 
   await step('API template channel shows independent Key groups and selectable models', async () => {
@@ -227,6 +258,7 @@ try {
   });
 
   const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true, locale: 'zh-CN' });
+  await mockCatalog(mobileContext);
   await mobileContext.addInitScript(key => {
     localStorage.setItem('agent2api.webKey', key);
     localStorage.setItem('agent2api.webKey.origin', key);
@@ -239,6 +271,10 @@ try {
     await mobile.getByText('browser-public-model', { exact: true }).waitFor();
     await screenshot(mobile, 'mobile-models');
     await mobile.getByRole('button', { name: '编辑', exact: true }).click();
+    await mobile.getByRole('combobox', { name: '模型厂商', exact: true }).selectOption('maker-a');
+    await mobile.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).click();
+    assert.equal(await mobile.locator('#mobile-model-id').inputValue(), 'Alpha/Latest');
+    await mobile.locator('#mobile-model-id').fill('browser-public-model');
     await mobile.locator('#mobile-model-name').fill('Edited from mobile smoke');
     await screenshot(mobile, 'mobile-model-editor');
     await mobile.getByRole('button', { name: '保存', exact: true }).click();

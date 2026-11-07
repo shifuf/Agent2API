@@ -502,5 +502,18 @@
   "：": ":",
   "：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。": ": os modelos daqui não aparecem em outros provedores e os aliases só valem dentro deste. Para alterar nome / protocolo / Base URL, use “Configurações” → campo do provedor nas contas desta família, na página de contas; se não quiser mais o provedor inteiro, passe o mouse sobre ele na barra lateral esquerda e clique em × para excluir (junto com as contas dele).",
   "；其中 {keys} 由 models.dev 补齐": "; {keys} preenchido(s) pelo models.dev",
-  "；首个失败：{error}": "; primeira falha: {error}"
+  "；首个失败：{error}": "; primeira falha: {error}",
+  "预加载模型目录": "Catálogo de modelos pré-carregado",
+  "从厂商目录选择模型": "Selecionar um modelo no catálogo de fornecedores",
+  "选择后自动填写模型 ID 和名称，再选择渠道中的上游模型。": "Selecione um modelo para preencher o ID e o nome, depois escolha os modelos upstream dos seus canais.",
+  "更新模型目录": "Atualizar catálogo de modelos",
+  "模型厂商": "Fornecedor do modelo",
+  "全部厂商": "Todos os fornecedores",
+  "搜索模型目录": "Pesquisar catálogo de modelos",
+  "搜索厂商、模型名称或 ID…": "Pesquisar fornecedor, nome ou ID do modelo…",
+  "目录更新失败，继续使用已缓存的模型。": "Falha ao atualizar o catálogo. Os modelos em cache continuam disponíveis.",
+  "模型目录暂时无法加载，请重试或填写自定义模型 ID。": "O catálogo está indisponível. Tente novamente ou insira um ID de modelo personalizado.",
+  "正在使用缓存的模型目录。": "Usando o catálogo de modelos em cache.",
+  "共 {n} 个候选模型": "{n} modelos disponíveis para seleção",
+  "目录更新于 {time}": "Catálogo atualizado em {time}"
 }

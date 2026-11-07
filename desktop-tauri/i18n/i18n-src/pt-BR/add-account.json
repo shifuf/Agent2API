@@ -670,5 +670,9 @@
   "（有效期 {window}）": "(validade {window})",
   "（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）。": " (pool de assinatura; nomes de modelo com o prefixo cline-pass/, e a conta precisa da assinatura correspondente).",
   "，下一次最快 {minutes} 分钟后": ", próxima tentativa em pelo menos {minutes} min",
-  "，并从 {n} 把 Key 的可用提供商里移除": ", e removido dos provedores permitidos de {n} keys"
+  "，并从 {n} 把 Key 的可用提供商里移除": ", e removido dos provedores permitidos de {n} keys",
+  "添加渠道": "Adicionar canal",
+  "编辑渠道": "Editar canal",
+  "渠道配置": "Configurações do canal",
+  "基本配置": "Configurações básicas"
 }
