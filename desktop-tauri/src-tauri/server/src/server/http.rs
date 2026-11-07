@@ -596,6 +596,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/models/refresh", post(api::models::refresh_models))
         // 模型管理（启停 / 隐藏 / 映射）与网关 Key 列表：都是写配置的管理接口，挂 protected
         .route("/api/models/manage", get(api::model_manage::get_manage))
+        .route("/api/models/catalog", get(api::managed_models::get_catalog).post(api::managed_models::save_model))
         .route("/api/models/compact-routes", get(api::compact_routes::get_routes).put(api::compact_routes::put_routes))
         .route("/api/models/state", post(api::model_manage::set_state))
         .route("/api/models/mappings", post(api::model_manage::add_mapping))

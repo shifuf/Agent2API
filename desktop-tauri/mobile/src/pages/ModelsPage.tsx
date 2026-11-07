@@ -1,4 +1,5 @@
 import { modelReasoning } from '../../../ui-shared/models-reasoning'
+import { ManagedModelsPage } from './ManagedModelsPage'
 import { activeModelBindings } from '../../../ui-shared/models-bindings'
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from '@ui'
 import { useMemo, useRef, useState } from 'react'
@@ -32,6 +33,16 @@ import { Toggle as UiToggle } from '@ui'
 type Filter = 'all' | 'enabled' | 'hidden'
 
 export function ModelsPage() {
+  const [sources, setSources] = useState(false)
+  if (!sources) return <ManagedModelsPage onSources={() => setSources(true)} />
+  return <div className='flex min-h-0 flex-1 flex-col'>
+    <div className='m-section'><Button variant='outline' onClick={() => setSources(false)}>{t('返回模型管理')}</Button>
+      <p className='mt-2 text-xs text-subtle'>{t('这里是上游候选目录。请在模型管理中添加对外模型后使用。')}</p></div>
+    <UpstreamModelsPage />
+  </div>
+}
+
+function UpstreamModelsPage() {
   const [models, setModels] = useState<ManageModel[] | null>(null)
   const [mappings, setMappings] = useState<ManageMapping[]>([])
   const [error, setError] = useState('')

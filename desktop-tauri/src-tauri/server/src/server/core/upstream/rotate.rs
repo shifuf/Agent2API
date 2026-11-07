@@ -495,7 +495,9 @@ fn scoped_accounts(
     request_routing: Option<&super::route_context::RequestRouting>,
 ) -> Vec<Value> {
     let accounts = accounts_in_providers(service, providers, pinned);
-    let accounts = if pinned.is_some() { accounts } else if let Some(request_routing) = request_routing {
+    let accounts = if let Some(routing) = request_routing.filter(|routing| routing.source_test.is_some()) {
+        routing.accounts(accounts)
+    } else if pinned.is_some() { accounts } else if let Some(request_routing) = request_routing {
         request_routing.accounts(accounts)
     } else {
         crate::server::core::routing_scope::apply_accounts(&accounts, model)

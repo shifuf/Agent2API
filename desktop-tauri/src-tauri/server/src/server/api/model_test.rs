@@ -468,6 +468,30 @@ struct TestOutcome {
     raw_response: Option<String>,
 }
 
+/// A source test names an upstream model, while gateway Key allowlists name public models.
+/// Compare the resolved target to the Key's published bindings, never the two names alone.
+fn source_test_allowed(scope: &KeyScope, provider: &str, requested: &str, account_id: &str) -> bool {
+    if !scope.restricts_models() { return true; }
+    let target = if crate::server::core::custom_providers::is_custom_provider_id(provider) {
+        crate::server::core::custom_providers::source_wire_model_for(provider, requested).0
+    } else {
+        catalog::source_wire_target_for_provider(requested, provider).model
+    };
+    if crate::server::core::managed_models::list().iter().any(|model| {
+        model.enabled && scope.allows_model(&model.id) && model.bindings.iter().any(|binding| {
+            binding.provider.eq_ignore_ascii_case(provider) && binding.model.eq_ignore_ascii_case(&target)
+        })
+    }) { return true; }
+    // Routing-group access is additionally limited to the group's explicit accounts.
+    !account_id.is_empty() && crate::server::config::routing_profiles().groups.values().any(|group| {
+        scope.allows_model(&group.model) && group.members.iter().any(|member| {
+            member.included && member.provider.eq_ignore_ascii_case(provider)
+                && member.model.eq_ignore_ascii_case(&target)
+                && member.accounts.iter().any(|id| id == account_id)
+        })
+    })
+}
+
 /// POST /api/models/test
 pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
     let access = match super::model_access::authenticate(&headers, super::model_access::MODEL_TEST) {
@@ -487,7 +511,8 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
         return errors::management_error(400, "缺少 model");
     }
     let key_scope = access.scope.clone().unwrap_or_default();
-    if !key_scope.allows_model(&model) {
+    let account_id = text_field(&payload, "account_id", 128);
+    if !source_test_allowed(&key_scope, &provider, &model, &account_id) {
         let error = errors::GatewayError::with_status(404, format!("模型 '{model}' 不在这把网关 Key 的可用模型列表里"))
             .with_code("model_not_found");
         pipeline::record_early_failure(&state, logging::now_ms(), &model, "", &access.source, &error);
@@ -510,7 +535,7 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
             ),
         );
     }
-    if crate::server::core::providers::images::provider_model_is_image(&provider, &model) {
+    if crate::server::core::providers::images::source_provider_model_is_image(&provider, &model) {
         return errors::management_error(400, "图片生成模型请通过 /v1/images/generations 调用，暂不支持对话测试");
     }
     let protocol_raw = text_field(&payload, "protocol", 32);
@@ -518,7 +543,6 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
         Ok(protocol) => protocol,
         Err(message) => return errors::management_error(400, message),
     };
-    let account_id = text_field(&payload, "account_id", 128);
     let proxy_raw = text_field(&payload, "proxy", 128);
     let (proxy_override, proxy_label) = match parse_proxy_override(&proxy_raw) {
         Ok(parsed) => parsed,

@@ -14,7 +14,7 @@
 //! 面板上更新完成后也会提示。
 //!
 //! ── 开关：只认环境变量 ────────────────────────────────────────
-//! `AGENT2API_SELF_UPDATE=1`（Dockerfile 里默认设好），仅容器启用直接替换。
+//! `AGENT2API_SELF_UPDATE=1` 才允许容器内直接替换；本分支镜像默认关闭。
 //! systemd 走独立受限升级程序（systemd 模块），桌面端走平台安装器。
 //! 未受监管的前台进程不提供“退出即重启”，避免退出后服务无人拉起。
 //!
@@ -56,7 +56,7 @@ const MAX_META_BYTES: u64 = 1024 * 1024;
 const CHECKSUM_TIMEOUT_MS: u64 = 30_000;
 
 /// 部署开关：`AGENT2API_SELF_UPDATE=1`（严格等于 1，与 ALLOW_NO_KEY 同口径）。
-/// 设 `0` 或空即关闭，Dockerfile 里默认 `1`。
+/// 设 `0` 或空即关闭，本分支 Dockerfile 默认 `0`。
 pub fn enabled() -> bool {
     std::env::var("AGENT2API_SELF_UPDATE")
         .map(|value| value.trim() == "1")

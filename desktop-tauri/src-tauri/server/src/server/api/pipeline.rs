@@ -29,8 +29,7 @@ use crate::server::config;
 use crate::server::core::key_scope::{self, KeyScope};
 use crate::server::core::limiter;
 use crate::server::core::providers::catalog::{
-    advertised_manifest_contains, default_model_catalog, default_model_usable,
-    has_available_providers, model_blocked_everywhere, suggest_advertised,
+    advertised_manifest_contains, model_blocked_everywhere, suggest_advertised,
 };
 use crate::server::core::upstream::usage::{self, RequestTelemetry, TelemetrySnapshot};
 use crate::server::errors::GatewayError;
@@ -110,56 +109,10 @@ pub mod terminal {
 
 // ─── 模型解析 ───────────────────────────────────────────────
 
-/// 解析并落地请求体里的模型名，返回**实际使用**的模型。
-///
-/// 顺序（与改造前的 `/v1/chat/completions` 逐条一致）：
-///   ① 未指定 → 默认模型回落链（config 的 defaultModel → 目录 isDefault → 目录首项）
-///   ② 路由全链（原生 + 映射）全关闭 → 404（`model_not_found`）
-///   ③ **广告视图里没有** → 404（带相近模型提示，`model_not_found`）
-///
-/// ── ② 与 ③ 的状态码为什么是 404（本轮修正）────────────────────
-/// 这两个判定的语义都是「这个模型对你（下游）不存在」：② 是网关主动关闭、
-/// ③ 是目录里压根没有。改造前用 400 表达「请求有问题」，但 OpenAI 兼容协议
-/// 对「模型不存在」的约定是 **404 + code=model_not_found**（OmniProxy 的
-/// `fail(res, ..., 404, 'model_not_found')` 同一形态，客户端据此识别并刷新
-/// 模型列表）。改用 404 还消除了一个不一致：R9 白名单那条原本就是 404，
-/// 同一个 code 下的三条路径现在状态码也一致了。
-///
-/// ── ③ 为什么以广告视图为准（「列表里没有就拒绝」）──────────────
-/// 客户端手里的模型清单来自 `/v1/models`；点一个那里没有的名字，应当立刻
-/// 404，而不是转给上游换回一个与真实原因无关的上游报错。收窄掉的模型
-/// （Cline 按账号额度池收窄、没有可用账号的家、被关闭的）因此**不再
-/// 可点名调用** —— 校验口径与广告口径就此统一，不存在「列表里看不到却能调通」
-/// 的中间态。判定见 `catalog::advertised_manifest_contains`。
-///
-/// 两处**例外**（都不做这层判定，交给转发层给更准确的错误）：
-///   - 客户端**没点名**（走 ① 注入的默认模型）：默认值是网关自己挑的，
-///     不该被自己的广告视图否掉；
-///   - **一家可用提供商都没有**（没加账号）：此时广告视图必然为空，
-///     一律报「模型不存在」会盖掉「没有可用账号，无账号可转发」这条
-///     可操作的提示。同一条例外对下面的白名单判定也生效（理由见那里）。
-///
-/// ── 映射为什么不再在这里改写（照抄 OmniProxy 的候选语义）──────
-/// 改造前的映射是「请求名命中 alias → payload 整体改写成 target」：请求名
-/// 与上游 id 同名时，改写会**遮蔽**那个同名的上游模型（它的原生路由收不到
-/// 流量），所以旧版干脆禁止同名。映射语义重做后（同名允许、同名校多提供商
-/// 主备），改写下沉到**发送侧按家进行**（`payload::send_body` →
-/// `catalog::wire_target_for_provider`）：请求名全程保持客户端原值，原生承载
-/// 家收到本名、映射家收到各自的 target —— 候选链的展开在
-/// `providers::router::route_for_forward`。
-///
-/// `payload` 会被就地改写（仅填默认模型）：后续转发与记账都用一致的请求名，
-/// 而客户端原始 body 的去重键在调用方算（见各 handler）。
-///
-/// ── `scope`：网关 Key 的可用模型白名单（R9）────────────────────
-/// `None` 只表示不限制白名单；调用方必须先完成 Key 鉴权。
-/// 有 scope 时在**这里**判，而不是留到转发层：模型白名单的语义是
-/// 「这个模型对你这把 Key 不存在」，所以拒绝形态与「模型不在目录里」逐字相同
-/// （404 + `model_not_found`，照抄 OmniProxy 的
-/// `if (!keyAllowsModel(...)) return fail(res, \`模型 '${publicModel}' 不可用\`, 404, 'model_not_found')`）——
-/// 连「存在性」都不该向下游暴露：能列出却打不通，是比 404 更难解释的一种。
-///
-/// 默认模型回落也必须收窄到 Key 的模型白名单；权限检查不因缺少账号而跳过。
+/// 仅接受手动发布的模型或已创建的路由组。省略 model 时，从当前 Key 可用的
+/// 对外目录选择默认模型；空目录直接拒绝，不回退到任意上游。
+/// 请求名保留到发送侧，再按实际渠道绑定改写成上游模型 ID。
+/// scope 仅代表授权范围，调用方仍须先完成鉴权。
 pub fn resolve_model(
     state: &ServerState,
     payload: &mut Value,
@@ -188,59 +141,21 @@ fn resolve_model_for(
         object.remove("_wb_route_continue");
     }
     let requested = model_field_text(payload);
-    // 客户端是否**点名**了模型：默认值注入后这个事实就丢了，先记下来
     let client_named = !requested.is_empty();
     if !client_named {
-        // 客户端没点名 → 网关默认。三级回落链的候选集合走
-        // `default_model_catalog()`（按「认不认默认模型概念」收窄后的聚合清单）：
-        // 一家都不认时不注入 model，按「未指定」处理（让上游用它自己的默认）
-        let snapshot = config::current();
-        let default_model = snapshot.default_model();
-        // 白名单收窄：不限制时 `allowed` 恒真，等价于原逻辑（零行为差异）
-        let allowed = |name: &str| key_scope::allows_model(scope, name);
-        let models = default_model_catalog();
-        let fallback = if (config::routing_profiles().group_for_model(default_model).is_some() || default_model_usable(default_model)) && allowed(default_model) {
-            Some(default_model.to_string())
-        } else {
-            models
-                .iter()
-                .find(|model| {
-                    model.get("isDefault").map(value_is_truthy).unwrap_or(false)
-                        && model
-                            .get("id")
-                            .map(crate::server::core::models::shape_value_text)
-                            .map(|id| allowed(&id))
-                            .unwrap_or(false)
-                })
-                .or_else(|| {
-                    models.iter().find(|model| {
-                        model
-                            .get("id")
-                            .map(crate::server::core::models::shape_value_text)
-                            .map(|id| allowed(&id))
-                            .unwrap_or(false)
-                    })
-                })
-                .and_then(|model| model.get("id"))
-                .filter(|id| !id.is_null())
-                .map(|id| match id {
-                    Value::String(text) => text.clone(),
-                    other => other.to_string(),
-                })
+        let models = crate::server::core::providers::catalog::models_response(state.store(), scope);
+        let data = models.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        let default = config::current().default_model().to_string();
+        let compatible: Vec<_> = data.iter().filter(|item|
+            crate::server::core::providers::images::model_is_image(item) == image_generation).collect();
+        let fallback = compatible.iter().find(|item|
+            crate::server::core::models::model_id(item).eq_ignore_ascii_case(&default))
+            .or_else(|| compatible.first()).map(|item| crate::server::core::models::model_id(item));
+        let Some(fallback) = fallback else {
+            return Err(GatewayError::with_status(404, "没有可用的对外模型，请先在模型管理中添加模型并配置网关 Key 范围")
+                .with_code("model_not_found"));
         };
-        if let Some(fallback) = fallback {
-            if let Some(object) = payload.as_object_mut() {
-                object.insert("model".to_string(), Value::String(fallback));
-            }
-        } else if scope.is_some_and(KeyScope::restricts_models) {
-            // 这条 Key 限制了模型、而目录里**没有一个是它被授权的**：
-            // 继续往下走只会让上游拿它自己的默认模型去回答（白名单形同虚设），
-            // 所以在这里就明确拒绝。文案指向该去改什么（管理页那两处）。
-            return Err(GatewayError::bad_request(
-                "这把网关 Key 的可用模型列表里没有任何当前可用的模型：请到「网关 Key」页为它勾选可用模型",
-            )
-            .with_code("model_not_found"));
-        }
+        payload["model"] = Value::String(fallback);
     }
     let requested_model = model_field_text(payload);
     // 空路由也是已登记入口；权限照常检查，具体不可用原因交给组内选路报告。
@@ -263,22 +178,9 @@ fn resolve_model_for(
         ))
         .with_code("model_not_found"));
     }
-    // ③ 广告视图里没有 → 400（「列表里没有就拒绝」；例外见函数头说明）
+    // 模型必须在手动发布的目录中；渠道范围由转发层再次检查。
     if client_named && !requested_model.is_empty() {
-        // 例外：**一家可用提供商都没有**（没加账号）时跳过本判定 —— 广告视图
-        // 必然为空，一律报「模型不存在」会盖掉「没有可用账号，无账号可转发」
-        // 这条更可操作的提示（见函数头两条例外的第二条例）。
-        // ── 这里的 active 用**未按 Key 收窄**的那一份（刻意）───────────
-        // `/v1/models` 按 Key 的提供商白名单收窄后再广告（见
-        // `catalog::models_response`），这里却用全量：两者的差异正好构成
-        // 「模型存在、但这把 Key 不允许任何承载它的家」这一种情形。
-        // 那种情形**必须由转发层拒**（`provider_loop::forward_with_providers`
-        // 的可用提供商分支），因为只有它手里有候选链、能说清「提供它的家都被
-        // 你这把 Key 挡了」；在这里按全量放行、到转发层给准确文案，
-        // 比在这里用收窄后的视图报一句笼统的「模型不存在」对用户有用得多
-        //（后者会让人去查模型管理页的启停，而真正要改的是 Key 的可用提供商）。
-        if has_available_providers(state.store())
-            && !advertised_manifest_contains(state.store(), &requested_model)
+        if !advertised_manifest_contains(state.store(), &requested_model)
         {
             let hint = suggest_advertised(state.store(), &requested_model, 5);
             let message = format!(
@@ -1239,6 +1141,7 @@ mod tests {
             status: None,
             start: None,
             end: None,
+            ..Default::default()
         };
         let page = stats.query_requests(&query);
         let entries = page.get("entries").and_then(Value::as_array);

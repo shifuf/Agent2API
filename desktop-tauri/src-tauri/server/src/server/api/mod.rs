@@ -113,6 +113,7 @@ pub mod keys_api;
 pub mod keepalive;
 pub mod logs_api;
 pub mod model_manage;
+pub mod managed_models;
 pub(crate) mod model_access;
 // models.dev 模型元数据（开关 / 状态 / 立即刷新）：与「逐家上游目录」的
 // /api/models/refresh 分开，理由见该文件模块头

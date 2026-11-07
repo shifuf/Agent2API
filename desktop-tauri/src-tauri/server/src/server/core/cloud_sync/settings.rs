@@ -464,6 +464,7 @@ mod tests {
                 base_url: "https://dav.example.com/dav".to_string(),
                 username: "u".to_string(),
                 password: "x".to_string(),
+                ..WebDavConfig::default()
             },
             ..CloudSyncSettings::default()
         };
@@ -480,6 +481,7 @@ mod tests {
                 base_url: "https://dav.example.com/dav".to_string(),
                 username: "u".to_string(),
                 password: "x".to_string(),
+                ..WebDavConfig::default()
             },
             ..CloudSyncSettings::default()
         };

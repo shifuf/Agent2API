@@ -4,7 +4,7 @@
 //! - `POST /api/custom-providers`          → 新建提供商，**同时**创建该家第一个账号
 //! - `POST /api/custom-providers/update`   → `{id, name?, protocol?, baseUrl?, enabled?, keyGroups?}`
 //! - `POST /api/custom-providers/remove`   → `{id}`，级联删除名下全部账号，
-//!                                            并把这家的 id 从各 Key 的可用提供商白名单里摘掉
+//!                                            保留各网关 Key 已配置的渠道范围限制
 //! - `POST /api/custom-providers/models`   → `{providerId, models, mappings}`，整表保存
 //! - `POST /api/custom-providers/fetch-models` → `{providerId}`，服务端代理拉取上游清单
 //!
@@ -30,7 +30,6 @@ use axum::extract::State;
 use axum::response::Response;
 use serde_json::{json, Value};
 
-use crate::server::core::api_keys;
 use crate::server::core::account_store::custom_accounts::key_groups;
 use crate::server::core::custom_providers;
 use crate::server::errors;
@@ -276,17 +275,8 @@ fn describe_changes(before: Option<&Value>, after: &Value) -> String {
 
 // ─── POST /api/custom-providers/remove ──────────────────────
 
-/// 删除提供商并**级联删除名下全部账号**（语义见 `custom_providers::remove`），
-/// 同时把这家的 id 从各 Key 的「可用提供商」白名单里摘掉（见 `api_keys::
-/// strip_provider_from_allowlists`）。
-///
-/// 响应 `{removed, accountsRemoved, keysUpdated, keysUnrestricted, list}`：
-/// `removed` 是删掉的提供商数（存在即 1），`accountsRemoved` 是随之清掉的账号数
-/// —— 界面据此提示「已删除 N 个账号」，`list` 让前端就地重绘账号页，不必再拉一次。
-/// 后两个字段是白名单清理的读数：`keysUpdated` 是「可用范围里提到过这家」、因此
-/// 被改动的 Key 数；`keysUnrestricted` 是其中**摘完已无任何可用提供商**、于是恢复成
-/// 「不限制」的 Key 数。界面必须把后者说出来 —— 那是这把 Key 的权限从「谁都进不来」
-/// 变成「哪家都能进」，不能在提示里省掉（取舍论证见 core 侧那个函数的说明）。
+/// 删除渠道及名下账号，保留网关 Key 的渠道限制，避免删除最后一个允许渠道时扩大权限。
+/// keysUpdated / keysUnrestricted 保留响应兼容性，始终为零。
 pub async fn remove_custom_provider(State(state): State<ServerState>, body: Bytes) -> Response {
     let object = match body_object(&body) {
         Ok(object) => object,
@@ -313,37 +303,7 @@ pub async fn remove_custom_provider(State(state): State<ServerState>, body: Byte
         Ok(count) => count,
         Err(message) => return errors::management_error(400, message),
     };
-    // 白名单清理在删家**之后**：反过来的话（先放宽白名单、再删家）一旦第二步失败，
-    // 就留下「限制已经松开、家却还在」的状态 —— 那是静默放宽权限，比留个死 id 严重。
-    // 这一步失败不改变响应（家已经删了，事实如此），失败的后果是那几把 Key 维持
-    // 原来的「谁都进不来」，用户重存一次可用范围即可 —— 与清理前逐字一致。
-    let stripped = api_keys::strip_provider_from_allowlists(&id);
-    let unrestricted = stripped
-        .iter()
-        .filter(|entry| entry.allowed_providers.is_empty())
-        .count();
-    let mut note = format!("，连带清除 {accounts_removed} 个账号");
-    if !stripped.is_empty() {
-        // 用 `name || id` 列名：Key 名是可选的（允许空串），空名字只会让日志多一个
-        // 「（）」；id 一定能定位到那把 Key
-        let names: Vec<String> = stripped
-            .iter()
-            .map(|entry| {
-                let name = entry.name.trim();
-                if name.is_empty() { entry.id.clone() } else { format!("{}（{}）", name, entry.id) }
-            })
-            .collect();
-        note.push_str(&format!(
-            "；并从 {} 把 Key 的可用提供商里摘掉这家（{}）",
-            stripped.len(),
-            names.join("、"),
-        ));
-        if unrestricted > 0 {
-            note.push_str(&format!(
-                "，其中 {unrestricted} 把已无其它可用提供商，恢复为不限制",
-            ));
-        }
-    }
+    let note = format!("，连带清除 {accounts_removed} 个账号；保留网关 Key 的渠道限制");
     logging::log(
         "[CustomProvider]",
         &format!(
@@ -354,8 +314,8 @@ pub async fn remove_custom_provider(State(state): State<ServerState>, body: Byte
     ok_json(json!({
         "removed": 1,
         "accountsRemoved": accounts_removed,
-        "keysUpdated": stripped.len(),
-        "keysUnrestricted": unrestricted,
+        "keysUpdated": 0,
+        "keysUnrestricted": 0,
         "list": store.list_accounts(),
     }))
 }

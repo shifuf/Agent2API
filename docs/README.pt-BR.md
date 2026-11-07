@@ -60,9 +60,9 @@ Três formas — escolha a que combina com o seu ambiente; **o guia completo de 
 | --- | --- | --- |
 | **Desktop** (Windows / macOS / Linux) | `Agent2API_<versão>_x64-setup.exe`, `_universal.dmg`, `_amd64.deb`, `_amd64.AppImage` | Janela do app |
 | **Servidor** (Windows Server / Linux, sem GUI) | `agent2api-server-windows-amd64.zip`, `agent2api-server-linux-<arch>.tar.gz` | Painel no navegador |
-| **Docker** | `aimodcc/agent2api:latest` (amd64 / arm64) | Painel no navegador |
+| **Docker** | `ghcr.io/shifuf/agent2api:latest` (amd64 / arm64) | Painel no navegador |
 
-**Desktop**: adicione um provedor e uma conta, crie uma chave do gateway e aplique o perfil na página "Agent", ou configure o cliente com `http://127.0.0.1:3065/v1` e essa chave. Recursos adicionais exigem o plugin correspondente.
+**Desktop**: adicione um canal e uma conta, publique um modelo em Gerenciamento de Modelos, crie uma chave do gateway e aplique o perfil na página "Agent", ou configure o cliente com `http://127.0.0.1:3065/v1` e essa chave. Recursos adicionais exigem o plugin correspondente.
 
 **Servidor** (sem GUI; registrado como serviço do sistema e iniciado no boot):
 
@@ -80,7 +80,7 @@ cd C:\agent2api-pkg; .\install-service.ps1
 **Docker**:
 
 ```bash
-docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/data aimodcc/agent2api:latest
+docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/data ghcr.io/shifuf/agent2api:latest
 ```
 
 Em qualquer forma, abra o painel depois (`http://127.0.0.1:3065/`; use o IP do host nas formas servidor e Docker), registre o administrador e crie uma chave na página "Gateway Keys". Teste de conectividade: `curl http://127.0.0.1:3065/health`

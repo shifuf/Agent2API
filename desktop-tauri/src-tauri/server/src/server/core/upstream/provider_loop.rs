@@ -439,28 +439,21 @@ pub(super) async fn forward_with_providers(
         ctx.routing.providers(crate::server::core::providers::images::operation_providers(&model, operation))
     } else {
         let available = crate::server::core::providers::catalog::forwarding_providers(&model);
-        // 压缩目标在入口校验后被删除时应报错，不能落到普通请求的默认提供商兜底。
-        let available = if !ctx.compact_routed && available.is_empty() && crate::server::core::providers::catalog::providers_for_model(&model).is_empty() {
-            vec![crate::server::core::providers::DEFAULT_PROVIDER_ID.to_string()]
-        } else { available };
+        // An explicitly managed model deleted after validation must not fall back
+        // to an unrelated provider or to an upstream's default model.
         ctx.routing.providers(available)
     };
     let candidates: Vec<_> = if ctx.images.is_some() || ctx.routing.group.is_some() {
         candidates
     } else {
         candidates.into_iter().filter(|provider| {
-            !crate::server::core::providers::images::provider_model_is_image(provider, &model)
+            if ctx.ignore_model_gate {
+                !crate::server::core::providers::images::source_provider_model_is_image(provider, &model)
+            } else {
+                !crate::server::core::providers::images::provider_model_is_image(provider, &model)
+            }
         }).collect()
     };
-    if !ctx.compact_routed && ctx.routing.group.is_none() && crate::server::core::providers::catalog::providers_for_model(&model).is_empty() {
-        logging::verbose(
-            "[Upstream]",
-            &format!(
-                "模型 {} 不在聚合目录中，按默认提供商转发",
-                if model.is_empty() { "(未指定)" } else { &model },
-            ),
-        );
-    }
     if candidates.is_empty() {
         if ctx.routing.group.is_some() {
             return Err(GatewayError::with_status(503, "此路由组没有参与成员，请在路由页加入模型；未回退全局或默认提供商").with_code("route_empty"));
@@ -691,9 +684,7 @@ async fn attempt_queue(
         if let Some(override_proxy) = ctx.proxy_override {
             target.proxy = override_proxy.clone();
             target.proxy_notice = None;
-        } else if crate::server::core::providers::is_scoped_runtime_provider(&target.provider)
-            && target.proxy_notice.is_some()
-        {
+        } else if target.proxy_notice.is_some() {
             return Err(GatewayError::with_status(400,
                 "指定账号的代理不可用；未回退直连、系统代理或其他账号")
                 .with_code("account_proxy_unavailable"));
@@ -759,7 +750,7 @@ async fn attempt_queue(
                             // 自定义家没有「同名多池」之类的键重排，冷却键
                             // 与发送名同源（`custom::forward::cooldown_model`）。
                             if error.is_quota_limit() {
-                                let wire_model = if ctx.routing.group.is_some() { selected_model.clone() } else {
+                                let wire_model = if ctx.routing.group.is_some() || ctx.ignore_model_gate { selected_model.clone() } else {
                                     custom_forward::cooldown_model(&custom_provider_id, &model)
                                 };
                                 rotate::mark_account_limited(
@@ -2319,13 +2310,15 @@ async fn attempt_custom(
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
     // 覆盖一次（note_upstream_model 是覆盖式，最后一次为准；空串被内部过滤）。
-    let wire_model = if ctx.routing.group.is_some() { send.wire_model.clone() } else { custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)) };
+    let wire_model = if ctx.routing.group.is_some() { send.wire_model.clone() }
+        else if ctx.ignore_model_gate { custom_providers::source_wire_model_for(&provider_id, &model_of(ctx.body)).0 }
+        else { custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)) };
     ctx.telemetry.note_upstream_model(&wire_model);
     logging::verbose(
         "[Upstream]",
         &format!(
             "自定义转发 model={} stream={} account={} priority={} 出口={} provider={provider_id}",
-            limit_model_label(&model_of(ctx.body), &custom_forward::cooldown_model(&provider_id, &model_of(ctx.body))),
+            limit_model_label(&model_of(ctx.body), &wire_model),
             ctx.stream,
             target.account_id.as_deref().unwrap_or("-"),
             target
@@ -2357,6 +2350,7 @@ async fn attempt_custom(
             target.account_id.as_deref().unwrap_or(""),
             &send.body,
             ctx.routing.group.as_ref().map(|group| group.model.as_str()),
+            ctx.ignore_model_gate,
             proxy.clone(),
             ctx.stream,
             ctx.telemetry,
@@ -2377,10 +2371,10 @@ async fn attempt_custom(
                 cap_cleared(
                     service,
                     &target,
-                    &custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)),
+                    &wire_model,
                     &limit_model_label(
                         &model_of(ctx.body),
-                        &custom_forward::cooldown_model(&provider_id, &model_of(ctx.body)),
+                        &wire_model,
                     ),
                     &Value::Null,
                     &provider_id,

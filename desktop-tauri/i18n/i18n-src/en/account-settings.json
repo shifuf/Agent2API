@@ -60,6 +60,7 @@
   "确认后立即生效，余额查询可能显示「未配置」。取消账号设置不会恢复已清除的凭证。": "This takes effect immediately after confirmation. Balance queries may show Not configured. Canceling account settings will not restore cleared credentials.",
   "确认弹窗不可用，请重新打开页面": "The confirmation dialog is unavailable. Reopen the page.",
   "管理当前账号的凭证与可用套餐。": "Manage this account's credentials and available plans.",
+  "管理渠道 Key 分组与模型": "Manage channel Key groups and models",
   "统一管理提供商的协议、地址与兼容选项。": "Manage the provider's protocol, address, and compatibility options in one place.",
   "自定义 API": "Custom API",
   "要修改连接地址或协议？": "Need to change the connection address or protocol?",

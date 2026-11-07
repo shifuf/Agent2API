@@ -955,6 +955,15 @@ pub fn carriers_of_model(name: &str) -> Vec<String> {
 /// 调用就会出现「A 条映射改了名、B 条映射的等级被注入」的串味。
 pub fn wire_model_for(provider_id: &str, requested_name: &str) -> (String, Option<String>) {
     let requested = requested_name.trim();
+    if let Some(model) = crate::server::core::managed_models::target(provider_id, requested) {
+        return (model, None);
+    }
+    source_wire_model_for(provider_id, requested)
+}
+
+/// Source-model tests keep their original upstream bindings, independent of public names.
+pub fn source_wire_model_for(provider_id: &str, requested: &str) -> (String, Option<String>) {
+    let requested = requested.trim();
     get(provider_id).and_then(|provider| bindings::resolve(&provider, requested))
         .unwrap_or_else(|| (requested.to_string(), None))
 }

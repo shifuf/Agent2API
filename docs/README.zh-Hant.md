@@ -60,9 +60,9 @@ Agent2API 是一個 **AI 路由閘道 + Agent 客戶端接管**專案。它將�
 | --- | --- | --- |
 | **桌面端**（Windows / macOS / Linux） | `Agent2API_<版本>_x64-setup.exe`、`_universal.dmg`、`_amd64.deb`、`_amd64.AppImage` | 應用程式視窗 |
 | **伺服器端**（Windows Server / Linux，無 GUI） | `agent2api-server-windows-amd64.zip`、`agent2api-server-linux-<arch>.tar.gz` | 瀏覽器面板 |
-| **Docker** | `aimodcc/agent2api:latest`（amd64 / arm64） | 瀏覽器面板 |
+| **Docker** | `ghcr.io/shifuf/agent2api:latest`（amd64 / arm64） | 瀏覽器面板 |
 
-**桌面端**：啟動後新增自訂供應商與帳號，建立閘道金鑰，再於「Agent」頁套用連線設定，或在客戶端填入 `http://127.0.0.1:3065/v1` 與該金鑰。額外供應商能力需先安裝對應插件。
+**桌面端**：啟動後新增渠道與帳號，在「模型管理」新增對外模型，建立閘道金鑰，再於「Agent」頁套用連線設定，或在客戶端填入 `http://127.0.0.1:3065/v1` 與該金鑰。額外供應商能力需先安裝對應插件。
 
 **伺服器端**（無圖形介面，註冊成系統服務、開機自動啟動）：
 
@@ -80,7 +80,7 @@ cd C:\agent2api-pkg; .\install-service.ps1
 **Docker**：
 
 ```bash
-docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/data aimodcc/agent2api:latest
+docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/data ghcr.io/shifuf/agent2api:latest
 ```
 
 三種形態裝完後都開啟面板（`http://127.0.0.1:3065/`，伺服器端與 Docker 換成主機 IP）註冊管理員帳號，再在「閘道 Key」頁建一把 Key。連線性自測：`curl http://127.0.0.1:3065/health`

@@ -23,7 +23,7 @@ Implemented locally on beta; no remote push, tag, Release or package publication
 
 ## Limitations and integration notes
 
-- This machine has no Docker executable/engine; no actual image build, pull, startup or dual-architecture runtime test was performed. The parent will run the final frontend builds after the concurrent UI changes settle.
-- Subscription dependency restoration must update Cargo.lock before a `--locked` build can pass.
-- Parent notified to update the six README quick-start Docker image references to the fork image; those files are outside this task's assigned write scope.
+- This machine has no Docker executable/engine; no actual image build, pull, startup or dual-architecture runtime test was performed. Final desktop/mobile TypeScript and frontend builds, i18n generation and dictionary checks passed during integration.
+- Subscription dependencies are recorded in Cargo.lock; the final server and test harness compiled successfully using `--locked --offline`.
+- All six README quick-start Docker image references now point to the fork image. All six install documents also explain the explicit public-model setup required after upgrading.
 - First publication can create a private GHCR package. Change package visibility to Public if anonymous pulls are required; documented in all six install files.

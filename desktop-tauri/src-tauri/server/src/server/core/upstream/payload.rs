@@ -352,8 +352,11 @@ pub(super) async fn send_body<'a>(
     // 一次解析出两个属性：该家要收的名字 + 跟着那条映射走的思考等级
     // （同源，见模块头「思考等级绑定为什么也在这一步」）
     let direct = account.and_then(crate::server::core::routing_groups::candidate_model);
-    let wire = direct.map(|model| crate::server::core::providers::catalog::WireTarget { model: model.to_string(), reasoning: None })
-        .unwrap_or_else(|| crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, account));
+    let wire = if ctx.ignore_model_gate {
+        crate::server::core::providers::catalog::source_wire_target_for_provider(&requested, provider_id)
+    } else { direct.map(|model| crate::server::core::providers::catalog::WireTarget { model: model.to_string(), reasoning: None })
+        .unwrap_or_else(|| crate::server::core::providers::catalog::wire_target_for_provider(&requested, provider_id, account))
+    };
     ctx.telemetry.note_upstream_model(&wire.model);
     rewrite_model(&mut body, &requested, &wire.model, provider_id);
     if ctx.compact_routed {

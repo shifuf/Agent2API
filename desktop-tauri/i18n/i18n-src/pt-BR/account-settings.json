@@ -60,6 +60,7 @@
   "确认后立即生效，余额查询可能显示「未配置」。取消账号设置不会恢复已清除的凭证。": "Entra em vigor imediatamente após a confirmação. As consultas de saldo podem mostrar Não configurado. Cancelar as configurações da conta não restaura credenciais apagadas.",
   "确认弹窗不可用，请重新打开页面": "A caixa de confirmação está indisponível. Reabra a página.",
   "管理当前账号的凭证与可用套餐。": "Gerencie as credenciais e os planos disponíveis desta conta.",
+  "管理渠道 Key 分组与模型": "Gerenciar grupos de Keys e modelos do canal",
   "统一管理提供商的协议、地址与兼容选项。": "Gerencie o protocolo, o endereço e as opções de compatibilidade do provedor em um só lugar.",
   "自定义 API": "API personalizada",
   "要修改连接地址或协议？": "Precisa alterar o endereço ou o protocolo de conexão?",

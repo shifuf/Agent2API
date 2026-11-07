@@ -60,9 +60,9 @@ Agent2API는 **AI 라우팅 게이트웨이와 Agent 클라이언트 설정 관�
 | --- | --- | --- |
 | **데스크톱**(Windows / macOS / Linux) | `Agent2API_<버전>_x64-setup.exe`, `_universal.dmg`, `_amd64.deb`, `_amd64.AppImage` | 앱 창 |
 | **서버**(Windows Server / Linux, GUI 없음) | `agent2api-server-windows-amd64.zip`, `agent2api-server-linux-<arch>.tar.gz` | 브라우저 패널 |
-| **Docker** | `aimodcc/agent2api:latest`(amd64 / arm64) | 브라우저 패널 |
+| **Docker** | `ghcr.io/shifuf/agent2api:latest`(amd64 / arm64) | 브라우저 패널 |
 
-**데스크톱**: 사용자 지정 공급자와 계정을 추가하고 게이트웨이 키를 만드세요. "Agent" 페이지에서 연결 설정을 적용하거나 클라이언트에 `http://127.0.0.1:3065/v1`과 해당 키를 입력하세요. 추가 기능은 해당 플러그인을 먼저 설치해야 합니다.
+**데스크톱**: 채널과 계정을 추가하고 "모델 관리"에서 공개 모델을 추가한 뒤 게이트웨이 키를 만드세요. "Agent" 페이지에서 연결 설정을 적용하거나 클라이언트에 `http://127.0.0.1:3065/v1`과 해당 키를 입력하세요. 추가 기능은 해당 플러그인을 먼저 설치해야 합니다.
 
 **서버**(GUI 없음. 시스템 서비스로 등록되어 부팅 시 자동 시작):
 
@@ -80,7 +80,7 @@ cd C:\agent2api-pkg; .\install-service.ps1
 **Docker**:
 
 ```bash
-docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/data aimodcc/agent2api:latest
+docker run -d --name agent2api --restart unless-stopped -p 3065:3065 -v ./data:/data ghcr.io/shifuf/agent2api:latest
 ```
 
 어느 형태든 설치 후 패널(`http://127.0.0.1:3065/`. 서버와 Docker 는 호스트 IP 로 바꿔서)을 열어 관리자 계정을 등록하고, "게이트웨이 키" 페이지에서 키를 만드세요. 연결 확인: `curl http://127.0.0.1:3065/health`

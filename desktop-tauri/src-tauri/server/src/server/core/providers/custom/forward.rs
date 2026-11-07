@@ -109,6 +109,7 @@ pub(crate) async fn forward(
     account_id: &str,
     body: &Value,
     route_model: Option<&str>,
+    source_test: bool,
     proxy: Option<ResolvedProxy>,
     stream: bool,
     telemetry: &Arc<RequestTelemetry>,
@@ -119,6 +120,11 @@ pub(crate) async fn forward(
     let provider = custom_providers::get(provider_id).ok_or_else(|| {
         GatewayError::with_status(503, format!("自定义提供商不存在: {}", provider_id.trim()))
     })?;
+    // Recheck immediately before sending; the channel may have been disabled
+    // after the routing snapshot was taken.
+    if provider.get("enabled") == Some(&Value::Bool(false)) {
+        return Err(GatewayError::with_status(503, "渠道已停用，未发送上游请求"));
+    }
     let protocol = provider
         .get("protocol")
         .and_then(Value::as_str)
@@ -151,9 +157,10 @@ pub(crate) async fn forward(
     let credential_store = store.clone();
     let credential_id = account_id.to_string();
     let requested_model = body.get("model").and_then(Value::as_str).unwrap_or("");
+    let source_model = source_test.then(|| custom_providers::source_wire_model_for(provider_id, requested_model).0);
     let account = store.route_account(account_id).ok_or_else(|| GatewayError::with_status(503, "渠道账号已不存在"))?;
     if !crate::server::core::account_store::custom_accounts::key_groups::allows_request(
-        &account, requested_model, route_model.map(|_| requested_model)) {
+        &account, requested_model, source_model.as_deref().or_else(|| route_model.map(|_| requested_model))) {
         return Err(GatewayError::with_status(403, "此 Key 分组未启用或未选择当前上游模型"));
     }
     let credential = crate::server::core::blocking::run(move || {
@@ -196,6 +203,7 @@ pub(crate) async fn forward(
             &quirks,
             body,
             route_model,
+            source_test,
             proxy,
             stream,
             telemetry,
@@ -244,7 +252,7 @@ pub(crate) async fn forward(
         .unwrap_or("")
         .trim()
         .to_string();
-    let (mut outbound, rewrite) = rewrite_for_route(body, provider_id, &requested, route_model);
+    let (mut outbound, rewrite) = rewrite_for_route(body, provider_id, &requested, route_model, source_test);
     // 客户端形态伪装（OpenCode 免费档）：补桩工具。未开启时不碰请求体。
     // 放在 `rewrite_body` 之后、序列化之前 —— 会话种子取自**改写后**的体，
     // 与最终发出去的字节同源（模型名换了不影响 messages，两种取法等价，
@@ -489,6 +497,7 @@ async fn forward_translated(
     quirks: &ProviderQuirks,
     body: &Value,
     route_model: Option<&str>,
+    source_test: bool,
     proxy: Option<ResolvedProxy>,
     stream: bool,
     telemetry: &Arc<RequestTelemetry>,
@@ -505,7 +514,7 @@ async fn forward_translated(
         .unwrap_or("")
         .trim()
         .to_string();
-    let (mut outbound_chat, rewrite) = rewrite_for_route(body, provider_id, &requested, route_model);
+    let (mut outbound_chat, rewrite) = rewrite_for_route(body, provider_id, &requested, route_model, source_test);
     // 客户端形态伪装：与 chat 分支同一时机（改写后、翻译前）—— 桩工具要由
     // 转换器一起翻成上游协议的形态（anthropic 的 tools 数组）；Go 面不改请求体
     quirks.apply_emulation_to_body(&mut outbound_chat, base_url);
@@ -811,20 +820,24 @@ impl futures::Stream for ProtocolTranslateStream {
 ///
 /// `rewrite` 是 SSE/聚合的 model 回写参数：请求带了 model 才给 ——
 /// 客户端没点名模型时（上游用自家默认）没有「回写成什么」的答案。
-fn rewrite_for_route(body: &Value, provider_id: &str, requested: &str, route_model: Option<&str>) -> (Value, Option<ModelRewrite>) {
+fn rewrite_for_route(body: &Value, provider_id: &str, requested: &str, route_model: Option<&str>, source_test: bool) -> (Value, Option<ModelRewrite>) {
     if let Some(client_model) = route_model {
         // 组内模型已由请求快照选定，不再经同名映射改写。
         return (body.clone(), Some(ModelRewrite { requested: client_model.to_string() }));
     }
-    rewrite_body(body, provider_id, requested)
+    rewrite_body(body, provider_id, requested, source_test)
 }
 
-fn rewrite_body(body: &Value, provider_id: &str, requested: &str) -> (Value, Option<ModelRewrite>) {
+fn rewrite_body(body: &Value, provider_id: &str, requested: &str, source_test: bool) -> (Value, Option<ModelRewrite>) {
     let mut outbound = body.clone();
     if requested.is_empty() {
         return (outbound, None);
     }
-    let (wire_model, reasoning) = custom_providers::wire_model_for(provider_id, requested);
+    let (wire_model, reasoning) = if source_test {
+        custom_providers::source_wire_model_for(provider_id, requested)
+    } else {
+        custom_providers::wire_model_for(provider_id, requested)
+    };
     if !wire_model.eq_ignore_ascii_case(requested) {
         logging::verbose(
             "[CustomProvider]",

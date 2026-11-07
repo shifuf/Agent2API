@@ -4,7 +4,6 @@ use serde_json::Value;
 
 use crate::server::core::{custom_providers, model_rules};
 use crate::server::core::models::model_id;
-use crate::server::core::providers::adapter::adapter_by_id;
 
 use super::{all_provider_ids, manifest_for_provider};
 
@@ -114,12 +113,7 @@ pub fn providers_for_model(model: &str) -> Vec<String> {
 
 /// 只返回有开启绑定的提供商，不把关闭的 ID 回落给默认提供商。
 pub fn forwarding_providers(model: &str) -> Vec<String> {
-    let rules = model_rules::shared();
-    let mut result: Vec<_> = all_provider_ids().into_iter().filter(|provider| {
-        builtin_target(&rules, provider, &manifest_for_provider(provider), model).is_some()
-    }).collect();
-    result.extend(custom_providers::carriers_of_model(model));
-    result
+    crate::server::core::managed_models::carriers(model)
 }
 
 /// 「这个名字是不是被关掉了」—— 只在广告里没有它时用来区分「承载家全被关闭」
@@ -145,7 +139,18 @@ pub fn model_blocked_everywhere(model: &str) -> bool {
 
 pub fn wire_target_for_provider(model: &str, provider_id: &str, _account: Option<&Value>) -> WireTarget {
     let requested = model.trim();
-    // 自定义提供商在自己的转发模块解析一次，避免把别名提前改写后丢失其等级绑定。
+    if !custom_providers::is_custom_provider_id(provider_id) {
+        if let Some(model) = crate::server::core::managed_models::target(provider_id, requested) {
+            return WireTarget { model, reasoning: None };
+        }
+    }
+    source_wire_target_for_provider(requested, provider_id)
+}
+
+/// The trusted source-test path bypasses public bindings but retains legacy source mappings.
+pub fn source_wire_target_for_provider(model: &str, provider_id: &str) -> WireTarget {
+    let requested = model.trim();
+    // Custom providers still resolve exactly once in their protocol-specific sender.
     let resolved = if custom_providers::is_custom_provider_id(provider_id) {
         None
     } else {
@@ -155,22 +160,15 @@ pub fn wire_target_for_provider(model: &str, provider_id: &str, _account: Option
 }
 
 pub fn default_model_catalog() -> Vec<Value> {
-    let rules = model_rules::shared();
-    let mut result = Vec::new();
-    for provider in all_provider_ids().into_iter().filter(|provider| {
-        adapter_by_id(provider).is_some_and(|adapter| adapter.supports_default_model())
-    }) {
-        for entry in manifest_for_provider(&provider) {
-            let id = model_id(&entry);
-            if !id.is_empty() && !super::super::images::model_is_image(&entry)
-                && rules.default_enabled(&provider, &id)
-                && !result.iter().any(|item| model_id(item).eq_ignore_ascii_case(&id))
-            {
-                result.push(entry);
-            }
-        }
-    }
-    result
+    crate::server::core::managed_models::list().into_iter().filter(|model| model.enabled)
+        .filter_map(|model| {
+            let source = model.bindings.iter().find_map(|binding|
+                crate::server::core::managed_models::source(&binding.provider, &binding.model))?;
+            if super::super::images::model_is_image(&source) { return None; }
+            let mut item = source;
+            item["id"] = model.id.into();
+            Some(item)
+        }).collect()
 }
 
 pub fn default_model_usable(model: &str) -> bool {

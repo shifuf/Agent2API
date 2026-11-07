@@ -36,7 +36,7 @@
 //!                               htpasswd -nBC 10 user 的输出整行可粘）
 //!   AGENT2API_ALLOW_NO_KEY      置 `1` 关闭全部闸门（未配 Key 也放行，纯内网用）
 //!   AGENT2API_CAPTCHA_ENABLED   登录页人机验证组件环境变量，默认为1开启，0为关闭
-//!   AGENT2API_SELF_UPDATE       置 `1` 允许面板在容器内原地更新（Dockerfile 默认设好；
+//!   AGENT2API_SELF_UPDATE       置 `1` 允许面板在容器内原地更新（本分支镜像默认关闭；
 //!                               换文件后进程退出、由容器 restart 策略拉起）
 //!   AGENT2API_VERBOSE           置 `1` 打开 debug 级日志（与桌面一致）
 //!   AGENT2API_IMAGE_CACHE_MB    生成图片的内存下载缓存上限（MiB，默认 128，

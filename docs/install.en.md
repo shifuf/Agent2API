@@ -6,6 +6,16 @@ Every form is managed from the **browser panel** afterwards (accounts, gateway k
 
 [简体中文](./install.md) | **English** | [繁體中文](./install.zh-Hant.md) | [日本語](./install.ja.md) | [한국어](./install.ko.md) | [Português (BR)](./install.pt-BR.md)
 
+## Channel and model setup (this fork)
+
+This fork uses a manual model catalog across the gateway. Existing accounts, keys and upstream catalogs are retained, but upstream models are not published automatically. Add public models after upgrading; existing routing groups remain available.
+
+1. Under Add account → API template, create a channel with an API URL and named Key groups. Each group accepts multiple keys and its own discovered or selected upstream models. Empty or disabled groups do not forward requests.
+2. Under Model management → Add model, enter a public model ID and select its channels and upstream models. A public model can use several channels, with one upstream model per channel. Both desktop and mobile support editing.
+3. Select allowed channels and public models for each gateway Key. Both restrictions apply together. An empty channel selection allows all channels; an empty model selection allows all published models. Deleting a channel preserves existing Key restrictions.
+4. Manage subscriptions and install or import the proxy kernel on the Proxies page. Subscription nodes can serve accounts and proxy pools. Stopping the kernel or disabling a node does not make bound requests fall back to a direct connection.
+
+
 ## Contents
 
 - [Which form to pick](#which-form-to-pick)
@@ -361,9 +371,9 @@ When a new version is available, a "Restart & update" bar floats at the bottom: 
 | Reports, account status, balances, request logs, runtime logs | Add accounts (QR / paste token / import client login) |
 | Enable/disable accounts, refresh credentials, delete accounts | Edit an account's credentials, proxy or rate-limit rules |
 | One-tap check-in, view check-in history | Claim onboarding rewards and plans one by one |
-| Enable/disable models, filter by provider | Edit model mappings, reasoning levels, capability flags |
+| Add, edit, delete and enable/disable public models; select channels and upstream models | Edit source-model mappings, reasoning levels and capability flags |
 | Copy gateway keys, enable/disable keys | Create keys, set provider/model allowlists |
-| Add, edit and delete manual HTTP / SOCKS5 proxies; sync Clash Verge endpoints; enable/disable and test connectivity | — (proxy subscriptions and the built-in kernel have been discontinued) |
+| Manage and test HTTP / SOCKS5 proxies and subscription nodes; sync Clash Verge endpoints; download, import and start/stop the kernel | Add, edit and refresh proxy subscriptions; import subscription files |
 | Enable/disable scheduled tasks, change intervals | Change port, routing, retry, timeouts, data retention |
 | Assistant quick queries (balances / duplicate models / today's usage / rate-limited accounts) | Free-form assistant chat and tool calling |
 | View Agent takeover status, restore | Rewrite client configs (a phone cannot read local files) |

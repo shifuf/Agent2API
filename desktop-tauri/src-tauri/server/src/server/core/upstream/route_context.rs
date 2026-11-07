@@ -10,6 +10,8 @@ pub(crate) struct RequestRouting {
     pub captured_at: i64,
     pub group: Option<config::RoutingGroup>,
     pub group_projection: GroupProjection,
+    /// Set only by ForwardRequest::ignore_model_gate, never by client body fields.
+    pub source_test: Option<String>,
     positions: HashMap<String, usize>,
 }
 
@@ -30,7 +32,7 @@ impl RequestRouting {
         };
         Self { settings: profiles.settings_for(model, base), profile: profiles.effective(model).cloned(),
             scope: profiles.scope(model).to_string(), captured_at: crate::server::logging::now_ms(), group: None,
-            group_projection: Default::default(), positions: ordered.iter().enumerate().filter_map(|(index, account)|
+            group_projection: Default::default(), source_test: None, positions: ordered.iter().enumerate().filter_map(|(index, account)|
                 routing::account_id(account).map(|id| (id.to_string(), index))).collect() }
     }
 
@@ -42,6 +44,7 @@ impl RequestRouting {
             return Err(crate::server::errors::GatewayError::with_status(409, "路由组已删除或入口已变更，请重新发起请求；未回退其他路由"));
         }
         let mut routing = Self::capture_with(model, store, &profiles, base);
+        if ignore { routing.source_test = Some(model.to_string()); }
         if !ignore {
             if let Some(group) = profiles.group_for_model(model).cloned() {
                 if !crate::server::core::key_scope::allows_model(scope, &group.model) {
@@ -78,6 +81,19 @@ impl RequestRouting {
     }
 
     pub fn accounts(&self, accounts: Vec<Value>) -> Vec<Value> {
+        if let Some(model) = &self.source_test {
+            return accounts.into_iter().map(|mut account| {
+                let provider = routing::provider_of(&account);
+                let wire = if crate::server::core::custom_providers::is_custom_provider_id(provider) {
+                    crate::server::core::custom_providers::source_wire_model_for(provider, model).0
+                } else {
+                    crate::server::core::providers::catalog::source_wire_target_for_provider(model, provider).model
+                };
+                // Reuse the trusted upstream target for group eligibility and cooldown keys.
+                account["routingModel"] = wire.into();
+                account
+            }).collect();
+        }
         if self.group.is_some() {
             return self.group_projection.accounts.iter().filter_map(|candidate| {
                 let mut current = accounts.iter().find(|account| routing::account_id(account) == routing::account_id(candidate)

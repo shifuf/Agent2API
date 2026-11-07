@@ -2,80 +2,17 @@
 
 use std::collections::HashSet;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::capability;
-use crate::server::core::key_scope::{self, KeyScope};
+use crate::server::core::key_scope::KeyScope;
 use crate::server::core::model_meta;
 use crate::server::core::model_rules;
-use crate::server::core::models::{list_item, list_response_from, model_id, suggest_from};
+use crate::server::core::models::{list_response_from, model_id, suggest_from};
 
-use super::routing::{builtin_target, entry_id_in_manifest};
-use super::{active_manifests, aggregate_source, managed_manifests, manifest_for_provider, refresh_meta_for_provider};
-
-/// 一家会对外广告哪些名字：清单里原生的上游 id + **已启用**的映射别名。
-///
-/// ── `enabled` 这一道过滤不能少（曾经的漏洞）──────────────────
-/// 漏掉它时，被关掉的别名仍会进候选名，然后在 [`builtin_target`] 里绕开
-/// 「映射分支」的启停判定走另一条路：`entry_id_in_manifest` 按 id 找不到会
-/// **回落到比对上一条目的展示名（`name`）**，命中后按 `default_enabled` 判定
-/// —— 那与别名映射的开关无关。于是「关了映射、`/v1/models` 里却还在」。
-/// 实测：`space-bunny-alpha`（与展示名逐字相同）会中，`mimo-v2.6-flash`
-/// （展示名是 `Mimo V2.6 Flash`，比不中）不会中 —— 同一个开关两种结果。
-/// 模块头那句「所有对外出口使用相同的开启绑定集合」说的就是这里必须过滤。
-fn advertised_names(
-    rules: &model_rules::ModelRules,
-    provider: &str,
-    manifest: &[Value],
-) -> Vec<String> {
-    let mut names: Vec<String> = manifest.iter().map(model_id).collect();
-    names.extend(rules.mappings.iter()
-        .filter(|mapping| mapping.enabled)
-        .filter(|mapping| mapping.provider.as_deref().map_or(true, |owner| owner.eq_ignore_ascii_case(provider)))
-        .map(|mapping| mapping.alias.clone()));
-    names
-}
-
-/// 先在各提供商内判断绑定，再按对外名去重；不能先合并上游 ID 再拼别名，
-/// 否则某家关闭的映射会借另一家的同名上游重新出现在列表中。
-fn public_builtin_items(active: &[(String, Vec<Value>)]) -> Vec<(String, Value)> {
-    let rules = model_rules::shared();
-    let mut claimed = std::collections::HashMap::<String, usize>::new();
-    let mut result: Vec<(String, Value)> = Vec::new();
-    for (provider, manifest) in active {
-        let names = advertised_names(&rules, provider, manifest);
-        for name in names {
-            let Some(wire) = builtin_target(&rules, provider, manifest, &name) else { continue };
-            let Some(upstream) = manifest.iter().find(|item| model_id(item) == wire.model) else { continue };
-            let mut item = list_item(upstream, provider);
-            if let Some(index) = claimed.get(&name.to_lowercase()).copied() {
-                let existing = &mut result[index].1;
-                if item.get("supports_image_generation").and_then(Value::as_bool) == Some(true)
-                    && existing.get("kind").and_then(Value::as_str) == Some("image")
-                { existing["supports_image_generation"] = Value::Bool(true); }
-                if item.get("supports_image_editing").and_then(Value::as_bool) == Some(true)
-                    && existing.get("kind").and_then(Value::as_str) == Some("image")
-                {
-                    existing["supports_image_editing"] = Value::Bool(true);
-                    existing["supports_images"] = Value::Bool(true);
-                    existing["input_modalities"] = json!(["text", "image"]);
-                }
-                continue;
-            }
-            claimed.insert(name.to_lowercase(), result.len());
-            if let Some(object) = item.as_object_mut() {
-                object.insert("id".to_string(), Value::String(name.clone()));
-                if !name.eq_ignore_ascii_case(&wire.model) {
-                    object.insert("name".to_string(), Value::String(name));
-                    object.insert("is_default".to_string(), Value::Bool(false));
-                }
-            }
-            result.push((provider.to_string(), item));
-        }
-    }
-    result
-}
+use super::routing::entry_id_in_manifest;
+use super::{active_manifests, managed_manifests, manifest_for_provider, refresh_meta_for_provider};
 
 pub fn models_response(store: &AccountStore, scope: Option<&KeyScope>) -> Value {
     models_response_with_active(store, scope, active_manifests(store))
@@ -86,26 +23,13 @@ pub(super) fn models_response_with_active(
     scope: Option<&KeyScope>,
     active: Vec<(String, Vec<Value>)>,
 ) -> Value {
-    let active: Vec<_> = active.into_iter()
-        .filter(|(provider, _)| key_scope::allows_provider(scope, provider))
-        .collect();
-    let (source, refreshed_at) = aggregate_source(&active);
-    let mut data: Vec<_> = public_builtin_items(&active).into_iter()
-        .map(|(_, item)| item)
-        .filter(|item| key_scope::allows_model(scope, &model_id(item)))
-        .collect();
-    let builtin_count = data.len();
-    super::super::custom::append_models_response(store, scope, &mut data);
+    let _ = active;
+    let mut data = crate::server::core::managed_models::public_models(store, scope);
     crate::server::core::routing_groups::append_public(store, scope, &mut data);
-    let source = if data.len() > builtin_count { "aggregate" } else { source };
-    list_response_from(data, source, refreshed_at)
+    list_response_from(data, "managed", 0)
 }
 
-/// 一家可用提供商都没有时（没加账号），入口校验要跳过「广告里有才放行」与
-/// Key 白名单两条判定，把「没有可用账号」那句更可操作的错误留给转发层 ——
-/// 与改造前的两条例外逐字同源（见 `pipeline::resolve_model` 的说明）。
-///
-/// 插件与本体 runtime ID 同样算可用，不能仅因它们没有旧枚举身份而跳过校验。
+/// 供管理页面判断是否已有可用账号。
 pub fn has_available_providers(store: &AccountStore) -> bool {
     super::validation_snapshot(store).available
 }
@@ -137,28 +61,7 @@ pub fn session_models(store: &AccountStore) -> Vec<Value> {
 }
 
 pub fn models_by_provider(store: &AccountStore) -> Value {
-    let mut map = Map::new();
-    for (provider, manifest) in active_manifests(store) {
-        let mut names: Vec<_> = public_builtin_items(&[(provider.clone(), manifest)]).into_iter()
-            .map(|(_, item)| model_id(&item)).collect();
-        names.sort_by_key(|name| name.to_lowercase());
-        map.insert(provider, json!(names));
-    }
-    for (provider, items) in super::super::custom::catalog_providers(store) {
-        let mut names: Vec<_> = items.iter().map(model_id).collect();
-        names.sort_by_key(|name| name.to_lowercase());
-        map.insert(provider, json!(names));
-    }
-    for group in crate::server::config::routing_profiles().groups.values() {
-        for member in group.members.iter().filter(|member| member.included) {
-            if let Some(names) = map.get_mut(&member.provider).and_then(Value::as_array_mut) {
-                if !names.iter().any(|name| name.as_str().is_some_and(|name| name.eq_ignore_ascii_case(&group.model))) {
-                    names.push(group.model.clone().into());
-                }
-            }
-        }
-    }
-    Value::Object(map)
+    crate::server::core::managed_models::models_by_provider(store)
 }
 
 /// 管理视图里的一行模型（`models` 数组的一项）+ 它对应的默认映射。
@@ -368,71 +271,4 @@ pub fn manage_view(store: &AccountStore) -> Value {
         // 界面上那些档位来自哪一份、新不新，只能由这里回答。
         "modelsDev": model_meta::status(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `from_raw` 收的是整份 config（它自己取 `modelRules` 键），所以包一层
-    fn rules_with(mappings: Value) -> model_rules::ModelRules {
-        let raw = json!({ "modelRules": { "mappings": mappings } });
-        model_rules::ModelRules::from_raw(raw.as_object().expect("对象字面量"))
-    }
-
-    /// 一条展示名与别名逐字相同的上游条目（`space-bunny-alpha` 是实测命中的那个）
-    fn manifest() -> Vec<Value> {
-        vec![json!({ "id": "stealth/space-bunny-alpha", "name": "space-bunny-alpha" })]
-    }
-
-    /// 被关掉的映射别名不能进广告候选名。漏了这道过滤时，别名会经由
-    /// `builtin_target` 的「展示名回落」绕开启停判定 —— 于是「关了映射，
-    /// `/v1/models` 里却还在」（2026-10-03 实测复现）。
-    #[test]
-    fn disabled_mapping_alias_is_not_advertised() {
-        let rules = rules_with(json!([
-            { "alias": "space-bunny-alpha", "target": "stealth/space-bunny-alpha",
-              "provider": "cline-free", "enabled": false }
-        ]));
-        let names = advertised_names(&rules, "cline-free", &manifest());
-        assert!(
-            !names.iter().any(|name| name == "space-bunny-alpha"),
-            "关掉的别名不该出现在候选名里: {names:?}"
-        );
-        // 原生 id 不受影响（开关只管别名）
-        assert!(names.iter().any(|name| name == "stealth/space-bunny-alpha"));
-    }
-
-    /// 开着的映射别名照旧进候选 —— 不能让这次修复把功能一起修没
-    #[test]
-    fn enabled_mapping_alias_is_advertised() {
-        let rules = rules_with(json!([
-            { "alias": "space-bunny-alpha", "target": "stealth/space-bunny-alpha",
-              "provider": "cline-free", "enabled": true }
-        ]));
-        let names = advertised_names(&rules, "cline-free", &manifest());
-        assert!(names.iter().any(|name| name == "space-bunny-alpha"));
-    }
-
-    /// 缺 `enabled` 键 = 开关功能上线前的历史条目 = 默认启用（升级不改行为）
-    #[test]
-    fn mapping_without_enabled_key_is_advertised() {
-        let rules = rules_with(json!([
-            { "alias": "space-bunny-alpha", "target": "stealth/space-bunny-alpha",
-              "provider": "cline-free" }
-        ]));
-        let names = advertised_names(&rules, "cline-free", &manifest());
-        assert!(names.iter().any(|name| name == "space-bunny-alpha"));
-    }
-
-    /// 别家的映射别名不该混进这一家的候选（provider 过滤仍在）
-    #[test]
-    fn other_providers_alias_is_not_included() {
-        let rules = rules_with(json!([
-            { "alias": "x-alias", "target": "stealth/space-bunny-alpha",
-              "provider": "workbuddy", "enabled": true }
-        ]));
-        let names = advertised_names(&rules, "cline-free", &manifest());
-        assert!(!names.iter().any(|name| name == "x-alias"));
-    }
 }

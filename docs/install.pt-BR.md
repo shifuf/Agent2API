@@ -6,6 +6,16 @@ Depois de instalar, qualquer forma é gerenciada pelo **painel no navegador** (c
 
 [简体中文](./install.md) | [English](./install.en.md) | [繁體中文](./install.zh-Hant.md) | [日本語](./install.ja.md) | [한국어](./install.ko.md) | **Português (BR)**
 
+## Configuração de canais e modelos (este fork)
+
+Este fork usa um catálogo manual de modelos em todo o gateway. Contas, chaves e catálogos upstream existentes são preservados, mas os modelos upstream não são publicados automaticamente. Adicione modelos públicos após atualizar; os grupos de roteamento existentes são mantidos.
+
+1. Em Adicionar conta → Modelo de API, crie um canal com a URL da API e grupos de Key nomeados. Cada grupo aceita várias chaves e sua própria seleção de modelos upstream consultados com essas chaves. Grupos vazios ou desativados não encaminham solicitações.
+2. Em Gerenciamento de modelos → Adicionar modelo, informe o ID público e selecione os canais e modelos upstream. Um modelo público pode usar vários canais, com um modelo upstream por canal. A edição funciona no desktop e no celular.
+3. Selecione os canais e modelos públicos permitidos para cada Key do gateway. As duas restrições se aplicam juntas. Sem canais selecionados, todos são permitidos; sem modelos selecionados, todos os modelos publicados são permitidos. Excluir um canal preserva as restrições existentes das Keys.
+4. Gerencie assinaturas e instale ou importe o núcleo na página Proxies. Os nós podem ser usados por contas e pools de proxies. Parar o núcleo ou desativar um nó não faz as solicitações vinculadas usarem uma conexão direta.
+
+
 ## Sumário
 
 - [Qual forma escolher](#qual-forma-escolher)
@@ -361,9 +371,9 @@ Quando há uma nova versão, uma barra "Reiniciar e atualizar" surge na parte de
 | Relatórios, status das contas, saldos, logs de requisições, logs de execução | Adicionar contas (QR / colar token / importar login do cliente) |
 | Ativar/desativar contas, atualizar credenciais, excluir contas | Editar credenciais, proxy ou regras de limite de uma conta |
 | Check-in com um toque, ver histórico de check-in | Resgatar recompensas de integração e planos individualmente |
-| Ativar/desativar modelos, filtrar por provedor | Editar mapeamentos de modelo, níveis de raciocínio, flags de capacidade |
+| Adicionar, editar, excluir e ativar/desativar modelos públicos; selecionar canais e modelos upstream | Editar mapeamentos dos modelos de origem, níveis de raciocínio e flags de capacidade |
 | Copiar gateway keys, ativar/desativar keys | Criar keys, definir listas de provedores/modelos permitidos |
-| Adicionar, editar e excluir proxies HTTP / SOCKS5 manuais; sincronizar endpoints do Clash Verge; ativar/desativar e testar conectividade | — (assinaturas de proxy e o kernel integrado foram descontinuados) |
+| Gerenciar e testar proxies HTTP / SOCKS5 e nós de assinaturas; sincronizar endpoints do Clash Verge; baixar, importar e iniciar/parar o kernel | Adicionar, editar e atualizar assinaturas de proxy; importar arquivos de assinatura |
 | Ativar/desativar tarefas agendadas, alterar intervalos | Alterar porta, roteamento, retry, timeouts, retenção de dados |
 | Consultas rápidas do assistente (saldos / modelos duplicados / uso de hoje / contas limitadas) | Conversa livre e chamada de ferramentas do assistente |
 | Ver status do takeover de Agent, restaurar | Reescrever configurações de clientes (um celular não lê arquivos locais) |

@@ -11,6 +11,7 @@ pub(crate) struct ValidationSnapshot {
 
 pub(crate) struct ValidationCache {
     providers: std::collections::HashSet<String>,
+    account_rows: Vec<Arc<serde_json::Value>>,
     generation: u64,
     built_at: Instant,
     snapshot: Arc<ValidationSnapshot>,
@@ -22,6 +23,8 @@ pub(crate) fn snapshot(store: &AccountStore, cache: &Mutex<Option<ValidationCach
     if let Ok(cached) = cache.lock() {
         if let Some(cached) = cached.as_ref().filter(|cached| {
             cached.generation == generation && cached.providers == accounts.available_providers
+                && cached.account_rows.len() == accounts.accounts.len()
+                && cached.account_rows.iter().zip(&accounts.accounts).all(|(old, current)| Arc::ptr_eq(old, current))
                 && cached.built_at.elapsed() < Duration::from_secs(30)
         }) {
             return cached.snapshot.clone();
@@ -36,7 +39,7 @@ pub(crate) fn snapshot(store: &AccountStore, cache: &Mutex<Option<ValidationCach
     let snapshot = Arc::new(ValidationSnapshot { available, models });
     if super::generation() == generation && Arc::ptr_eq(&accounts, &store.routing_snapshot()) {
         if let Ok(mut cached) = cache.lock() {
-            *cached = Some(ValidationCache { providers: accounts.available_providers.clone(), generation,
+            *cached = Some(ValidationCache { providers: accounts.available_providers.clone(), account_rows: accounts.accounts.clone(), generation,
                 built_at: Instant::now(), snapshot: snapshot.clone() });
         }
     }

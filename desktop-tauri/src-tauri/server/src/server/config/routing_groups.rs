@@ -112,6 +112,7 @@ pub fn save(id: &str, group: Option<RoutingGroup>, expected: &str) -> Result<(),
         if let Some(group) = &group {
             if old.is_none() && profiles.groups.len() >= MAX_GROUPS { return Err("自定义路由组数量已达上限".into()); }
             if profiles.groups.values().any(|known| known.id != id && known.model.eq_ignore_ascii_case(&group.model))
+                || crate::server::core::managed_models::list().iter().any(|model| model.id.eq_ignore_ascii_case(&group.model))
                 || profiles.models.contains_key(&group.model)
                 || !crate::server::core::providers::catalog::providers_for_model(&group.model).is_empty()
                 || crate::server::core::model_rules::shared().mappings.iter().any(|mapping| mapping.alias.eq_ignore_ascii_case(&group.model))

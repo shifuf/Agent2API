@@ -28,6 +28,7 @@ import {
   visibleColumns,
 } from './models-panel-state'
 import { t } from '../i18n'
+import { ManagedModelsPage } from './managed-models-page'
 
 /* ─── 页面本体 ───────────────────────────────── */
 
@@ -325,7 +326,7 @@ function ModelsPage() {
         </NavList>
         <div className='rail-foot'>
           <NavItem variant='add' id='rail-add-custom'
-            title={t('新建一个自定义提供商（同时创建它的第一个账号）')}
+            title={t('新建渠道并添加账号')}
             onClick={() => openAddCustomProvider()}>{t('＋ 新建自定义提供商')}</NavItem>
         </div>
       </Sidebar>
@@ -673,7 +674,16 @@ function mount(): void {
   if (!section) return
   section.replaceChildren()
   root = createRoot(section)
-  root.render(<ModelsPage />)
+  root.render(<ModelCatalogPage />)
+}
+
+function ModelCatalogPage() {
+  const [sources, setSources] = React.useState(false)
+  if (!sources) return <ManagedModelsPage onSources={() => setSources(true)} />
+  return <><div className='mb-3 flex items-center gap-3'>
+    <Button variant='outline' onClick={() => setSources(false)}>{t('返回对外模型')}</Button>
+    <span className='text-xs text-subtle'>{t('上游目录用于选择和维护模型信息；只有添加到对外模型目录后，客户端才能调用。')}</span>
+  </div><ModelsPage /></>
 }
 
 // 首次切到本页时才挂载（见 island-lazy）：隐藏页不在首屏渲染，也不拉数据。

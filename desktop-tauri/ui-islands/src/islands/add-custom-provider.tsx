@@ -321,7 +321,7 @@ export function CustomProviderBlock({
       <DialogSection hidden={mode !== 'create'}>
         <div className='add-panel-head'>
           <h3>{t('上游信息')}</h3>
-          <span>{t('创建这个提供商，并同时建立它的第一个账号。')}</span>
+          <span>{t('创建渠道，并按 Key 分组添加账号。')}</span>
         </div>
         <div className='add-form'>
           <div className='add-field'>
