@@ -85,5 +85,11 @@
   "； 修改后立即生效，本程序自身会自动使用第一把启用的 Key。每把 Key 可单独限制": "; changes take effect immediately, and this app itself automatically uses the first enabled key. Each key can restrict ",
   "；一把启用的 Key 都没有时不鉴权。": "",
   "；修改后立即生效。模型测试、助手和日活保活必须选择 Key，受限 Key 不能访问管理接口。每把 Key 可单独限制": "; changes take effect immediately. Model tests, the assistant, and daily keepalive must use a selected Key. Restricted Keys cannot access management endpoints. Each Key can separately restrict ",
-  "；当前必须带 Key。": "; an enabled Key is required."
+  "；当前必须带 Key。": "; an enabled Key is required.",
+  "以下已保存的限制当前不可用，仍会保留；可手动移除。": "These saved restrictions are currently unavailable and will be retained. You can remove them explicitly.",
+  "移除渠道限制": "Remove channel restriction",
+  "移除模型限制": "Remove model restriction",
+  "渠道": "Channel",
+  "模型": "Model",
+  "移除": "Remove"
 }

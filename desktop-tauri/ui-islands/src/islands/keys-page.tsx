@@ -74,10 +74,10 @@ type KeyEntry = {
 }
 
 /**
- * 「可用提供商」的候选项：后端拼好的整张表 —— 注册表（内置家）+ 已建的自定义家
- * （项目禁止维护第二份 provider 清单；自定义家是运行期数据，只有后端拿得到）。
+ * 「可用渠道」候选由后端提供，只包含启用且有可用账号和上游模型的渠道。
+ * 已保存的失效限制在独立摘要中保留，不反向补进候选列表。
  */
-type ProviderOption = { id: string; label?: string; removed?: boolean }
+type ProviderOption = { id: string; label?: string; removed?: boolean; unavailable?: boolean; enabled?: boolean; count?: number }
 
 /** 四个接口的响应；`created` 只在 POST 的响应里（新建后要立刻展开它） */
 type KeysPayload = {
@@ -267,14 +267,13 @@ function providerLabel(id: string): string {
 
 /**
  * 按**当前勾选的提供商**取对外名并集，铺成多选选项。
- * `selected` 里的名字即使不在并集里也照样保留（铺成已勾选状态）—— 用户取消勾选某家
- * 之后，那家独有的模型仍要看得见、能自己取消，否则「保存范围」会变成一次静默的
- * 数据修改。一家都没勾代表全渠道，因此列出手动目录里全部模型。
+ * 只展示后端确认可用的模型。暂不可用的已保存限制另行展示并保留，不能混入候选。
+ * 一家都没勾代表全部可用渠道。
  */
 function modelOptions(
   table: Record<string, string[]>,
   selectedProviders: string[],
-  selected: string[],
+  _selected: string[] = [],
 ): MultiSelectOption[] {
   const names = new Map<string, string>() // 小写 → 原始名（先到先得，保住后端给的大小写）
   const put = (value: unknown) => {
@@ -287,8 +286,6 @@ function modelOptions(
     const list = table[id] ?? table[String(id).toLowerCase()]
     if (Array.isArray(list)) list.forEach(put)
   })
-  // 已勾选的模型无论是否还在并集里都要铺出来（见函数说明）
-  selected.forEach(put)
   // 选项**值**是模型名（提交给后端的身份）不进词典；展示 label 走 t()
   const out = [...names.values()].map(value => ({ value, label: t(value) }))
   out.sort((a, b) => (a.value.toLowerCase() < b.value.toLowerCase() ? -1 : 1))
@@ -367,17 +364,20 @@ function channelLabel(item: ProviderOption): string {
   return item.removed ? t('已移除渠道：{id}', { id: item.id }) : t(item.label || item.id)
 }
 
-/** Existing removed restrictions can be kept or removed; new keys cannot select them. */
-function channelOptions(providers: ProviderOption[], retained: readonly string[]): MultiSelectOption[] {
-  const saved = new Set(retained.map(id => id.toLowerCase()))
-  const options = providers.filter(item => !item.removed || saved.has(item.id.toLowerCase()))
+/** Available options only; hidden saved restrictions are managed separately. */
+function channelOptions(providers: ProviderOption[], _retained: readonly string[] = []): MultiSelectOption[] {
+  return providers.filter(item => !item.removed && !item.unavailable && item.enabled !== false && item.count !== 0)
     .map(item => ({ value: item.id, label: channelLabel(item) }))
-  for (const id of retained) {
-    if (!options.some(option => option.value.toLowerCase() === id.toLowerCase())) {
-      options.push({ value: id, label: channelLabel({ id, removed: true }) })
-    }
-  }
-  return options
+}
+
+function hiddenSelections(values: readonly string[], options: readonly MultiSelectOption[]): string[] {
+  const available = new Set(options.map(option => option.value.toLowerCase()))
+  return values.filter(value => !available.has(value.toLowerCase()))
+}
+
+/** Editing the visible dropdown must never erase a hidden permission restriction. */
+function retainHiddenSelections(current: readonly string[], next: string[], options: readonly MultiSelectOption[]): string[] {
+  return pickedFromOptions([...next, ...hiddenSelections(current, options)], options)
 }
 
 /* ─── 弹窗（新建 / 改可用范围共用）──────────────── */
@@ -431,13 +431,11 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
     () => pickedFromOptions(pickedProviders, providerOptions),
     [pickedProviders, providerOptions],
   )
-  const hasRemovedChannels = allowedProviders.some(id => !providers.some(item =>
-    item.id.toLowerCase() === id.toLowerCase() && !item.removed))
+  const hiddenProviders = hiddenSelections(allowedProviders, providerOptions)
 
   /**
    * 模型候选跟着「已勾选的提供商」重建：勾一家立刻多出这家的对外名，取消一家则收回去。
-   * 但**已勾选的模型一律留在候选里**（见 modelOptions）—— 用户没动过模型那栏，
-   * 保存就不该悄悄少几项。
+   * 不可用的已选模型保留在状态和单独的限制摘要中，不再显示为可选模型。
    */
   const modelCandidates = React.useMemo(
     () => modelOptions(modelsByProvider, allowedProviders, pickedModels),
@@ -448,6 +446,7 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
     () => pickedFromOptions(pickedModels, modelCandidates),
     [pickedModels, modelCandidates],
   )
+  const hiddenModels = hiddenSelections(allowedModels, modelCandidates)
 
   const modelEmptyHint = modelCandidates.length
     ? t('没有匹配的选项')
@@ -552,7 +551,7 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
               <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用渠道')}</Label>
               <MultiSelect
                 value={allowedProviders}
-                onValueChange={setPickedProviders}
+                onValueChange={next => setPickedProviders(current => retainHiddenSelections(current, next, providerOptions))}
                 options={providerOptions}
                 placeholder={t('未选择 = 全部渠道')}
                 searchPlaceholder={t('搜索渠道…')}
@@ -564,7 +563,7 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
               <Label className='text-[12.5px] whitespace-nowrap text-subtle'>{t('可用模型')}</Label>
               <MultiSelect
                 value={allowedModels}
-                onValueChange={setPickedModels}
+                onValueChange={next => setPickedModels(current => retainHiddenSelections(current, next, modelCandidates))}
                 options={modelCandidates}
                 placeholder={t('未选择 = 全部已发布模型')}
                 emptyHint={modelEmptyHint}
@@ -576,9 +575,19 @@ function KeyModal({ target, providers, modelsByProvider, onClose, onSaved }: Key
             <p>
               {t('未选择渠道表示允许全部渠道；未选择模型表示允许全部已发布模型。同时选择时按交集生效。模型候选来自模型管理中手动添加的目录，并按所选渠道筛选。')}
             </p>
-            {hasRemovedChannels && <p>
-              {t('已移除渠道的限制会继续保留。只有该渠道的 Key 将无法转发；可手动取消该项，取消全部渠道限制后将允许全部渠道。')}
-            </p>}
+            {(hiddenProviders.length > 0 || hiddenModels.length > 0) && <div className='flex flex-col gap-2 rounded border border-border p-3'>
+              <p className='text-xs text-subtle'>{t('以下已保存的限制当前不可用，仍会保留；可手动移除。')}</p>
+              {hiddenProviders.map(id => <div key={`provider:${id}`} className='flex min-w-0 items-center justify-between gap-2 text-xs'>
+                <span className='break-all'>{t('渠道')} · {providers.find(item => item.id === id)?.label || id}</span>
+                <Button size='sm' variant='ghost' disabled={saving} aria-label={`${t('移除渠道限制')} ${id}`}
+                  onClick={() => setPickedProviders(current => current.filter(value => value !== id))}>{t('移除')}</Button>
+              </div>)}
+              {hiddenModels.map(id => <div key={`model:${id}`} className='flex min-w-0 items-center justify-between gap-2 text-xs'>
+                <span className='break-all'>{t('模型')} · {id}</span>
+                <Button size='sm' variant='ghost' disabled={saving} aria-label={`${t('移除模型限制')} ${id}`}
+                  onClick={() => setPickedModels(current => current.filter(value => value !== id))}>{t('移除')}</Button>
+              </div>)}
+            </div>}
             {/* 当前选的摘要：多选的触发器上只显示「连接后的一行文案」，清单长了会被省略号
                 收掉 —— 勾了哪几家 / 哪些模型要在这儿摊开。id 沿用旧实现的：page-gateway.css
                 按它给这行加了上边距（它是「当前选择」而不是「使用说明」）。 */}

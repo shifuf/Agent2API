@@ -15,7 +15,7 @@ This fork uses a manual model catalog across the gateway. Existing accounts, key
 3. Select allowed channels and public models for each gateway Key. Both restrictions apply together. An empty channel selection allows all channels; an empty model selection allows all published models. Deleting a channel preserves existing Key restrictions.
 4. Manage subscriptions and install or import the proxy kernel on the Proxies page. Subscription nodes can serve accounts and proxy pools. Stopping the kernel or disabling a node does not make bound requests fall back to a direct connection.
 
-Channel creation and editing use a left drawer with Basic settings and API Key groups navigation. Model candidates preload from PublicProviderConf `dist/all.json` with a one-hour cache. Refresh model catalog updates them immediately; cached data remains available during network failures. Selecting a candidate does not publish it or change channel permissions.
+Channel creation and editing use a centered form. Fetch models, Select models and View group Keys open an adjacent panel; model selections apply after confirmation. Candidates preload from PublicProviderConf `dist/all.json`, grouped by developer and deduplicated by ID, with a one-hour cache. You can also choose an account's upstream model and customize its public ID, or find and edit an existing custom model. Upstream and gateway Key choices only show enabled channels/models backed by usable accounts. Unavailable saved Key restrictions remain separately visible and can be explicitly removed. Refresh model catalog updates the directory; cached data survives network failures. Selecting a candidate does not publish it automatically.
 
 
 ## Contents

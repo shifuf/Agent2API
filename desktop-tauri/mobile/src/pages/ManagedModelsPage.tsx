@@ -8,7 +8,7 @@ import { apiCall } from '../api/client'
 import { ErrorNote, Empty, SkeletonList } from '../components/ui'
 import { t } from '../i18n'
 
-type Source = { id: string; name: string; models: Array<{ id: string; name?: string }> }
+type Source = { id: string; name: string; accountCount: number; models: Array<{ id: string; name?: string }> }
 type Catalog = { models: ManagedModel[]; sources: Source[]; revision: string; routingGroups?: Array<{ model: string }> }
 const fetchPublicCatalog = (refresh: boolean) => apiCall<PublicModelCatalog>('/api/models/public-catalog', { method: refresh ? 'POST' : 'GET' })
 
@@ -55,7 +55,7 @@ export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
   }
   const name = (id: string) => catalog?.sources.find(source => source.id === id)?.name || id
   const rows = (catalog?.models || []).filter(model => `${model.id} ${model.name}`.toLowerCase().includes(query.toLowerCase()))
-  const sources = (catalog?.sources || []).flatMap(source => source.models.map(model => ({ source, model })))
+  const sources = (catalog?.sources || []).filter(source => source.accountCount > 0).flatMap(source => source.models.map(model => ({ source, model })))
     .filter(({ source, model }) => `${source.name} ${model.id}`.toLowerCase().includes(sourceQuery.toLowerCase()))
 
   return <div className='m-page'>
@@ -89,8 +89,8 @@ export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
       <SheetContent><SheetHeader><SheetTitle>{original ? t('编辑模型') : t('添加模型')}</SheetTitle></SheetHeader>
         <SheetBody className='flex flex-col gap-3'>
           {error && <ErrorNote text={error} />}
-          <PublicModelPicker state={publicCatalog} selectedId={draft.id} disabled={busy} t={t}
-            onSelect={model => setDraft(current => current ? selectPublicModel(current, model) : current)} />
+          <PublicModelPicker state={publicCatalog} selectedId={draft.id} disabled={busy} t={t} sources={catalog?.sources} saved={catalog?.models}
+            onSelect={(model, existing) => { if (existing) { setOriginal(existing.id); setDraft(structuredClone(existing)) } else setDraft(current => current ? selectPublicModel(current, model) : current) }} />
           <Label htmlFor='mobile-model-id'>{t('对外模型 ID')}</Label>
           <Input id='mobile-model-id' disabled={busy} value={draft.id} onChange={event => setDraft({ ...draft, id: event.target.value })} />
           <Label htmlFor='mobile-model-name'>{t('名称')}</Label>

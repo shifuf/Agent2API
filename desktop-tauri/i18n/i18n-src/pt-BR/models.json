@@ -515,5 +515,12 @@
   "模型目录暂时无法加载，请重试或填写自定义模型 ID。": "O catálogo está indisponível. Tente novamente ou insira um ID de modelo personalizado.",
   "正在使用缓存的模型目录。": "Usando o catálogo de modelos em cache.",
   "共 {n} 个候选模型": "{n} modelos disponíveis para seleção",
-  "目录更新于 {time}": "Catálogo atualizado em {time}"
+  "目录更新于 {time}": "Catálogo atualizado em {time}",
+  "从目录或上游选择模型": "Selecionar do catálogo ou upstream",
+  "候选按模型 ID 去重；选择后可自定义 ID 和名称，已有自定义模型可直接编辑。": "Os candidatos são únicos por ID. Personalize o ID e o nome após selecionar ou edite um modelo personalizado existente.",
+  "全部来源": "Todas as origens",
+  "厂商目录": "Catálogo de desenvolvedores",
+  "账号上游模型": "Modelos upstream das contas",
+  "已有自定义模型": "Modelos personalizados existentes",
+  "搜索厂商、渠道、模型名称或 ID…": "Pesquisar desenvolvedor, canal, nome ou ID do modelo…"
 }

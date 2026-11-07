@@ -13,7 +13,7 @@
  *
  * ── 两层弹窗（与旧实现的对应关系）──────────────────────────
  *   第 1 步 #add-modal       → 这里的列表 Dialog（选提供商），宽 1100px；
- *   第 2 步 #add-form-modal  → 登录表单 Dialog；API 渠道使用左侧 Sheet。
+ *   第 2 步 #add-form-modal  → 登录 / 渠道表单 Dialog；渠道按需展开分组侧面板。
  * 两种形态都基于 Base UI Dialog：Esc / 点遮罩 / 焦点陷阱 / 关闭后焦点归位由 Base UI
  * 内建，嵌套弹窗的 Esc 只收最上面那层（旧实现靠 document 上的 keydown +
  * closeFormStep 手工分流）。两种表单都 keepMounted：退回列表不会卸载登录引擎；
@@ -30,7 +30,7 @@
 
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
-import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Sheet } from '@ui'
+import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@ui'
 
 import { shared, type CustomProviderRecord, type SharedWindow } from './add-account-bridge'
 import {
@@ -41,7 +41,7 @@ import {
   configOf,
 } from './add-account-configs'
 import { CustomFootActions, CustomProviderBlock, type CustomMode } from './add-custom-provider'
-import { ChannelDrawerContent } from './channel-drawer'
+import { ChannelDialogContent } from './channel-dialog'
 import { ImportFootActions, ImportPanel } from './add-provider-import'
 import {
   IMPORT_SEGMENT_ENABLED,
@@ -321,17 +321,17 @@ function AddAccountModal({
             </DialogFooter>
           </DialogContent>
         </Dialog>
-        {/* 与登录 Dialog 并列：抽屉不进入关闭 Dialog 的 inert 子树，登录引擎仍常驻。 */}
-        <Sheet open={state.step === 'form' && isCustom} onOpenChange={next => { if (!next) backToPick() }}>
-          <ChannelDrawerContent keepMounted title={heading}
+        {/* 两种表单各自常驻，登录引擎与渠道草稿均由原来的生命周期保留。 */}
+        <Dialog open={state.step === 'form' && isCustom} onOpenChange={next => { if (!next) backToPick() }}>
+          <ChannelDialogContent keepMounted title={heading} open={state.step === 'form' && isCustom} scope={String(state.showToken)}
             description={state.presetKey ? t('使用 {name} 模板新建提供商', { name: customLabel }) : undefined}
             footer={<div className='acct-add-foot-host'>
               <CustomFootActions mode={customMode} presetKey={state.presetKey} providerId={state.providerHint} />
             </div>}>
             <CustomProviderBlock mode={customMode} providerHint={state.providerHint}
               presetKey={state.presetKey} showToken={state.showToken} version={version} />
-          </ChannelDrawerContent>
-        </Sheet>
+          </ChannelDialogContent>
+        </Dialog>
       </DialogContent>
     </Dialog>
   )

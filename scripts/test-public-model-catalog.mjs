@@ -16,8 +16,16 @@ const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 const sourceUrl = 'https://raw.githubusercontent.com/ThinkInAIXYZ/PublicProviderConf/refs/heads/dev/dist/all.json'
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent2api-catalog-http-'))
 const key = `catalog-smoke-${randomUUID()}`
-const fixture = { providers: [{ id: 'test-vendor', name: 'Test Vendor', models: [{ id: 'Case/Model', name: 'Selected model', kind: 'chat' }] }],
+const fixture = { providers: [
+  { id: 'openai', name: 'OpenAI', models: [{ id: 'Case/Model', name: 'Selected model', kind: 'chat' }] },
+  { id: 'openrouter', name: 'OpenRouter', models: [{ id: 'Case/Model', name: 'Reseller duplicate', kind: 'chat' }] },
+  { id: 'llama', name: 'Llama', models: [{ id: 'Llama-4', name: 'Llama 4', kind: 'chat' }] },
+],
   sourceUrl, fetchedAt: new Date().toISOString(), updatedAt: '2026-11-06T19:19:22.445Z', stale: false }
+const expectedProviders = [
+  { id: 'meta', name: 'Meta', models: [{ id: 'Llama-4', name: 'Llama 4', kind: 'chat' }] },
+  fixture.providers[0],
+]
 const proxySockets = new Set()
 const failingProxy = net.createServer(socket => {
   proxySockets.add(socket)
@@ -80,11 +88,11 @@ try {
   await fs.writeFile(cacheFile, saved)
   await start(data, true)
   const loaded = await api('/api/models/public-catalog')
-  assert.deepEqual(loaded.providers, fixture.providers)
+  assert.deepEqual(loaded.providers, expectedProviders, 'Legacy cache exposed reseller duplicates or unmerged model families')
   assert.equal(loaded.stale, false)
   assert.equal(loaded.fetchedAt, fixture.fetchedAt)
   const refreshed = await api('/api/models/public-catalog', 'POST')
-  assert.deepEqual(refreshed.providers, fixture.providers)
+  assert.deepEqual(refreshed.providers, expectedProviders)
   assert.equal(refreshed.stale, true)
   assert(refreshed.error)
   assert.equal(await fs.readFile(cacheFile, 'utf8'), saved, 'Failed fetch overwrote the last good disk cache')
@@ -94,10 +102,10 @@ try {
   await fs.writeFile(cacheFile, JSON.stringify({ ...fixture, fetchedAt: '2000-01-01T00:00:00Z' }))
   await start(data, true)
   const restored = await api('/api/models/public-catalog')
-  assert.deepEqual(restored.providers, fixture.providers)
+  assert.deepEqual(restored.providers, expectedProviders)
   assert.equal(restored.stale, true)
   await stop()
-  console.log('PASS: actual HTTP routes, fresh disk cache, failed refresh with stale fallback, disk preservation, restart recovery and no automatic publication')
+  console.log('PASS: actual HTTP routes, developer normalization of legacy cache, failed refresh with stale fallback, disk preservation, restart recovery and no automatic publication')
 
   if (process.argv.includes('--live')) {
     await start(path.join(directory, 'live'), false)
@@ -106,10 +114,15 @@ try {
     assert.equal(downloaded.stale, false)
     assert(downloaded.providers.length > 0)
     assert(downloaded.providers.some(provider => provider.id === 'openai' && provider.models.length > 0))
+    assert(!downloaded.providers.some(provider => ['openrouter', 'thinkingmachines', 'llama', 'doubao'].includes(provider.id)))
+    const modelIds = downloaded.providers.flatMap(provider => provider.models.map(model => model.id))
+    for (const provider of downloaded.providers) {
+      assert.equal(new Set(provider.models.map(model => model.id)).size, provider.models.length, `${provider.id} contains repeated model IDs`)
+    }
     const cached = await api('/api/models/public-catalog')
     assert.equal(cached.fetchedAt, downloaded.fetchedAt)
     assert.deepEqual((await api('/api/models/catalog')).models, [])
-    console.log(`PASS: live fixed-source fetch, ${downloaded.providers.length} providers / ${downloaded.providers.reduce((sum, provider) => sum + provider.models.length, 0)} models; subsequent request reused cache`)
+    console.log(`PASS: live fixed-source fetch, ${downloaded.providers.length} providers / ${modelIds.length} model rows / ${new Set(modelIds).size} unique IDs; subsequent request reused cache`)
   }
 } catch (error) {
   console.error(error)

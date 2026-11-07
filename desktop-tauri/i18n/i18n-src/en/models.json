@@ -515,5 +515,12 @@
   "模型目录暂时无法加载，请重试或填写自定义模型 ID。": "The model catalog is unavailable. Retry or enter a custom model ID.",
   "正在使用缓存的模型目录。": "Using the cached model catalog.",
   "共 {n} 个候选模型": "{n} candidate models",
-  "目录更新于 {time}": "Catalog updated {time}"
+  "目录更新于 {time}": "Catalog updated {time}",
+  "从目录或上游选择模型": "Choose from catalog or upstream",
+  "候选按模型 ID 去重；选择后可自定义 ID 和名称，已有自定义模型可直接编辑。": "Candidates are deduplicated by model ID. Customize the ID and name after selection, or open an existing custom model to edit it.",
+  "全部来源": "All sources",
+  "厂商目录": "Developer catalog",
+  "账号上游模型": "Account upstream models",
+  "已有自定义模型": "Existing custom models",
+  "搜索厂商、渠道、模型名称或 ID…": "Search developer, channel, model name or ID…"
 }

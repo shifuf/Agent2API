@@ -674,5 +674,20 @@
   "添加渠道": "Add channel",
   "编辑渠道": "Edit channel",
   "渠道配置": "Channel settings",
-  "基本配置": "Basic settings"
+  "基本配置": "Basic settings",
+  "选择分组模型": "Select group models",
+  "仅在确认后更新当前分组，获取模型不会自动选中。": "The current group changes only after confirmation. Fetching does not select models automatically.",
+  "搜索模型": "Search models",
+  "没有匹配的模型": "No matching models",
+  "自定义模型 ID": "Custom model ID",
+  "确认选择": "Confirm selection",
+  "{n} 把 Key": "{n} Keys",
+  "查看分组 Key": "View group Keys",
+  "选择模型": "Select models",
+  "分组 Key": "Group Keys",
+  "全选": "Select all",
+  "清空": "Clear",
+  "关闭": "Close",
+  "添加": "Add",
+  "Base URL、协议或 Key 已变化，请重新获取模型。": "Base URL, protocol or Key changed. Fetch the models again."
 }

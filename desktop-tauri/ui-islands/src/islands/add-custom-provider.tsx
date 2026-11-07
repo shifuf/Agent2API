@@ -82,6 +82,7 @@ export const REMOVE_BUTTON_ID = 'custom-existing-remove'
 
 /** 提交互斥锁：弹窗内的提交不占用账号列表的 busy 锁（与内置家的 addBusy 同一取向） */
 let submitBusy = false
+let activeCreatePreset: string | undefined
 
 const protocolOptions = (): Array<{ value: string; label: string }> =>
   shared().wbProviders?.PROTOCOL_OPTIONS || FALLBACK_PROTOCOLS
@@ -252,7 +253,7 @@ export function CustomProviderBlock({
   providerHint: string
   /** 第 1 步点的是预置家卡片时的 key（空串 = 不是从预置卡进来的） */
   presetKey: string
-  /** 第 1 步每点一次卡就 +1：让预填在「再次点同一张预置卡」时也重新执行（旧 onShow 每次都跑） */
+  /** 第 1 步每点一次卡就 +1；返回相同模板时保留正在编辑的草稿。 */
   showToken: number
   /** 目录刷新后的重画信号 */
   version: number
@@ -279,17 +280,21 @@ export function CustomProviderBlock({
     const preset = shared().wbPresetProviders?.presetOf?.(presetKey)
     if (!preset) return
     const presetNoAuth = preset.account?.noAuth === true
-    setDraftValue(NAME_ID, preset.baseUrl ? preset.name : '')
-    setDraftValue(BASEURL_ID, preset.baseUrl || '')
-    if (preset.protocol) {
-      setProtocol(preset.protocol)
-      setDraftValue(PROTOCOL_ID, preset.protocol)
+    const restoreDraft = activeCreatePreset === presetKey
+    activeCreatePreset = presetKey
+    if (!restoreDraft) {
+      setDraftValue(NAME_ID, preset.baseUrl ? preset.name : '')
+      setDraftValue(BASEURL_ID, preset.baseUrl || '')
+      if (preset.protocol) {
+        setProtocol(preset.protocol)
+        setDraftValue(PROTOCOL_ID, preset.protocol)
+      }
+      setNoAuth(presetNoAuth)
+      writeNoAuthDraft(NOAUTH_ID, presetNoAuth)
     }
-    setNoAuth(presetNoAuth)
-    writeNoAuthDraft(NOAUTH_ID, presetNoAuth)
-    setBaseHintOverride(preset.hint || '')
+    setBaseHintOverride(readField(PROTOCOL_ID) === preset.protocol ? preset.hint || '' : '')
     setBasePlaceholderOverride(preset.placeholder || '')
-    // showToken 参与依赖：同一张预置卡再点一次也要重新预填（旧 onShow 每次进这一屏都跑）
+    // showToken 仍刷新模板提示；只有切换模板或成功提交后才重置用户输入。
   }, [mode, presetKey, providerHint, showToken])
 
   const existingPresetKey = pickedProvider?.presetKey || ''
@@ -560,6 +565,7 @@ async function submitCreate(context: FootContext, allowDuplicate = false, target
       )) as { provider?: { name?: string }; account?: { name?: string }; created?: boolean } | null
       clearFields([NAME_ID, BASEURL_ID, APIKEY_ID])
       clearChannelGroups('create-channel')
+      activeCreatePreset = undefined
       clearBalanceFields(scheme, BALANCE_CREATE_PREFIX)
       // 勾选框与草稿一起复位（下次进来是干净的默认态，不被上一家预勾影响）
       writeNoAuthDraft(NOAUTH_ID, false)

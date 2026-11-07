@@ -51,7 +51,7 @@ fs.mkdirSync(out, { recursive: true });
 const apiKey = `smoke-${randomUUID()}`;
 const results = { runId, binary, steps: [], consoleErrors: [], pageErrors: [], failedRequests: [], responseErrors: [], screenshots: [] };
 const publicCatalog = { providers: [
-  { id: 'maker-a', name: 'Maker A', models: [{ id: 'Alpha/Latest', name: 'Alpha Latest', kind: 'chat' }] },
+  { id: 'maker-a', name: 'Maker A', models: [{ id: 'Alpha/Latest', name: 'Alpha Latest', kind: 'chat' }, { id: 'shared', name: 'Shared A', kind: 'chat' }] },
   { id: 'maker-b', name: 'Maker B', models: [{ id: 'shared', name: 'Shared B', kind: 'chat' }] },
 ], sourceUrl: 'https://raw.githubusercontent.com/ThinkInAIXYZ/PublicProviderConf/refs/heads/dev/dist/all.json', fetchedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stale: false };
 let directoryRequests = 0;
@@ -168,6 +168,7 @@ try {
   await step('preloaded manufacturer catalog fills model IDs and preserves draft on refresh failure', async () => {
     try {
       await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
+      assert.equal(await desktop.getByRole('button', { name: / \/ shared$/ }).count(), 1, 'Duplicate model IDs appear more than once across manufacturers');
       await desktop.getByRole('combobox', { name: '模型厂商', exact: true }).selectOption('maker-a');
       await desktop.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).click();
       assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
@@ -194,12 +195,14 @@ try {
     await desktop.locator('#create-channel-0-keys').fill('smoke-key-a\nsmoke-key-b');
     const group = desktop.locator('section').filter({ has: desktop.locator('#create-channel-0-keys') });
     await group.getByRole('button', { name: '获取模型', exact: true }).click();
-    await group.getByText('upstream-a', { exact: true }).waitFor();
+    const modelsPanel = desktop.locator('[data-channel-panel="models"]');
+    await modelsPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
     assert.equal(await group.locator('#create-channel-0-models').inputValue(), '');
+    await modelsPanel.getByRole('button', { name: '关闭', exact: true }).click();
     await group.getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
     await group.getByRole('button', { name: '获取模型', exact: true }).click();
-    await group.getByText('upstream-b', { exact: true }).waitFor();
-    await group.locator('label').filter({ hasText: /^upstream-b$/ }).click();
+    await modelsPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).check();
+    await modelsPanel.getByRole('button', { name: '确认选择', exact: true }).click();
     assert.equal(await group.locator('#create-channel-0-models').inputValue(), 'upstream-b');
     await desktop.getByRole('button', { name: '添加分组', exact: true }).click();
     await desktop.locator('#create-channel-1-keys').waitFor();
@@ -223,6 +226,9 @@ try {
     await desktop.goto(base, { waitUntil: 'domcontentloaded' });
     await nav('gateway');
     await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
+    await desktop.getByRole('combobox', { name: '模型来源', exact: true }).selectOption('upstream');
+    await desktop.getByRole('button', { name: 'Browser smoke channel / upstream-a', exact: true }).click();
+    assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'upstream-a');
     await desktop.locator('#managed-model-id').fill('browser-public-model');
     await desktop.locator('#managed-model-name').fill('Browser published model');
     await desktop.getByRole('checkbox', { name: 'Browser smoke channel / upstream-a', exact: true }).check();
@@ -232,6 +238,17 @@ try {
     const catalog = await api('/api/models/catalog');
     assert.equal(catalog.models[0].id, 'browser-public-model');
     assert.equal(catalog.models[0].bindings[0].model, 'upstream-a');
+  });
+
+  await step('existing custom models can be found and opened without creating a duplicate', async () => {
+    await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
+    await desktop.getByRole('combobox', { name: '模型来源', exact: true }).selectOption('custom');
+    await desktop.getByRole('button', { name: '已有自定义模型 / browser-public-model', exact: true }).click();
+    await desktop.getByRole('heading', { name: '编辑模型', exact: true }).waitFor();
+    assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'browser-public-model');
+    await desktop.getByRole('button', { name: '保存', exact: true }).click();
+    await desktop.getByRole('cell', { name: 'browser-public-model', exact: true }).waitFor();
+    assert.equal((await api('/api/models/catalog')).models.length, 1);
   });
 
   await step('gateway Key editor exposes channel and published-model restrictions', async () => {
@@ -244,6 +261,28 @@ try {
     await screenshot(desktop, 'desktop-gateway-key-models');
     await desktop.keyboard.press('Escape');
     await desktop.keyboard.press('Escape');
+  });
+
+  await step('disabled models disappear from Key choices while saved restrictions survive', async () => {
+    const created = await api('/api/keys', { name: 'Retained browser key', allowedProviders: [providerId], allowedModels: ['browser-public-model'] });
+    let catalog = await api('/api/models/catalog');
+    const model = catalog.models.find(row => row.id === 'browser-public-model');
+    await api('/api/models/catalog', { previousId: model.id, revision: catalog.revision, model: { ...model, enabled: false } });
+    await desktop.goto(base, { waitUntil: 'domcontentloaded' });
+    await nav('keys');
+    await desktop.getByRole('row').filter({ hasText: 'Retained browser key' }).getByRole('button', { name: '可用范围', exact: true }).click();
+    await desktop.getByText('以下已保存的限制当前不可用，仍会保留；可手动移除。', { exact: true }).waitFor();
+    await desktop.getByLabel('可用模型', { exact: true }).click();
+    assert.equal(await desktop.getByRole('option', { name: 'browser-public-model', exact: true }).count(), 0);
+    await desktop.keyboard.press('Escape');
+    await screenshot(desktop, 'desktop-key-unavailable-restriction');
+    await desktop.getByRole('button', { name: '保存范围', exact: true }).click();
+    await desktop.getByRole('heading', { name: /可用范围/ }).waitFor({ state: 'hidden' });
+    const savedKey = (await api('/api/keys')).keys.find(key => key.id === created.created.id);
+    assert.deepEqual(savedKey.allowedModels, ['browser-public-model']);
+    assert.deepEqual(savedKey.allowedProviders, [providerId]);
+    catalog = await api('/api/models/catalog');
+    await api('/api/models/catalog', { previousId: model.id, revision: catalog.revision, model });
   });
 
   await step('proxy subscriptions and subscription editor are accessible', async () => {

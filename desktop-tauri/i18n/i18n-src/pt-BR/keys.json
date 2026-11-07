@@ -85,5 +85,11 @@
   "； 修改后立即生效，本程序自身会自动使用第一把启用的 Key。每把 Key 可单独限制": "; as alterações entram em vigor imediatamente, e este próprio programa usará automaticamente a primeira Key habilitada. Cada Key pode restringir individualmente ",
   "；一把启用的 Key 都没有时不鉴权。": "",
   "；修改后立即生效。模型测试、助手和日活保活必须选择 Key，受限 Key 不能访问管理接口。每把 Key 可单独限制": "; as alterações têm efeito imediato. Testes de modelo, assistente e manutenção diária exigem uma Key selecionada. Keys restritas não acessam endpoints de gerenciamento. Cada Key pode restringir individualmente ",
-  "；当前必须带 Key。": "; uma Key habilitada é obrigatória."
+  "；当前必须带 Key。": "; uma Key habilitada é obrigatória.",
+  "以下已保存的限制当前不可用，仍会保留；可手动移除。": "Estas restrições salvas estão indisponíveis e serão mantidas. Você pode removê-las manualmente.",
+  "移除渠道限制": "Remover restrição de canal",
+  "移除模型限制": "Remover restrição de modelo",
+  "渠道": "Canal",
+  "模型": "Modelo",
+  "移除": "Remover"
 }

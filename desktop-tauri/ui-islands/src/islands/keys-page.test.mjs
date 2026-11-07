@@ -6,7 +6,7 @@ import ts from 'typescript'
 
 // Exercise the page's real pure selectors without mounting React or a browser.
 const source = readFileSync(new URL('./keys-page.tsx', import.meta.url), 'utf8')
-const compiled = ts.transpileModule(`${source}\nexport { modelOptions, pickedFromOptions, channelOptions };`, {
+const compiled = ts.transpileModule(`${source}\nexport { modelOptions, pickedFromOptions, channelOptions, retainHiddenSelections };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const context = {
@@ -15,7 +15,7 @@ const context = {
     : id === '../i18n' ? { t: (text, args = {}) => text.replace(/\{(\w+)\}/g, (_, key) => String(args[key] ?? key)) } : {},
 }
 vm.runInNewContext(compiled, context)
-const { modelOptions, pickedFromOptions, channelOptions } = context.exports
+const { modelOptions, pickedFromOptions, channelOptions, retainHiddenSelections } = context.exports
 const plain = value => JSON.parse(JSON.stringify(value))
 
 test('saving a missing selected channel never clears the last channel restriction', () => {
@@ -35,15 +35,21 @@ test('no selected channel offers all manually published models', () => {
   assert.deepEqual(plain(modelOptions({}, [], [])), [])
 })
 
-test('channel selection narrows model options and preserves existing model restrictions', () => {
-  assert.deepEqual(plain(modelOptions({ a: ['public-a'], b: ['public-b'] }, ['a'], ['old-model']).map(item => item.value)), ['old-model', 'public-a'])
+test('unavailable saved models are not offered as available model choices', () => {
+  assert.deepEqual(plain(modelOptions({ a: ['public-a'], b: ['public-b'] }, ['a'], ['old-model']).map(item => item.value)), ['public-a'])
 })
 
-test('deleted channels are visible only for keys that already retained them', () => {
-  const providers = [{ id: 'live', label: 'Live' }, { id: 'deleted', removed: true }]
+test('unavailable channels never enter the usable channel dropdown', () => {
+  const providers = [{ id: 'live', label: 'Live' }, { id: 'deleted', removed: true }, { id: 'disabled', enabled: false }, { id: 'empty', count: 0 }]
   assert.deepEqual(plain(channelOptions(providers, []).map(item => item.value)), ['live'])
   const options = plain(channelOptions(providers, ['DELETED', 'missing-from-response']))
-  assert.deepEqual(options.map(item => item.value), ['live', 'deleted', 'missing-from-response'])
-  assert.match(options[1].label, /已移除渠道/)
-  assert.match(options[2].label, /已移除渠道/)
+  assert.deepEqual(options.map(item => item.value), ['live'])
+})
+
+test('editing visible choices retains hidden restrictions until explicitly removed', () => {
+  assert.deepEqual(plain(retainHiddenSelections(['old-model', 'public-a'], ['public-b'], [
+    { value: 'public-a', label: 'A' }, { value: 'public-b', label: 'B' },
+  ])), ['public-b', 'old-model'])
+  assert.deepEqual(plain(retainHiddenSelections(['old-model'], [], [])), ['old-model'])
+  assert.deepEqual(plain(retainHiddenSelections(['PUBLIC-A'], [], [{ value: 'public-a', label: 'A' }])), [])
 })

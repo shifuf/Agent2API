@@ -70,6 +70,13 @@ async function ok(endpoint, body, key, method) {
   return result.body
 }
 async function models(key) { return (await ok('/v1/models', undefined, key)).data.map(item => item.id).sort() }
+async function choices() {
+  const [catalog, keys] = await Promise.all([ok('/api/models/catalog'), ok('/api/keys')])
+  return { sources: catalog.sources, keys }
+}
+function sourceModels(selection, provider) {
+  return selection.sources.find(source => source.id === provider)?.models.map(model => model.id).sort() || []
+}
 async function chat(model, key, expectedKey, expectedModel) {
   const before = calls.length
   const result = await ok('/v1/chat/completions', { ...(model ? { model } : {}), stream: false, messages: [{ role: 'user', content: 'ping' }] }, key)
@@ -95,6 +102,8 @@ try {
   }
   assert.ok(ready, 'Gateway did not become ready')
   assert.deepEqual(await models(), [])
+  assert.deepEqual((await choices()).sources, [], 'Unconfigured channels must not be upstream choices')
+  assert.deepEqual((await choices()).keys.providers, [], 'Unconfigured channels must not be gateway Key choices')
   await denied('', adminKey)
   await denied('wire-a', adminKey)
 
@@ -105,6 +114,33 @@ try {
   ])
   const b = await makeChannel('Channel B', [{ id: 'b1', name: 'Other channel', apiKeys: ['key-b-one'], models: ['wire-z'], enabled: true }])
   const aid = a.provider.id, bid = b.provider.id
+  const disabledGroup = await makeChannel('Disabled group', [{ id: 'disabled', apiKeys: ['key-disabled'], models: ['unavailable-model'], enabled: false }])
+  await makeChannel('Empty group', [{ id: 'empty', apiKeys: ['key-empty'], models: [], enabled: true }])
+  const missingCredentials = await ok('/api/custom-providers', { name: 'Missing credentials', baseUrl: upstreamUrl, protocol: 'chat_completions' })
+  await ok('/api/custom-providers/models', { providerId: missingCredentials.provider.id, models: [{ id: 'unavailable-model' }], mappings: [] })
+  const missingAccount = await makeChannel('Missing account', [{ id: 'missing', apiKeys: ['key-removed'], models: ['unavailable-model'], enabled: true }])
+  await ok(`/api/accounts/${missingAccount.accounts[0].id}`, undefined, adminKey, 'DELETE')
+  let selection = await choices()
+  assert.deepEqual(selection.sources.map(source => source.id).sort(), [aid, bid].sort(), 'Only channels with an enabled credentialed account and selected models are upstream choices')
+  assert.deepEqual(selection.keys.providers.map(provider => provider.id).sort(), [aid, bid].sort(), 'Unavailable channels must not be offered as gateway Key choices')
+  assert.deepEqual(sourceModels(selection, aid), ['wire-a', 'wire-b'])
+  assert.equal(selection.sources.find(source => source.id === aid).accountCount, 2)
+  assert.ok(!JSON.stringify(selection.sources).includes('key-a-one'), 'Source choices must not expose credentials')
+  const aGroups = (await ok('/api/custom-providers')).providers.find(provider => provider.id === aid).keyGroups
+  const a1 = aGroups.find(group => group.id === 'a1').accountIds[0]
+  const a2 = aGroups.find(group => group.id === 'a2').accountIds[0]
+  await ok(`/api/accounts/${a2}`, { enabled: false }, adminKey, 'PATCH')
+  selection = await choices()
+  assert.deepEqual(sourceModels(selection, aid), ['wire-a'], 'Disabled accounts cannot offer their group models')
+  assert.equal(selection.sources.find(source => source.id === aid).accountCount, 1)
+  assert.equal(selection.keys.providers.find(provider => provider.id === aid).count, 1)
+  await ok(`/api/accounts/${a1}`, { enabled: false }, adminKey, 'PATCH')
+  selection = await choices()
+  assert.ok(!selection.sources.some(source => source.id === aid), 'A channel with only disabled accounts must disappear')
+  assert.ok(!selection.keys.providers.some(provider => provider.id === aid))
+  await ok(`/api/accounts/${a1}`, { enabled: true }, adminKey, 'PATCH')
+  await ok(`/api/accounts/${a2}`, { enabled: true }, adminKey, 'PATCH')
+  await ok('/api/custom-providers/remove', { id: disabledGroup.provider.id })
   assert.deepEqual(await models(), [], 'Discovering channel models must not publish them')
   const discovered = await ok('/api/custom-providers/fetch-models', { protocol: 'chat_completions', baseUrl: upstreamUrl, apiKey: 'key-a-one' })
   assert.ok(JSON.stringify(discovered).includes('wire-a'))
@@ -163,7 +199,28 @@ try {
   assert.equal(calls.at(-1).key, 'key-a-one')
   assert.equal(calls.at(-1).reasoning, 'high', 'Original source binding reasoning must survive source testing')
   await save(null, 'legacy-source-alias')
+  for (const [unavailable, restored] of [[{ enabled: false }, { enabled: true }], [{ apiKey: null }, { apiKey: 'key-a-one' }]]) {
+    await ok(`/api/accounts/${sourceAccount}`, unavailable, adminKey, 'PATCH')
+    selection = await choices()
+    assert.deepEqual(sourceModels(selection, aid), ['wire-b'], 'Unusable accounts must immediately stop contributing source models')
+    assert.deepEqual(selection.keys.modelsByProvider[aid], ['wire-a'], 'Key model choices must share account availability with public models')
+    assert.deepEqual(await models(aKey.key), [])
+    await denied('shared-public', aKey.key)
+    await save({ ...shared, name: 'Retained unavailable binding' }, shared.id)
+    assert.deepEqual(catalog.models.find(model => model.id === shared.id).bindings, shared.bindings, 'Editing an unavailable binding must preserve it')
+    await ok(`/api/accounts/${sourceAccount}`, restored, adminKey, 'PATCH')
+    await save(shared, shared.id)
+  }
   await ok('/api/custom-providers/update', { id: aid, enabled: false })
+  selection = await choices()
+  assert.ok(!selection.sources.some(source => source.id === aid), 'Disabled channels must disappear from upstream choices')
+  assert.ok(!selection.keys.providers.some(provider => provider.id === aid), 'Disabled channels must disappear from Key choices even when already selected')
+  assert.deepEqual(selection.keys.keys.find(key => key.id === aKey.id).allowedProviders, [aid])
+  assert.deepEqual(selection.keys.keys.find(key => key.id === aKey.id).allowedModels, ['shared-public'])
+  await ok(`/api/keys/${aKey.id}`, { name: 'Renamed while channel disabled' }, adminKey, 'PATCH')
+  selection = await choices()
+  assert.deepEqual(selection.keys.keys.find(key => key.id === aKey.id).allowedProviders, [aid], 'Unrelated edits must preserve unavailable channel restrictions')
+  assert.deepEqual(selection.keys.keys.find(key => key.id === aKey.id).allowedModels, ['shared-public'])
   assert.deepEqual(await models(aKey.key), [])
   await denied('shared-public', aKey.key)
   await chat('shared-public', adminKey, 'key-b-one', 'wire-z')
@@ -172,6 +229,7 @@ try {
   await denied('wire-a', aKey.key)
   await denied('shared-public', otherKey.key)
   await save({ ...shared, enabled: false }, shared.id)
+  assert.ok(!Object.values((await choices()).keys.modelsByProvider).flat().includes('shared-public'), 'Disabled public models cannot be offered as Key choices')
   await denied('shared-public', aKey.key)
   await save(shared, shared.id)
 
@@ -189,6 +247,9 @@ try {
   const retained = groups.map(group => ({ id: group.id, name: group.name, enabled: group.id !== 'a1',
     apiKeys: [], accountIds: group.accountIds, models: group.models }))
   await ok('/api/custom-providers/update', { id: aid, keyGroups: retained })
+  selection = await choices()
+  assert.deepEqual(sourceModels(selection, aid), ['wire-b'], 'Disabled Key groups must not contribute upstream choices')
+  assert.equal(selection.sources.find(source => source.id === aid).accountCount, 1)
   assert.deepEqual(await models(aKey.key), [], 'Disabled groups must disappear from the scoped catalog')
   assert.deepEqual(await models(routeKey.key), [])
   assert.ok(!(await ok('/api/keys')).modelsByProvider[aid].includes('route-smoke'))
@@ -199,10 +260,12 @@ try {
   retained[0].enabled = true
   retained[0].models = []
   await ok('/api/custom-providers/update', { id: aid, keyGroups: retained })
+  assert.deepEqual(sourceModels(await choices(), aid), ['wire-b'], 'An explicitly empty Key group must not become unrestricted')
   await denied('shared-public', aKey.key)
 
   await ok('/api/custom-providers/remove', { id: bid })
   const keys = await ok('/api/keys')
+  assert.ok(!keys.providers.some(provider => provider.id === bid), 'Deleted channels must not remain selectable as retained restrictions')
   assert.deepEqual(keys.keys.find(key => key.id === bKey.id).allowedProviders, [bid])
   await ok(`/api/keys/${bKey.id}`, { name: 'Still restricted', allowedProviders: [bid] }, adminKey, 'PATCH')
   assert.equal((await request('/api/keys', { name: 'unknown', allowedProviders: [bid] })).status, 400)
@@ -216,7 +279,7 @@ try {
   await ok(`/api/accounts/${groups.find(group => group.id === 'a2').accountIds[0]}`,
     { proxy: { source: 'pool', proxyId: 'deleted-subscription-node' } }, adminKey, 'PATCH')
   await denied('wire-a', otherKey.key)
-  console.log('PASS: empty catalog, discovery, one-hop aliases, channel/model scopes, source-test authorization and reasoning, per-Key groups, disabled channels, routing groups, disabled/empty groups, stale revisions, deleted-channel restrictions, stale model edits and unavailable proxy rejection')
+  console.log('PASS: account-aware channel/model choices, disabled/missing credentials and accounts, preserved unavailable restrictions, empty catalog, discovery, one-hop aliases, channel/model scopes, source-test authorization and reasoning, per-Key groups, disabled channels, routing groups, disabled/empty groups, stale revisions, deleted-channel restrictions, stale model edits and unavailable proxy rejection')
 } catch (error) {
   console.error(logs)
   throw error

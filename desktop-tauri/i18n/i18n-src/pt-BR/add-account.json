@@ -674,5 +674,20 @@
   "添加渠道": "Adicionar canal",
   "编辑渠道": "Editar canal",
   "渠道配置": "Configurações do canal",
-  "基本配置": "Configurações básicas"
+  "基本配置": "Configurações básicas",
+  "选择分组模型": "Selecionar modelos do grupo",
+  "仅在确认后更新当前分组，获取模型不会自动选中。": "O grupo atual muda somente após confirmar. Buscar modelos não os seleciona automaticamente.",
+  "搜索模型": "Pesquisar modelos",
+  "没有匹配的模型": "Nenhum modelo correspondente",
+  "自定义模型 ID": "ID de modelo personalizado",
+  "确认选择": "Confirmar seleção",
+  "{n} 把 Key": "{n} Keys",
+  "查看分组 Key": "Ver Keys do grupo",
+  "选择模型": "Selecionar modelos",
+  "分组 Key": "Keys do grupo",
+  "全选": "Selecionar todos",
+  "清空": "Limpar",
+  "关闭": "Fechar",
+  "添加": "Adicionar",
+  "Base URL、协议或 Key 已变化，请重新获取模型。": "A Base URL, o protocolo ou a Key mudou. Busque os modelos novamente."
 }

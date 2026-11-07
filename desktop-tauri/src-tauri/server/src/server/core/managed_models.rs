@@ -232,26 +232,37 @@ pub fn models_by_provider(store: &AccountStore) -> Value {
 pub fn choices(store: &AccountStore) -> Vec<Value> {
     let snapshot = store.routing_snapshot();
     let mut providers: Vec<String> = snapshot
-        .accounts
+        .available_providers
         .iter()
-        .map(|account| routing::provider_of(account).to_string())
+        .filter(|provider| provider_enabled(provider))
+        .cloned()
         .collect();
-    providers.extend(
-        custom_providers::list()
-            .iter()
-            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string)),
-    );
     providers.sort();
-    providers.dedup();
-    providers.into_iter().filter(|provider| super::account_store::store_view::account_visible(provider)).map(|provider| {
-        let models = custom_providers::get(&provider).and_then(|item| item.get("models").and_then(Value::as_array).cloned())
+    let mut choices = Vec::new();
+    for provider in providers {
+        let models = custom_providers::get(&provider)
+            .and_then(|item| item.get("models").and_then(Value::as_array).cloned())
             .unwrap_or_else(|| providers::catalog::manifest_for_provider(&provider));
-        let models: Vec<_> = models.iter().map(|item| json!({ "id": model_id(item),
-            "name": item.get("name"), "kind": if providers::images::model_is_image(item) { "image" } else { "chat" },
-            "capabilities": capability::effective(item) })).collect();
-        json!({ "id": provider, "name": providers::label_of(&provider), "models": models,
-            "accountCount": snapshot.accounts.iter().filter(|account| routing::provider_of(account) == provider).count() })
-    }).collect()
+        let bindings: Vec<_> = models
+            .iter()
+            .map(|item| Binding { provider: provider.clone(), model: model_id(item) })
+            .collect();
+        let accounts: Vec<_> = snapshot.accounts.iter().filter(|account| {
+            bindings.iter().any(|binding| account_matches(account, binding))
+        }).collect();
+        let models: Vec<_> = models.iter().zip(&bindings)
+            .filter(|(_, binding)| !binding.model.is_empty()
+                && accounts.iter().any(|account| account_matches(account, binding)))
+            .map(|(item, binding)| json!({ "id": binding.model,
+                "name": item.get("name"), "kind": if providers::images::model_is_image(item) { "image" } else { "chat" },
+                "capabilities": capability::effective(item) })).collect();
+        if models.is_empty() {
+            continue;
+        }
+        choices.push(json!({ "id": provider, "name": providers::label_of(&provider),
+            "models": models, "accountCount": accounts.len() }));
+    }
+    choices
 }
 
 pub fn management(store: &AccountStore) -> Result<Value, String> {

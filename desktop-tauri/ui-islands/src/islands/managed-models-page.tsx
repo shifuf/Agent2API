@@ -60,7 +60,7 @@ export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
   }
   const rows = (catalog?.models || []).filter(model => `${model.id} ${model.name}`.toLowerCase().includes(query.toLowerCase()))
   const sourceName = (id: string) => catalog?.sources.find(source => source.id === id)?.name || id
-  const sourceRows = (catalog?.sources || []).flatMap(source => source.models.map(model => ({ source, model })))
+  const sourceRows = (catalog?.sources || []).filter(source => source.accountCount > 0).flatMap(source => source.models.map(model => ({ source, model })))
     .filter(({ source, model }) => `${source.name} ${model.id} ${model.name || ''}`.toLowerCase().includes(sourceQuery.toLowerCase()))
 
   return <Card className='panel flex min-h-0 flex-1 flex-col'>
@@ -105,8 +105,8 @@ export function ManagedModelsPage({ onSources }: { onSources: () => void }) {
     {draft && <Dialog open onOpenChange={open => { if (!open && !saving.current) setDraft(null) }}>
       <DialogContent className='max-w-[860px]'><DialogHeader><DialogTitle>{original ? t('编辑模型') : t('添加模型')}</DialogTitle></DialogHeader>
         <DialogBody className='gap-4'>
-          <PublicModelPicker state={publicCatalog} selectedId={draft.id} disabled={busy} t={t}
-            onSelect={model => setDraft(current => current ? selectPublicModel(current, model) : current)} />
+          <PublicModelPicker state={publicCatalog} selectedId={draft.id} disabled={busy} t={t} sources={catalog?.sources} saved={catalog?.models}
+            onSelect={(model, existing) => { if (existing) edit(existing); else setDraft(current => current ? selectPublicModel(current, model) : current) }} />
           <div className='grid gap-4 sm:grid-cols-2'>
             <div className='flex flex-col gap-2'><Label htmlFor='managed-model-id'>{t('对外模型 ID')}</Label>
               <Input id='managed-model-id' maxLength={128} value={draft.id} disabled={busy} placeholder='my-model'

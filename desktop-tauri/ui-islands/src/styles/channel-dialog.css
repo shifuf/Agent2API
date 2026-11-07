@@ -1,0 +1,25 @@
+.channel-dialog {
+  width: min(760px, calc(100vw - 48px));
+  height: min(860px, calc(100dvh - 48px));
+  max-height: calc(100dvh - 48px);
+  transition: width 200ms ease, opacity 200ms ease, transform 200ms ease;
+}
+.channel-dialog[data-panel-open='true'] { width: min(1160px, calc(100vw - 48px)); }
+.channel-dialog > [data-slot='dialog-header'],
+.channel-dialog > [data-slot='dialog-footer'] { flex-shrink: 0; }
+.channel-dialog .channel-dialog-workspace { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.channel-dialog .channel-dialog-form { flex: 1; min-width: 0; min-height: 0; padding: 16px 20px; gap: 16px; }
+.channel-dialog .channel-dialog-panel { display: flex; width: 360px; min-width: 0; flex-shrink: 0; padding: 16px; border-left: 1px solid var(--hairline); }
+.channel-dialog .channel-dialog-panel[hidden] { display: none; }
+.channel-dialog .channel-panel-content { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; gap: 12px; }
+.channel-dialog .channel-panel-list { flex: 1; min-height: 0; overflow: auto; }
+.channel-dialog .channel-panel-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
+.channel-dialog .channel-group-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+@media (max-width: 900px) {
+  .channel-dialog[data-panel-open='true'] .channel-dialog-workspace { flex-direction: column; }
+  .channel-dialog[data-panel-open='true'] .channel-dialog-form { flex: 1; }
+  .channel-dialog .channel-dialog-panel { width: auto; flex: 1.2; min-height: 0; border-left: 0; border-top: 1px solid var(--hairline); padding: 12px 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .channel-dialog { transition: none; }
+}

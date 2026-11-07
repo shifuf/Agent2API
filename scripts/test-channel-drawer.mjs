@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 /**
- * End-to-end left channel drawer smoke using an isolated server and local fake upstream.
+ * End-to-end centered channel dialog and contextual panel smoke with isolated data.
  * Build the UI and server first. Playwright is an optional external dependency:
  *   npm install --prefix /tmp/browser-tools playwright
  *   NODE_PATH=/tmp/browser-tools/node_modules node scripts/test-channel-drawer.mjs --server /path/to/agent2api-server
@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto';
  */
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('Usage: node scripts/test-channel-drawer.mjs --server PATH [--browser PATH] [--output DIR] [--ui-dir DIR]');
+  console.log('Usage: node scripts/test-channel-drawer.mjs --server PATH [--browser PATH] [--output DIR] [--ui-dir DIR] [--fail-fast]');
   console.log('Environment: PLAYWRIGHT_MODULE or NODE_PATH for optional Playwright; AGENT2API_SERVER_BIN, BROWSER_EXECUTABLE for executable defaults.');
   process.exit(0);
 }
@@ -106,10 +106,13 @@ const step = async (name, work, page = desktop) => {
   } catch (error) {
     results.steps.push({ name, status: 'failed', error: String(error), stack: error.stack });
     if (page) {
+      results.steps.at(-1).activeElement = await page.evaluate(() => document.activeElement?.outerHTML).catch(() => '');
       await screenshot(page, `failed-${results.steps.length}`).catch(() => {});
       fs.writeFileSync(path.join(out, `failed-${results.steps.length}.txt`), await page.locator('body').innerText().catch(() => ''));
+      fs.writeFileSync(path.join(out, `failed-${results.steps.length}.html`), await page.content().catch(() => ''));
     }
     console.error(`FAIL ${name}: ${error}`);
+    if (args.includes('--fail-fast')) throw error;
   }
 };
 const nav = async id => {
@@ -154,25 +157,30 @@ try {
   await desktop.locator('[data-provider="preset:openai"]').click();
 
   const form = desktop.locator('[role="dialog"]').filter({ has: desktop.locator('#custom-name-input') }).last();
-  const assertLeftDrawer = async locator => {
+  const modelPanel = desktop.locator('[data-channel-panel="models"]:visible');
+  const keyPanel = desktop.locator('[data-channel-panel="keys"]:visible');
+  const group = index => form.locator(`[data-channel-group="${index}"]:visible`);
+  const assertCentered = async locator => {
     await locator.waitFor();
     await pause(300);
     const bounds = await locator.boundingBox();
     assert(bounds, 'Channel form has no visible bounds');
-    assert(Math.abs(bounds.x) <= 1, 'Channel form must attach to the left viewport edge: ' + JSON.stringify(bounds));
-    assert(Math.abs(bounds.y) <= 1, 'Channel form must start at the top viewport edge');
-    assert(bounds.height >= 998, 'Channel form must occupy the full viewport height');
-    assert(bounds.width >= 700 && bounds.width < 1440, 'Channel form must leave room for grouped keys and surrounding context');
+    const viewport = desktop.viewportSize();
+    assert(bounds.x >= 12 && bounds.y >= 12, 'Channel form must leave viewport margins: ' + JSON.stringify(bounds));
+    assert(Math.abs(bounds.x + bounds.width / 2 - viewport.width / 2) <= 2, 'Channel form must be horizontally centered');
+    assert(bounds.height <= viewport.height - 24, 'Channel form must retain vertical margins');
+    assert(bounds.width < viewport.width, 'Channel form must leave surrounding context');
   };
 
-  await step('channel creation attaches to the left edge at full viewport height', async () => {
-    await assertLeftDrawer(form);
+  await step('channel creation opens centered without a contextual panel', async () => {
+    await assertCentered(form);
+    assert.equal(await form.locator('[data-channel-panel]:visible').count(), 0);
     await form.getByRole('heading', { name: '添加渠道', exact: true }).waitFor();
-    await screenshot(desktop, 'channel-drawer-create');
+    await screenshot(desktop, 'channel-dialog-create');
   });
 
   await step('channel inputs accept keyboard edits and retain Key drafts after closing', async () => {
-    await desktop.locator('#custom-name-input').fill('Drawer smoke channel');
+    await desktop.locator('#custom-name-input').fill('Panel smoke channel');
     await desktop.locator('#custom-baseurl-input').fill(upstreamBase);
     const keys = desktop.locator('#create-channel-0-keys');
     await keys.click();
@@ -187,30 +195,159 @@ try {
     await desktop.locator('[data-provider="preset:openai"]').click();
     assert.equal(await keys.inputValue(), 'smoke-key-a\nsmoke-key-b');
     assert.equal(await desktop.locator('#create-channel-1-keys').inputValue(), 'smoke-key-c');
-    await desktop.locator('#custom-name-input').fill('Drawer smoke channel');
+    assert.equal(await desktop.locator('#custom-name-input').inputValue(), 'Panel smoke channel');
+    assert.equal(await desktop.locator('#custom-baseurl-input').inputValue(), upstreamBase);
+  });
+
+  await step('group Key inspection expands beside the centered form and Escape returns focus', async () => {
+    const initial = await form.boundingBox();
+    const trigger = group(0).getByRole('button', { name: '查看分组 Key', exact: true });
+    await trigger.click();
+    await keyPanel.getByText('smoke-key-a', { exact: true }).waitFor();
+    await keyPanel.getByText('smoke-key-b', { exact: true }).waitFor();
+    await assertCentered(form);
+    const expanded = await form.boundingBox();
+    const details = await form.locator('.channel-dialog-form').boundingBox();
+    const panelBounds = await keyPanel.boundingBox();
+    assert(expanded.width > initial.width + 200, 'Key inspection must expand its form');
+    assert(panelBounds.x >= details.x + details.width, 'Key panel must be adjacent to the form');
+    await screenshot(desktop, 'channel-dialog-keys');
+    await desktop.keyboard.press('Escape');
+    await keyPanel.waitFor({ state: 'hidden' });
+    assert.equal(await desktop.locator('#custom-name-input').isVisible(), true);
+    await desktop.waitForFunction(node => node === document.activeElement, await trigger.elementHandle(), { timeout: 3000 });
+  });
+
+  await step('fetched models require confirmation and search actions leave canceled drafts unchanged', async () => {
+    await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
+    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
+    assert.equal(await modelPanel.getByRole('checkbox', { checked: true }).count(), 0, 'Fetching must not select models');
+    await modelPanel.getByRole('textbox', { name: '搜索模型', exact: true }).fill('shared');
+    assert.equal(await modelPanel.getByRole('checkbox').count(), 1);
+    await modelPanel.getByRole('button', { name: '全选', exact: true }).click();
+    assert.equal(await modelPanel.getByRole('checkbox', { checked: true }).count(), 1);
+    await modelPanel.getByRole('button', { name: '清空', exact: true }).click();
+    assert.equal(await modelPanel.getByRole('checkbox', { checked: true }).count(), 0);
+    await modelPanel.getByRole('textbox', { name: '搜索模型', exact: true }).fill('');
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).click();
+    await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
+    await modelPanel.waitFor({ state: 'hidden' });
+    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
+  });
+
+  await step('late model discovery cannot replace another group selection or reopen a dismissed panel', async () => {
+    const delayDiscovery = async () => {
+      let release;
+      let started;
+      const gate = new Promise(resolve => { release = resolve; });
+      const received = new Promise(resolve => { started = resolve; });
+      await desktop.route('**/api/custom-providers/fetch-models', async route => {
+        started();
+        await gate;
+        await route.continue();
+      }, { times: 1 });
+      await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+      await received;
+      return async () => {
+        release();
+        await group(0).getByRole('button', { name: '获取模型', exact: true }).waitFor();
+      };
+    };
+    let finish = await delayDiscovery();
+    await group(1).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Pending/B-draft');
+    await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
+    await finish();
+    assert.equal(await modelPanel.getByRole('checkbox', { name: 'Pending/B-draft', exact: true, checked: true }).count(), 1,
+      'Late discovery must preserve the other group\'s tentative selection');
+    assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).count(), 0);
+    await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
+    await group(1).getByRole('button', { name: '选择模型', exact: true }).click();
+    finish = await delayDiscovery();
+    await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Active/B-draft');
+    await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
+    await finish();
+    assert.equal(await modelPanel.getByRole('checkbox', { name: 'Active/B-draft', exact: true, checked: true }).count(), 1,
+      'Editing an already-open panel must supersede an unrelated pending discovery');
+    await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
+    finish = await delayDiscovery();
+    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await desktop.keyboard.press('Escape');
+    await finish();
+    assert.equal(await modelPanel.count(), 0, 'Late discovery must not reopen a dismissed panel');
+    assert.equal(await desktop.locator('#custom-name-input').isVisible(), true);
+  });
+
+  await step('each credential retains its own fetched candidates after closing and reopening', async () => {
+    await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
+    await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).waitFor();
+    assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).count(), 0);
+    await desktop.keyboard.press('Escape');
+    await desktop.keyboard.press('Escape');
+    await desktop.locator('[data-provider="preset:openai"]').waitFor({ state: 'visible' });
+    await desktop.keyboard.press('Escape');
+    await desktop.getByRole('button', { name: /添加账号/ }).first().click();
+    await desktop.locator('[data-provider="preset:openai"]').click();
+    assert.equal(await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).inputValue(), 'new:1');
+    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).waitFor();
+    assert.equal(await modelPanel.getByRole('checkbox', { checked: true }).count(), 0);
+    await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
+    await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:0');
+    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
+    assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).count(), 0);
+    await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
+  });
+
+  await step('refresh failure preserves fetched candidates and leaves selection unchanged', async () => {
+    await desktop.route('**/api/custom-providers/fetch-models', route => route.fulfill({ status: 200,
+      contentType: 'application/json', body: JSON.stringify({ success: false, error: 'Expected discovery failure' }) }), { times: 1 });
+    await group(0).getByRole('button', { name: '获取模型', exact: true }).click();
+    await form.getByText('Expected discovery failure', { exact: true }).waitFor();
+    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
+    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
+    await modelPanel.getByRole('button', { name: '取消', exact: true }).click();
+  });
+
+  await step('changing the endpoint invalidates an open model selection before it is applied', async () => {
+    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).click();
+    await desktop.locator('#custom-baseurl-input').fill(`${upstreamBase}/changed`);
+    await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
+    await form.getByText('Base URL、协议或 Key 已变化，请重新获取模型。', { exact: true }).waitFor();
+    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
     await desktop.locator('#custom-baseurl-input').fill(upstreamBase);
   });
 
-  await step('creation saves selected per-Key models without publishing gateway models', async () => {
-    const firstGroup = desktop.locator('section').filter({ has: desktop.locator('#create-channel-0-keys') }).last();
-    await firstGroup.getByRole('button', { name: '获取模型', exact: true }).click();
-    await firstGroup.getByText('upstream-a', { exact: true }).waitFor();
-    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), '');
-    await firstGroup.getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
-    await firstGroup.getByRole('button', { name: '获取模型', exact: true }).click();
-    await firstGroup.getByText('upstream-b', { exact: true }).waitFor();
-    await firstGroup.locator('label').filter({ hasText: /^upstream-b$/ }).click();
-    await desktop.locator('#create-channel-1-models').fill('upstream-a');
+  await step('creation saves explicitly selected group models and exact custom IDs without publishing them', async () => {
+    await group(0).getByRole('combobox', { name: '用于获取模型的 Key' }).selectOption('new:1');
+    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).click();
+    await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
+    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), 'upstream-b');
+    await group(1).getByRole('button', { name: '获取模型', exact: true }).click();
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).waitFor();
+    assert.equal(await modelPanel.getByRole('checkbox', { name: 'upstream-b', exact: true }).count(), 0);
+    await modelPanel.getByRole('checkbox', { name: 'upstream-a', exact: true }).click();
+    await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Custom/Case-v1');
+    await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
+    await screenshot(desktop, 'channel-dialog-models');
+    await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
+    assert.equal(await desktop.locator('#create-channel-1-models').inputValue(), 'upstream-a\nCustom/Case-v1');
     await desktop.locator('#custom-create-button').click();
     await desktop.locator('#custom-name-input').waitFor({ state: 'hidden' });
     const saved = await api('/api/custom-providers');
-    const provider = saved.providers.find(item => item.name === 'Drawer smoke channel');
+    const provider = saved.providers.find(item => item.name === 'Panel smoke channel');
     assert(provider, 'Channel creation did not persist');
     results.providerId = provider.id;
     assert.equal(provider.keyGroups.length, 2);
     assert.deepEqual(provider.keyGroups[0].models, ['upstream-b']);
     assert.equal(provider.keyGroups[0].accountIds.length, 2);
-    assert.deepEqual(provider.keyGroups[1].models, ['upstream-a']);
+    assert.deepEqual(provider.keyGroups[1].models, ['upstream-a', 'Custom/Case-v1']);
     assert.equal(provider.keyGroups[1].accountIds.length, 1);
     assert.deepEqual((await api('/api/models/catalog')).models, []);
   });
@@ -221,7 +358,7 @@ try {
     await desktop.locator('button[data-provider="' + results.providerId + '"]').click();
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).click();
     const editor = desktop.locator('[role="dialog"]').filter({ has: desktop.locator('[id="edit-channel-' + results.providerId + '-0-models"]') }).last();
-    await assertLeftDrawer(editor);
+    await assertCentered(editor);
     await editor.getByRole('heading', { name: /编辑渠道/ }).waitFor();
     const models = desktop.locator('[id="edit-channel-' + results.providerId + '-0-models"]');
     await models.fill('upstream-b\nshared-model');
@@ -231,14 +368,25 @@ try {
     const provider = (await api('/api/custom-providers')).providers.find(item => item.id === results.providerId);
     assert.deepEqual(provider.keyGroups[0].models, ['upstream-b', 'shared-model']);
     assert.equal(provider.keyGroups[0].accountIds.length, 2);
-    await screenshot(desktop, 'channel-drawer-edit-return');
+    await screenshot(desktop, 'channel-dialog-edit-return');
   });
 
-  await step('nested drawer backdrop closes only its own layer and restores parent input', async () => {
+  await step('nested editor preserves drafts and its backdrop closes only its own layer', async () => {
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).click();
     await desktop.getByRole('heading', { name: /编辑渠道/ }).waitFor();
+    const models = desktop.locator('[id="edit-channel-' + results.providerId + '-0-models"]');
+    await models.fill('upstream-b\nshared-model\nCustom/Edit-draft');
     await desktop.mouse.click(1350, 500);
     await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).waitFor();
+    await desktop.getByRole('button', { name: '管理渠道 Key 分组与模型', exact: true }).click();
+    assert.equal(await models.inputValue(), 'upstream-b\nshared-model\nCustom/Edit-draft');
+    const editor = desktop.locator('[role="dialog"]').filter({ has: models }).last();
+    await editor.locator('[data-channel-group="0"]').getByRole('button', { name: '查看分组 Key', exact: true }).click();
+    assert.equal(await keyPanel.getByRole('combobox', { name: '移动到分组' }).count(), 2);
+    await desktop.keyboard.press('Escape');
+    await keyPanel.waitFor({ state: 'hidden' });
+    assert.equal(await models.isVisible(), true);
+    await desktop.keyboard.press('Escape');
     const append = desktop.locator('[id="append-channel-' + results.providerId + '-0-keys"]');
     await append.fill('smoke-appended-key');
     assert.equal(await append.inputValue(), 'smoke-appended-key');
@@ -260,19 +408,24 @@ try {
     await desktop.keyboard.press('Escape');
   });
 
-  await step('channel drawer remains usable in a narrow desktop window', async () => {
+  await step('channel dialog and contextual selection fit a narrow desktop window', async () => {
     await desktop.setViewportSize({ width: 600, height: 800 });
     await desktop.getByRole('button', { name: /添加账号/ }).first().click();
     await desktop.locator('[data-provider="preset:openai"]').click();
     await desktop.locator('#custom-name-input').fill('Narrow window draft');
     await pause(300);
-    const drawer = desktop.locator('[role="dialog"]').filter({ has: desktop.locator('#custom-name-input') }).last();
-    const bounds = await drawer.boundingBox();
-    assert.equal(bounds.x, 0);
-    assert(bounds.width <= 600 && bounds.height >= 798);
-    assert.equal(await drawer.evaluate(node => node.scrollWidth > node.clientWidth), false, 'Drawer horizontally overflows');
-    assert.equal(await drawer.locator('[data-slot="sheet-body"]').evaluate(node => node.scrollWidth > node.clientWidth), false, 'Drawer form horizontally overflows');
-    await screenshot(desktop, 'channel-drawer-narrow');
+    await assertCentered(form);
+    await group(0).getByRole('button', { name: '选择模型', exact: true }).click();
+    await modelPanel.waitFor();
+    await assertCentered(form);
+    assert.equal(await form.evaluate(node => node.scrollWidth > node.clientWidth), false, 'Dialog horizontally overflows');
+    assert.equal(await form.locator('.channel-dialog-form').evaluate(node => node.scrollWidth > node.clientWidth), false, 'Form horizontally overflows');
+    assert.equal(await modelPanel.evaluate(node => node.scrollWidth > node.clientWidth), false, 'Model panel horizontally overflows');
+    await modelPanel.getByRole('textbox', { name: '自定义模型 ID', exact: true }).fill('Narrow/Custom-ID');
+    await modelPanel.getByRole('button', { name: '添加', exact: true }).click();
+    await modelPanel.getByRole('button', { name: '确认选择', exact: true }).click();
+    assert.equal(await desktop.locator('#create-channel-0-models').inputValue(), 'Narrow/Custom-ID');
+    await screenshot(desktop, 'channel-dialog-narrow');
   });
 
 } catch (error) {

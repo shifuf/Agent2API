@@ -202,7 +202,7 @@ struct SourceCatalog {
     updated_at: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct SourceProvider {
     #[serde(default)]
     id: Option<String>,
@@ -214,7 +214,7 @@ struct SourceProvider {
     models: Vec<SourceModel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct SourceModel {
     #[serde(default)]
     id: Option<String>,
@@ -224,6 +224,8 @@ struct SourceModel {
     display_name: Option<String>,
     #[serde(default, rename = "type")]
     kind: Option<String>,
+    #[serde(default)]
+    family: Option<String>,
 }
 
 fn label<'a>(values: &[Option<&'a str>], fallback: &'a str) -> String {
@@ -236,33 +238,233 @@ fn label<'a>(values: &[Option<&'a str>], fallback: &'a str) -> String {
         .to_string()
 }
 
-fn parse_catalog(bytes: &[u8]) -> Result<CatalogSnapshot, String> {
-    if bytes.len() > MAX_BYTES {
-        return Err("Public model catalog exceeds the 16 MiB limit".into());
+// Keep the developer set and family rules aligned with AxonHub's
+// internal/server/biz/catalog_filter.go. Hosted copies are not developers.
+const DEVELOPER_IDS: &[&str] = &[
+    "deepseek",
+    "alibaba",
+    "tencent",
+    "zai",
+    "openai",
+    "moonshot",
+    "anthropic",
+    "google",
+    "minimax",
+    "kwaipilot",
+    "xiaomi",
+    "longcat",
+    "mistral",
+    "nvidia",
+    "xai",
+    "bytedance",
+    "stepfun",
+    "meta",
+    "ibm",
+    "poolside",
+    "inclusionai",
+    "thinkingmachines",
+];
+
+fn model_id(model: &SourceModel) -> &str {
+    model.id.as_deref().unwrap_or_default().trim()
+}
+
+fn source_models<'a>(
+    providers: &'a BTreeMap<String, SourceProvider>,
+    id: &str,
+) -> impl Iterator<Item = &'a SourceModel> {
+    providers
+        .get(id)
+        .into_iter()
+        .flat_map(|provider| &provider.models)
+}
+
+fn merge_developer<'a>(
+    providers: &mut BTreeMap<String, SourceProvider>,
+    id: &str,
+    name: &str,
+    models: impl IntoIterator<Item = &'a SourceModel>,
+    identity: impl Fn(&SourceModel) -> String,
+) {
+    let mut merged = BTreeMap::new();
+    for model in models {
+        if model_id(model).is_empty() {
+            continue;
+        }
+        let key = identity(model);
+        if !key.is_empty() {
+            merged.entry(key).or_insert_with(|| model.clone());
+        }
     }
-    let source: SourceCatalog = serde_json::from_slice(bytes)
-        .map_err(|error| format!("Invalid public model catalog: {error}"))?;
-    let mut providers = BTreeMap::<String, CatalogProvider>::new();
-    let mut model_ids = HashSet::new();
-    for (key, raw) in source.providers {
+    if !merged.is_empty() {
+        providers.insert(
+            id.into(),
+            SourceProvider {
+                id: Some(id.into()),
+                name: Some(name.into()),
+                display_name: None,
+                models: merged.into_values().collect(),
+            },
+        );
+    }
+}
+
+fn tencent_identity(model: &SourceModel) -> String {
+    let id = model_id(model).to_ascii_lowercase();
+    id.strip_prefix("tencent/").unwrap_or(&id).into()
+}
+
+fn developer_catalog(source: BTreeMap<String, SourceProvider>) -> Vec<CatalogProvider> {
+    let mut raw_providers = BTreeMap::<String, SourceProvider>::new();
+    for (key, mut raw) in source {
         let id = label(&[raw.id.as_deref()], key.trim());
         if id.is_empty() {
             continue;
         }
+        match raw_providers.entry(id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(raw);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().models.append(&mut raw.models);
+            }
+        }
+    }
+    let mut developers: BTreeMap<_, _> = raw_providers
+        .iter()
+        .filter(|(id, _)| DEVELOPER_IDS.contains(&id.as_str()) && id.as_str() != "thinkingmachines")
+        .map(|(id, provider)| (id.clone(), provider.clone()))
+        .collect();
+
+    merge_developer(
+        &mut developers,
+        "meta",
+        "Meta",
+        source_models(&raw_providers, "meta").chain(
+            source_models(&raw_providers, "llama")
+                .filter(|model| model_id(model).to_ascii_lowercase().starts_with("llama")),
+        ),
+        |model| model_id(model).into(),
+    );
+    merge_developer(
+        &mut developers,
+        "bytedance",
+        "ByteDance",
+        source_models(&raw_providers, "bytedance").chain(
+            source_models(&raw_providers, "doubao")
+                .filter(|model| model_id(model).to_ascii_lowercase().starts_with("doubao")),
+        ),
+        |model| model_id(model).into(),
+    );
+    let tencent_plans = [
+        "tencent-token-plan",
+        "tencent-tokenhub",
+        "tencent-coding-plan",
+    ];
+    merge_developer(
+        &mut developers,
+        "tencent",
+        "Tencent",
+        source_models(&raw_providers, "tencent").chain(
+            tencent_plans
+                .into_iter()
+                .flat_map(|id| source_models(&raw_providers, id))
+                .filter(|model| {
+                    let id = tencent_identity(model);
+                    id == "hy3"
+                        || id == "hy4"
+                        || id.starts_with("hy3-")
+                        || id.starts_with("hy4-")
+                        || id.starts_with("hunyuan-")
+                }),
+        ),
+        tencent_identity,
+    );
+    merge_developer(
+        &mut developers,
+        "xiaomi",
+        "Xiaomi",
+        [
+            "xiaomi",
+            "xiaomi-token-plan-cn",
+            "xiaomi-token-plan-sgp",
+            "xiaomi-token-plan-ams",
+        ]
+        .into_iter()
+        .flat_map(|id| source_models(&raw_providers, id)),
+        |model| model_id(model).into(),
+    );
+    merge_developer(
+        &mut developers,
+        "ibm",
+        "IBM",
+        source_models(&raw_providers, "ibm")
+            .chain(
+                raw_providers
+                    .iter()
+                    .filter(|(id, _)| id.as_str() != "ibm")
+                    .flat_map(|(_, provider)| &provider.models),
+            )
+            .filter(|model| {
+                let id = model_id(model).to_ascii_lowercase();
+                (id.contains("granite") || id.contains("ibm"))
+                    && !id.contains("embedding")
+                    && !id.contains("guardian")
+                    && !id.starts_with("@cf/")
+                    && !id.contains("workers-ai/")
+            }),
+        |model| model_id(model).to_ascii_lowercase(),
+    );
+    merge_developer(
+        &mut developers,
+        "kwaipilot",
+        "KwaiPilot",
+        source_models(&raw_providers, "kwaipilot").chain(
+            raw_providers
+                .iter()
+                .filter(|(id, _)| id.as_str() != "kwaipilot")
+                .flat_map(|(_, provider)| &provider.models)
+                .filter(|model| {
+                    let id = model_id(model).to_ascii_lowercase();
+                    model
+                        .family
+                        .as_deref()
+                        .is_some_and(|family| family.eq_ignore_ascii_case("kat-coder"))
+                        || id.starts_with("kwaipilot/")
+                        || id.starts_with("kuaishou/")
+                        || id.contains("kat-coder")
+                        || id.contains("kat-dev")
+                }),
+        ),
+        |model| {
+            // AxonHub's suffix is a deduplication key only here: selected public
+            // IDs must retain their source spelling, case and namespace.
+            let id = model_id(model);
+            id.split_once('/')
+                .map_or(id, |(_, suffix)| suffix)
+                .trim()
+                .to_ascii_lowercase()
+        },
+    );
+    if let Some(nvidia) = developers.get_mut("nvidia") {
+        nvidia
+            .models
+            .retain(|model| model_id(model).to_ascii_lowercase().starts_with("nvidia/"));
+    }
+
+    let mut providers = Vec::new();
+    for (id, raw) in developers {
+        // A shared ID still belongs in every developer's filtered view. The UI
+        // combines exact IDs and developer labels when showing all providers.
+        let mut seen = HashSet::new();
         let name = label(&[raw.display_name.as_deref(), raw.name.as_deref()], &id);
-        let provider = providers
-            .entry(id.clone())
-            .or_insert_with(|| CatalogProvider {
-                id: id.clone(),
-                name,
-                models: Vec::new(),
-            });
+        let mut models = Vec::new();
         for raw_model in raw.models {
-            let model_id = label(&[raw_model.id.as_deref()], "");
-            if model_id.is_empty() || !model_ids.insert((id.clone(), model_id.clone())) {
+            let model_id = model_id(&raw_model).to_string();
+            if model_id.is_empty() || !seen.insert(model_id.clone()) {
                 continue;
             }
-            provider.models.push(CatalogModel {
+            models.push(CatalogModel {
                 name: label(
                     &[raw_model.display_name.as_deref(), raw_model.name.as_deref()],
                     &model_id,
@@ -271,20 +473,25 @@ fn parse_catalog(bytes: &[u8]) -> Result<CatalogSnapshot, String> {
                 id: model_id,
             });
         }
+        if !models.is_empty() {
+            models.sort_by_cached_key(|model| (model.name.to_lowercase(), model.id.clone()));
+            providers.push(CatalogProvider { id, name, models });
+        }
     }
-    let mut providers: Vec<_> = providers
-        .into_values()
-        .filter(|provider| !provider.models.is_empty())
-        .collect();
+    providers.sort_by_cached_key(|provider| (provider.name.to_lowercase(), provider.id.clone()));
+    providers
+}
+
+fn parse_catalog(bytes: &[u8]) -> Result<CatalogSnapshot, String> {
+    if bytes.len() > MAX_BYTES {
+        return Err("Public model catalog exceeds the 16 MiB limit".into());
+    }
+    let source: SourceCatalog = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Invalid public model catalog: {error}"))?;
+    let providers = developer_catalog(source.providers);
     if providers.is_empty() {
         return Err("Public model catalog contains no usable models".into());
     }
-    for provider in &mut providers {
-        provider
-            .models
-            .sort_by_cached_key(|model| (model.name.to_lowercase(), model.id.clone()));
-    }
-    providers.sort_by_cached_key(|provider| (provider.name.to_lowercase(), provider.id.clone()));
     Ok(CatalogSnapshot {
         providers,
         source_url: SOURCE_URL.into(),
@@ -339,6 +546,38 @@ async fn read_cache(path: &Path) -> Option<CatalogSnapshot> {
             }
         }
     }
+    // Pre-filter caches contain reseller providers and no schema version. Run
+    // the same normalization on reads so an upgrade also works while offline.
+    cached.providers = developer_catalog(
+        cached
+            .providers
+            .into_iter()
+            .map(|provider| {
+                (
+                    provider.id.clone(),
+                    SourceProvider {
+                        id: Some(provider.id),
+                        name: Some(provider.name),
+                        display_name: None,
+                        models: provider
+                            .models
+                            .into_iter()
+                            .map(|model| SourceModel {
+                                id: Some(model.id),
+                                name: Some(model.name),
+                                display_name: None,
+                                kind: Some(model.kind),
+                                family: None,
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect(),
+    );
+    if cached.providers.is_empty() {
+        return None;
+    }
     cached.stale = false;
     cached.error = None;
     Some(cached)
@@ -375,14 +614,14 @@ mod tests {
     const SOURCE: &[u8] = br#"{
         "updated_at":"2026-11-06T19:19:22.445Z",
         "providers":{
-            "vendor":{"id":"Vendor","name":"Vendor","display_name":"Vendor Display","models":[
+            "openai":{"id":"openai","name":"OpenAI","display_name":"OpenAI Display","models":[
                 {"id":"Org/Model-A","name":"Original","display_name":"Model A","type":"chat"},
                 {"id":"Org/Model-A","name":"Duplicate","type":"chat"},
                 {"id":"embed-1","name":"Embedding","type":"embedding"},
                 {"id":"  ","name":"Invalid"}
             ]},
-            "vendor-copy":{"id":"Vendor","models":[{"id":"Model-B"}]},
-            "fallback":{"models":[{"id":"Slash/Case"}]},
+            "openai-copy":{"id":"openai","models":[{"id":"Model-B"}]},
+            "xai":{"models":[{"id":"Slash/Case"}]},
             "empty":{"name":"Empty","models":[]}
         }
     }"#;
@@ -400,9 +639,9 @@ mod tests {
         let vendor = parsed
             .providers
             .iter()
-            .find(|provider| provider.id == "Vendor")
+            .find(|provider| provider.id == "openai")
             .unwrap();
-        assert_eq!(vendor.name, "Vendor Display");
+        assert_eq!(vendor.name, "OpenAI Display");
         assert_eq!(vendor.models.len(), 3);
         let model = vendor
             .models
@@ -414,9 +653,9 @@ mod tests {
         let fallback = parsed
             .providers
             .iter()
-            .find(|provider| provider.id == "fallback")
+            .find(|provider| provider.id == "xai")
             .unwrap();
-        assert_eq!(fallback.name, "fallback");
+        assert_eq!(fallback.name, "xai");
         assert_eq!(fallback.models[0].id, "Slash/Case");
         assert_eq!(fallback.models[0].name, "Slash/Case");
         assert_eq!(fallback.models[0].kind, "chat");
@@ -424,6 +663,153 @@ mod tests {
         assert_eq!(parsed.updated_at, "2026-11-06T19:19:22.445Z");
         assert!(chrono::DateTime::parse_from_rfc3339(&parsed.fetched_at).is_ok());
         assert!(!parsed.stale);
+    }
+
+    #[test]
+    fn developer_catalog_excludes_resellers_and_keeps_each_developers_own_models() {
+        let parsed = parse_catalog(
+            br#"{"providers":{
+            "openai":{"name":"OpenAI","models":[{"id":"GPT/Exact-Case"},{"id":"shared-id"},{"id":"shared-id"}]},
+            "anthropic":{"name":"Anthropic","models":[{"id":"claude-model"},{"id":"shared-id"}]},
+            "openrouter":{"models":[{"id":"GPT/Exact-Case"},{"id":"openai/GPT/Exact-Case"}]},
+            "unknown-lab":{"models":[{"id":"secret-model"}]},
+            "thinkingmachines":{"models":[{"id":"openai/gpt-oss-120b"}]},
+            "nvidia":{"models":[{"id":"meta/llama-hosted"}]}
+        }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed
+                .providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["anthropic", "openai"]
+        );
+        let ids: Vec<_> = parsed
+            .providers
+            .iter()
+            .flat_map(|provider| provider.models.iter().map(|model| model.id.as_str()))
+            .collect();
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&"GPT/Exact-Case"));
+        assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), 3);
+        for provider in &parsed.providers {
+            assert_eq!(
+                provider
+                    .models
+                    .iter()
+                    .filter(|model| model.id == "shared-id")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn developer_families_merge_native_records_and_preserve_selected_source_ids() {
+        let parsed = parse_catalog(br#"{"providers":{
+            "meta":{"models":[{"id":"llama-4","name":"Native Llama"},{"id":"muse-1"}]},
+            "llama":{"models":[{"id":"llama-4","name":"Duplicate Llama"},{"id":"Llama-5"},{"id":"other-7b"}]},
+            "doubao":{"models":[{"id":"Doubao-Seed"},{"id":"deepseek-hosted"}]},
+            "tencent":{"models":[{"id":"Hunyuan-T1","name":"Native Hunyuan"}]},
+            "tencent-token-plan":{"models":[{"id":"tencent/hunyuan-t1"},{"id":"tencent/HY3"},{"id":"qwen-hosted"}]},
+            "tencent-tokenhub":{"models":[{"id":"hy3"},{"id":"hy4-preview"}]},
+            "tencent-coding-plan":{"models":[{"id":"hunyuan-turbos"},{"id":"minimax-hosted"}]},
+            "xiaomi":{"models":[{"id":"MiMo-V2","name":"Native MiMo"}]},
+            "xiaomi-token-plan-cn":{"models":[{"id":"MiMo-V2"},{"id":"mimo-new"}]},
+            "xiaomi-token-plan-sgp":{"models":[{"id":"mimo-new"}]},
+            "nvidia":{"models":[{"id":"nvidia/Nemotron"},{"id":"meta/llama-hosted"}]},
+            "kwaipilot":{"models":[{"id":"KAT-Coder-Pro","name":"Native KAT"}]},
+            "a-reseller":{"models":[{"id":"kwaipilot/kat-coder-pro"},{"id":"kuaishou/KAT-Dev"},{"id":"vendor/Experimental","family":"kat-coder"},{"id":"IBM/Granite-Chat"},{"id":"granite-embedding"},{"id":"granite-guardian"},{"id":"@cf/ibm/granite"},{"id":"workers-ai/ibm/granite"}]},
+            "b-reseller":{"models":[{"id":"ibm/granite-chat"}]}
+        }}"#).unwrap();
+        let models = |id: &str| {
+            parsed
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .unwrap()
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(models("meta"), vec!["Llama-5", "muse-1", "llama-4"]);
+        assert_eq!(models("bytedance"), vec!["Doubao-Seed"]);
+        assert_eq!(
+            models("tencent"),
+            vec!["hunyuan-turbos", "hy4-preview", "Hunyuan-T1", "tencent/HY3"]
+        );
+        assert_eq!(models("xiaomi"), vec!["mimo-new", "MiMo-V2"]);
+        assert_eq!(models("nvidia"), vec!["nvidia/Nemotron"]);
+        assert_eq!(
+            models("kwaipilot"),
+            vec!["kuaishou/KAT-Dev", "KAT-Coder-Pro", "vendor/Experimental"]
+        );
+        assert_eq!(models("ibm"), vec!["IBM/Granite-Chat"]);
+        for (id, name) in [
+            ("meta", "Meta"),
+            ("bytedance", "ByteDance"),
+            ("tencent", "Tencent"),
+            ("xiaomi", "Xiaomi"),
+            ("kwaipilot", "KwaiPilot"),
+            ("ibm", "IBM"),
+        ] {
+            assert_eq!(
+                parsed
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == id)
+                    .unwrap()
+                    .name,
+                name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_disk_cache_is_filtered_even_when_fresh_or_offline() {
+        let (_dir, cache) = cache();
+        let legacy = serde_json::json!({
+            "providers": [
+                {"id":"openai","name":"OpenAI","models":[{"id":"GPT/Exact","name":"Native GPT","kind":"chat"}]},
+                {"id":"openrouter","name":"OpenRouter","models":[{"id":"GPT/Exact","name":"Resold GPT","kind":"chat"}]},
+                {"id":"llama","name":"Llama","models":[{"id":"llama-4","name":"Llama 4","kind":"chat"}]}
+            ],
+            "sourceUrl": SOURCE_URL,
+            "fetchedAt": chrono::Utc::now().to_rfc3339(),
+            "updatedAt": "2026-11-06T19:19:22.445Z", "stale": false
+        });
+        tokio::fs::write(&cache.path, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+        let normalized = cache
+            .snapshot_with(false, || async { Err("must not fetch".into()) })
+            .await
+            .unwrap();
+        assert!(!normalized.stale);
+        assert_eq!(
+            normalized
+                .providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["meta", "openai"]
+        );
+        let stale = cache
+            .snapshot_with(true, || async { Err("offline".into()) })
+            .await
+            .unwrap();
+        assert!(stale.stale);
+        assert_eq!(stale.providers, normalized.providers);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &tokio::fs::read(&cache.path).await.unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
     }
 
     #[test]
