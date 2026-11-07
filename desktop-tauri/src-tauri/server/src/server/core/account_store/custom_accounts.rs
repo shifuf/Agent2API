@@ -46,6 +46,7 @@
 //! 绝不 unwrap/expect（release 是 panic=abort）。
 
 mod identity;
+pub mod key_groups;
 
 use serde_json::{Map, Value};
 

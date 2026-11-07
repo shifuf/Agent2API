@@ -150,6 +150,12 @@ pub(crate) async fn forward(
     // 读盘之间被删了 —— 报一条明确的错，与「顺延」语义同等可操作。
     let credential_store = store.clone();
     let credential_id = account_id.to_string();
+    let requested_model = body.get("model").and_then(Value::as_str).unwrap_or("");
+    let account = store.route_account(account_id).ok_or_else(|| GatewayError::with_status(503, "渠道账号已不存在"))?;
+    if !crate::server::core::account_store::custom_accounts::key_groups::allows_request(
+        &account, requested_model, route_model.map(|_| requested_model)) {
+        return Err(GatewayError::with_status(403, "此 Key 分组未启用或未选择当前上游模型"));
+    }
     let credential = crate::server::core::blocking::run(move || {
         credential_store.custom_credential_by_id(&credential_id)
     }).await?.ok_or_else(|| {

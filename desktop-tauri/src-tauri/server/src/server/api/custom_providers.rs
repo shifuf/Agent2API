@@ -2,7 +2,7 @@
 //!
 //! - `GET  /api/custom-providers`          → `{providers: [...]}`（按 createdAt 升序）
 //! - `POST /api/custom-providers`          → 新建提供商，**同时**创建该家第一个账号
-//! - `POST /api/custom-providers/update`   → `{id, name?, protocol?, baseUrl?, enabled?}`
+//! - `POST /api/custom-providers/update`   → `{id, name?, protocol?, baseUrl?, enabled?, keyGroups?}`
 //! - `POST /api/custom-providers/remove`   → `{id}`，级联删除名下全部账号，
 //!                                            并把这家的 id 从各 Key 的可用提供商白名单里摘掉
 //! - `POST /api/custom-providers/models`   → `{providerId, models, mappings}`，整表保存
@@ -31,6 +31,7 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 use crate::server::core::api_keys;
+use crate::server::core::account_store::custom_accounts::key_groups;
 use crate::server::core::custom_providers;
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
@@ -52,8 +53,14 @@ fn body_object(body: &Bytes) -> Result<serde_json::Map<String, Value>, Response>
 // ─── GET /api/custom-providers ──────────────────────────────
 
 /// 列出全部自定义提供商（按 createdAt 升序，排序在存储层保证）。
-pub async fn get_custom_providers(State(_state): State<ServerState>) -> Response {
-    ok_json(json!({ "providers": custom_providers::list() }))
+pub async fn get_custom_providers(State(state): State<ServerState>) -> Response {
+    let providers: Vec<_> = custom_providers::list().into_iter().map(|mut provider| {
+        let id = provider.get("id").and_then(Value::as_str).unwrap_or("");
+        let groups = state.store().custom_key_groups_public(id);
+        provider["keyGroups"] = json!(groups);
+        provider
+    }).collect();
+    ok_json(json!({ "providers": providers }))
 }
 
 // ─── POST /api/custom-providers ─────────────────────────────
@@ -90,6 +97,24 @@ pub async fn create_custom_provider(State(state): State<ServerState>, body: Byte
         .and_then(Value::as_str)
         .map(str::to_string);
     let store = state.store();
+    if let Some(value) = payload.get("keyGroups") {
+        let groups = match key_groups::parse_groups(value) {
+            Ok(groups) => groups,
+            Err(message) => {
+                let _ = custom_providers::remove(&provider_id, store);
+                return errors::management_error(400, message);
+            }
+        };
+        return match store.save_custom_key_groups(&provider_id, &groups, &payload) {
+            Ok(accounts) => ok_json(json!({ "provider": provider, "accounts": accounts, "created": true, "list": store.list_accounts() })),
+            Err(error) => {
+                if let Err(rollback) = custom_providers::remove(&provider_id, store) {
+                    logging::log("[CustomProvider]", &format!("回滚渠道失败: {rollback}"));
+                }
+                crate::server::api::accounts::store_error(error)
+            }
+        };
+    }
     // 首个账号**不抄提供商的 baseUrl**：账号记录上的 `baseUrl` 是**覆盖项**，
     // 转发时优先于提供商的值（见 `custom_accounts` 的模块头）。这里连同一次
     // 请求里把提供商地址抄一份到账号上，会让「以后改提供商地址」被账号里的旧值
@@ -162,13 +187,29 @@ pub async fn update_custom_provider(State(state): State<ServerState>, body: Byte
     // 旧值只用于日志：报出「到底改了什么」（enabled 之外的字段都经 core 层
     // 校验，能到这一步的都是合法值）
     let before = custom_providers::get(&id);
-    let updated = match custom_providers::update(&id, &Value::Object(object)) {
+    let groups = match object.get("keyGroups").map(key_groups::parse_groups).transpose() {
+        Ok(groups) => groups,
+        Err(message) => return errors::management_error(400, message),
+    };
+    let payload = Value::Object(object);
+    let updated = match custom_providers::update(&id, &payload) {
         Ok(updated) => updated,
         // 不存在（404）与校验失败（400）在这里分流 —— core 层的错误文案
         // 已经是面向用户的一句话，按是否「不存在」区分状态码即可
         Err(message) if before.is_none() => return errors::management_error(404, message),
         Err(message) => return errors::management_error(400, message),
     };
+    if let Some(groups) = groups {
+        if let Err(error) = state.store().save_custom_key_groups(&id, &groups, &payload) {
+            if let Some(previous) = &before {
+                if let Err(rollback) = custom_providers::restore_after_failed_key_groups(&id, previous, &updated) {
+                    logging::log("[CustomProvider]", &format!("保存分组失败后恢复配置失败: {rollback}"));
+                    return errors::management_error(500, format!("{}；{rollback}", error.message));
+                }
+            }
+            return crate::server::api::accounts::store_error(error);
+        }
+    }
     // 地址改了 → 清掉账号里那份「旧地址」的覆盖项（见函数头的说明）。
     // 清理失败不回滚提供商（地址本身已经存好了），只记一条日志：残留的
     // 旧覆盖项还能从账号设置里「改回跟随提供商」手动清。
@@ -374,14 +415,42 @@ pub async fn set_custom_models(State(_state): State<ServerState>, body: Bytes) -
 
 /// 服务端代理拉取上游模型清单（`custom_providers::fetch_upstream_models`）。
 ///
-/// body：`{providerId}`。响应 `{models: ["id", ...]}` —— **不落盘**，
+/// body：`{providerId}`，或 `{providerId?, protocol?, baseUrl?, accountId?|apiKey?}`。
+/// 后一种可用草稿 Key 探测，也可指定本渠道已经保存的账号。响应 `{models: ["id", ...]}` —— **不落盘**，
 /// 由前端并进编辑副本让用户确认后再调 /models 保存（两步式的理由见模块头）。
-/// 会**真打上游**（一次 GET），所以挂 protected 且失败文案里带上游原始响应正文。
+/// 会**真打上游**（一次 GET），所以挂 protected；失败正文截断并遮蔽当前 Key。
 pub async fn fetch_custom_models(State(state): State<ServerState>, body: Bytes) -> Response {
     let object = match body_object(&body) {
         Ok(object) => object,
         Err(response) => return response,
     };
+    if object.contains_key("baseUrl") || object.contains_key("accountId") || object.contains_key("apiKey") {
+        let provider_id = object.get("providerId").and_then(Value::as_str).unwrap_or("");
+        let provider = custom_providers::get(provider_id);
+        let protocol = object.get("protocol").and_then(Value::as_str)
+            .or_else(|| provider.as_ref().and_then(|provider| provider.get("protocol")).and_then(Value::as_str))
+            .unwrap_or(custom_providers::PROTOCOL_CHAT_COMPLETIONS);
+        let base_url = object.get("baseUrl").and_then(Value::as_str)
+            .or_else(|| provider.as_ref().and_then(|provider| provider.get("baseUrl")).and_then(Value::as_str)).unwrap_or("");
+        let credential = if let Some(id) = object.get("accountId").and_then(Value::as_str) {
+            if provider_id.is_empty() || state.store().custom_account_provider(id).as_deref() != Some(provider_id) {
+                return errors::management_error(400, "该 Key 不属于当前渠道");
+            }
+            match state.store().custom_credential_by_id(id) {
+                Some(value) => Some(value),
+                None => return errors::management_error(404, "Key 账号不存在"),
+            }
+        } else { None };
+        let api_key = object.get("apiKey").and_then(Value::as_str)
+            .or_else(|| credential.as_ref().map(|credential| credential.api_key.as_str())).unwrap_or("");
+        if api_key.chars().count() > 8192 { return errors::management_error(400, "API Key 过长"); }
+        let resolved_url = credential.as_ref().and_then(|value| value.base_url_override.as_deref()).unwrap_or(base_url);
+        return match custom_providers::fetch_models_with_key(protocol, resolved_url, api_key,
+            credential.as_ref().and_then(|value| value.proxy.as_ref())).await {
+            Ok(models) => ok_json(json!({"models":models})),
+            Err(message) => errors::management_error(502, message),
+        };
+    }
     let provider_id = object
         .get("providerId")
         .and_then(Value::as_str)

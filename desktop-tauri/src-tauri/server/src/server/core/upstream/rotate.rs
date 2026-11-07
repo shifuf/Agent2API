@@ -501,6 +501,9 @@ fn scoped_accounts(
         crate::server::core::routing_scope::apply_accounts(&accounts, model)
     };
     let accounts: Vec<Value> = accounts.into_iter().filter(|account| {
+        crate::server::core::account_store::custom_accounts::key_groups::allows_request(
+            account, model, crate::server::core::routing_groups::candidate_model(account))
+    }).filter(|account| {
         pinned.is_some() || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
             .is_some_and(|until| until > logging::now_ms())
     }).collect();

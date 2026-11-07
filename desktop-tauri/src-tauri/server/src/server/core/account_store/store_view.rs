@@ -756,6 +756,9 @@ impl AccountStore {
         // 见 `custom_credential_by_id` 的说明）。
         public.insert("hasApiKey".to_string(), Value::Bool(record.has_api_key()));
         public.insert("noAuth".to_string(), Value::Bool(record.no_auth()));
+        if let Some(group) = fields.get("keyGroup") {
+            public.insert("keyGroup".into(), super::custom_accounts::key_groups::public_metadata(group));
+        }
         // 覆盖项：记录里**写了键**才透出（缺键 = 未覆盖，语义见函数头）
         if let Some(base_url) = fields.get("baseUrl") {
             public.insert("baseUrl".to_string(), base_url.clone());

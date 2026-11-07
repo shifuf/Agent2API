@@ -149,11 +149,25 @@ fn route_account(account: &Value) -> Value {
         "id", "provider", "name", "nickname", "email", "userId", "uid", "account",
         "displayName", "priority", "addedAt", "enabled", "hasCredentials", "nameCustom",
         "needsRelogin", "allowRouteSkip", "maxConcurrent", "rateLimits", "limiterGroups",
-        "upstreamCooldownUntil", "zcodePlan", "pool", "quotaChannel",
+        "upstreamCooldownUntil", "zcodePlan", "pool", "quotaChannel", "keyGroup",
     ] {
         if let Some(value) = account.get(key) { public.insert(key.to_string(), value.clone()); }
     }
     let source = account.pointer("/proxy/config/source").and_then(Value::as_str).unwrap_or("");
     public.insert("proxy".to_string(), json!({ "config": { "source": source } }));
     Value::Object(public)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_snapshot_keeps_group_policy_without_credentials() {
+        let account = route_account(&json!({"id":"a","provider":"custom-test","apiKey":"secret",
+            "keyGroup":{"id":"g","enabled":true,"models":[]}}));
+        assert_eq!(account.pointer("/keyGroup/id"), Some(&json!("g")));
+        assert!(account.get("apiKey").is_none());
+        assert!(!super::super::custom_accounts::key_groups::allows_model(&account, "m"));
+    }
 }

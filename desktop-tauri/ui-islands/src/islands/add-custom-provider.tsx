@@ -47,6 +47,7 @@ import { balanceSpecOf, type BalanceFieldKey } from './balance-query'
 import { DuplicateProviderDialog } from './add-provider-duplicate-dialog'
 import { presetOfProvider, sameProviderEndpoint } from './add-provider-metadata'
 import { t } from '../i18n'
+import { ChannelKeyGroups, ChannelKeyGroupsDialog, clearChannelGroups, readChannelGroups, type KeyGroupDraft } from './channel-key-groups'
 
 /** 展示名长度上限（与后端 custom_providers::MAX_NAME_CHARS 一致，前端先挡一次） */
 const MAX_NAME_CHARS = 64
@@ -265,6 +266,7 @@ export function CustomProviderBlock({
   /** 两张表单各有一枚「该上游无需鉴权」，初值都从草稿读（关掉再打开还在） */
   const [noAuth, setNoAuth] = React.useState(() => readNoAuthDraft(NOAUTH_ID))
   const [existingNoAuth, setExistingNoAuth] = React.useState(() => readNoAuthDraft(EXISTING_NOAUTH_ID))
+  const [editGroups, setEditGroups] = React.useState(false)
 
   const list = React.useMemo(() => customList(), [version])
   const pickedProvider = list.find(item => item.id === providerHint)
@@ -376,7 +378,7 @@ export function CustomProviderBlock({
             />
             <span className='hint' id='custom-baseurl-hint'>{baseHint}</span>
           </div>
-          <div className='add-field'>
+          <div className='add-field' hidden={!noAuth}>
             <Label htmlFor={APIKEY_ID}>API Key</Label>
             <Input
               id={APIKEY_ID}
@@ -403,6 +405,8 @@ export function CustomProviderBlock({
           />
           {/* 余额查询：只有预置卡带方案的家才出现（新建时方案随记录写入） */}
           <BalanceFields scheme={createScheme} prefix={BALANCE_CREATE_PREFIX} />
+          {!noAuth && <div className='col-span-full'><ChannelKeyGroups key={`create-${showToken}`} draftId='create-channel'
+            baseUrl={() => readField(BASEURL_ID)} protocol={() => readField(PROTOCOL_ID) || protocol} /></div>}
         </div>
       </DialogSection>
 
@@ -415,6 +419,7 @@ export function CustomProviderBlock({
             {t('添加到 ')}<b>{pickedName}</b>{t('　同一家可以放多把 key，按优先级轮换。')}
           </span>
         </div>
+        <Button variant='outline' size='sm' onClick={() => setEditGroups(true)}>{t('管理渠道 Key 分组与模型')}</Button>
         <div className='add-form'>
           <div className='add-field'>
             <Label>{t('提供商')}</Label>
@@ -425,7 +430,7 @@ export function CustomProviderBlock({
             <Label>Base URL</Label>
             <Input readOnly value={pickedProvider?.baseUrl || ''} />
           </div>
-          <div className='add-field'>
+          <div className='add-field' hidden={!existingNoAuth}>
             <Label htmlFor={EXISTING_APIKEY_ID}>API Key</Label>
             <Input
               id={EXISTING_APIKEY_ID}
@@ -450,7 +455,10 @@ export function CustomProviderBlock({
           />
           {/* 余额查询：这一家登记了方案才出现（方案来自提供商记录，不能改） */}
           <BalanceFields scheme={existingScheme} prefix={BALANCE_EXISTING_PREFIX} />
-          <div className='add-field'>
+          {!existingNoAuth && pickedProvider && <div className='col-span-full'><ChannelKeyGroups
+            key={`existing-${current}-${showToken}`} draftId={`append-channel-${current}`} providerId={current}
+            baseUrl={() => pickedProvider.baseUrl || ''} protocol={() => pickedProvider.protocol || 'chat_completions'} /></div>}
+          <div className='add-field' hidden={!existingNoAuth}>
             <Label htmlFor={EXISTING_NAME_ID}>{t('备注名')}</Label>
             <Input
               id={EXISTING_NAME_ID}
@@ -463,6 +471,7 @@ export function CustomProviderBlock({
           </div>
         </div>
       </DialogSection>
+      {editGroups && current && <ChannelKeyGroupsDialog providerId={current} onClose={() => setEditGroups(false)} />}
     </>
   )
 }
@@ -531,13 +540,20 @@ async function submitCreate(context: FootContext, allowDuplicate = false, target
     if (balanceQuery) payload.balanceQuery = balanceQuery
     // 两个凭证字段互斥（后端也这么归一）：勾了无需鉴权就不带 apiKey 上去
     if (noAuth) payload.noAuth = true
-    else if (apiKey) payload.apiKey = apiKey
+    else payload.keyGroups = readChannelGroups('create-channel')
     context.setHint('')
     try {
+      if (target && !noAuth) {
+        const existing = await shared().wbProviders?.customRequest?.('GET', '/api/custom-providers') as {providers?:Array<{id:string;keyGroups?:KeyGroupDraft[]}>}
+        const groups = existing.providers?.find(item => item.id === target.id)?.keyGroups || []
+        payload.id = target.id
+        payload.keyGroups = [...groups.map(group => ({ ...group, apiKeys: [] })), ...readChannelGroups('create-channel')]
+      } else if (target && apiKey) payload.apiKey = apiKey
       const data = (await shared().wbProviders?.customRequest?.(
-        'POST', target ? '/api/accounts' : '/api/custom-providers', payload,
+        'POST', target ? noAuth ? '/api/accounts' : '/api/custom-providers/update' : '/api/custom-providers', payload,
       )) as { provider?: { name?: string }; account?: { name?: string }; created?: boolean } | null
       clearFields([NAME_ID, BASEURL_ID, APIKEY_ID])
+      clearChannelGroups('create-channel')
       clearBalanceFields(scheme, BALANCE_CREATE_PREFIX)
       // 勾选框与草稿一起复位（下次进来是干净的默认态，不被上一家预勾影响）
       writeNoAuthDraft(NOAUTH_ID, false)
@@ -565,7 +581,6 @@ async function submitExisting(context: FootContext): Promise<void> {
     toast(t('该提供商已不存在（可能已被删除），请刷新后重试'), 'err')
     return
   }
-  const apiKey = readField(EXISTING_APIKEY_ID)
   const noAuth = readNoAuthDraft(EXISTING_NOAUTH_ID)
   const name = readField(EXISTING_NAME_ID)
   // 余额查询方案在这一家身上（提供商记录）：要不要渲染查询凭证那段由它决定，
@@ -575,16 +590,23 @@ async function submitExisting(context: FootContext): Promise<void> {
     const payload: Record<string, unknown> = { provider: providerId }
     // 与新建模式同一口径：勾了无需鉴权就不带 apiKey
     if (noAuth) payload.noAuth = true
-    else if (apiKey) payload.apiKey = apiKey
-    if (name) payload.name = name
+    if (noAuth && name) payload.name = name
     const balanceQuery = readBalanceQuery(scheme, BALANCE_EXISTING_PREFIX)
     if (balanceQuery) payload.balanceQuery = balanceQuery
     context.setHint('')
     try {
+      if (!noAuth) {
+        const result = await shared().wbProviders?.customRequest?.('GET', '/api/custom-providers') as { providers?: Array<{id: string; keyGroups?: KeyGroupDraft[]}> }
+        const provider = result.providers?.find(item => item.id === providerId)
+        if (!provider) throw new Error(t('渠道不存在'))
+        payload.id = providerId
+        payload.keyGroups = [...(provider.keyGroups || []).map(group => ({ ...group, apiKeys: [] })), ...readChannelGroups(`append-channel-${providerId}`)]
+      }
       const data = (await shared().wbProviders?.customRequest?.(
-        'POST', '/api/accounts', payload,
+        'POST', noAuth ? '/api/accounts' : '/api/custom-providers/update', payload,
       )) as { account?: { name?: string }; created?: boolean } | null
       clearFields([EXISTING_APIKEY_ID, EXISTING_NAME_ID])
+      clearChannelGroups(`append-channel-${providerId}`)
       clearBalanceFields(scheme, BALANCE_EXISTING_PREFIX)
       writeNoAuthDraft(EXISTING_NOAUTH_ID, false)
       const label = data?.account?.name

@@ -8,6 +8,7 @@ import {
 } from '@ui'
 import '../styles/accounts-settings-dialog.css'
 import { t } from '../i18n'
+import { ChannelKeyGroupsDialog } from './channel-key-groups'
 import {
   ACCOUNT_CONCURRENCY_MAX as CONC_MAX, errorMessage, esc, shared, toast,
   type AccountRecord, type LimiterGroup,
@@ -60,6 +61,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
   // ZCode 的「使用哪个套餐」草稿（非 ZCode 账号恒为空串，那一段也不渲染）
   const [planChannel, setPlanChannel] = React.useState(() => zcodePlanOf(account))
   const [busy, setBusy] = React.useState(false)
+  const [editKeyGroups, setEditKeyGroups] = React.useState(false)
   const [status, setStatus] = React.useState<React.ReactNode>('')
   const [provider, setProvider] = React.useState<ProviderSettings | null>(null)
   const [providerName, setProviderName] = React.useState('')
@@ -632,6 +634,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                   {pane === 'credential' && hasCredentialPane ? <>
                     {isCatpaw ? <BalanceTokenField configured={account.hasBalanceToken === true} value={balanceToken}
                       onChange={setBalanceToken} clearBusy={interactionBusy} onClear={() => void clearBalanceToken()} /> : null}
+                    {isCustomAccount ? <Button variant='outline' onClick={() => setEditKeyGroups(true)}>{t('管理渠道 Key 分组与模型')}</Button> : null}
                     {isCustomAccount ? <CustomCredentialFields hasApiKey={target.hasApiKey === true} noAuth={noAuthDraft}
                       value={apiKeyDraft} clearBusy={interactionBusy} onClear={() => void clearApiKey()}
                       onValue={next => { setApiKeyDraft(next); if (next.trim()) setNoAuthDraft(false) }}
@@ -698,6 +701,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
             <Button variant='default' disabled={interactionBusy || !dirtyCount} onClick={() => void save()}>{busy ? t('保存中…') : t('保存更改')}</Button>
           </div>
         </DialogFooter>
+        {editKeyGroups && <ChannelKeyGroupsDialog providerId={providerOf(target)} onClose={() => setEditKeyGroups(false)} />}
       </DialogContent>
     </Dialog>
   )

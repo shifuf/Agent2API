@@ -680,7 +680,11 @@ pub fn create(payload: &Value) -> Result<Value, String> {
         "baseUrl": base_url,
         "enabled": true,
         "createdAt": logging::now_ms(),
-        "models": [],
+        "models": match object.get("keyGroups") {
+            Some(value) => crate::server::core::account_store::custom_accounts::key_groups::selected_models(
+                &crate::server::core::account_store::custom_accounts::key_groups::parse_groups(value)?),
+            None => Vec::new(),
+        },
         "mappings": [],
         // per-provider 特判字段（预置目录带来的上游修正），见 validate_* 的说明
         "urlSuffix": validate_url_suffix(object.get("urlSuffix"))?,
@@ -722,6 +726,19 @@ pub fn update(id: &str, payload: &Value) -> Result<Value, String> {
     // 「保存成功但没生效」比一条明确的 400 难排查得多。
     let current = items[index].clone();
     let mut merged = current.as_object().cloned().unwrap_or_default();
+    if let Some(value) = object.get("keyGroups") {
+        let groups = crate::server::core::account_store::custom_accounts::key_groups::parse_groups(value)?;
+        let mut models = crate::server::core::account_store::custom_accounts::key_groups::selected_models(&groups);
+        // Keep capability metadata for models which remain selected.
+        for model in &mut models {
+            if let Some(old) = current.get("models").and_then(Value::as_array).and_then(|items| items.iter().find(|old| old.get("id") == model.get("id"))) {
+                *model = old.clone();
+            }
+        }
+        let mappings = current.get("mappings").and_then(Value::as_array).cloned().unwrap_or_default();
+        bindings::validate_change(&current, &models, &mappings).map_err(|error| error.message)?;
+        merged.insert("models".into(), Value::Array(models));
+    }
     if let Some(value) = object.get("name") {
         let name = normalize_name(Some(value))?;
         merged.insert("name".to_string(), Value::String(name));
@@ -781,6 +798,21 @@ pub fn update(id: &str, payload: &Value) -> Result<Value, String> {
         return Err("保存失败：配置写入未成功（请检查磁盘空间与配置目录权限）".to_string());
     }
     Ok(updated)
+}
+
+/// Undo only this request's configuration write when its account transaction failed.
+/// A newer edit must never be overwritten by rollback from an older request.
+pub(crate) fn restore_after_failed_key_groups(id: &str, before: &Value, written: &Value) -> Result<(), String> {
+    config::try_update_raw_field(KEY_CUSTOM_PROVIDERS, |value| {
+        let stored = value.as_array_mut().and_then(|items| items.iter_mut()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(id)))
+            .ok_or_else(|| "渠道已被删除，无法恢复配置".to_string())?;
+        let current = stored.as_object().map(item_of).unwrap_or(Value::Null);
+        let expected = written.as_object().map(item_of).unwrap_or(Value::Null);
+        if current != expected { return Err("渠道配置已被另一请求修改，未覆盖新的配置".to_string()); }
+        *stored = before.clone();
+        Ok(())
+    }, || "恢复渠道配置失败，请检查磁盘空间与配置目录权限".to_string())
 }
 
 /// 删除一个自定义提供商，**并级联删除该家名下的全部账号**；返回删掉的账号数。
@@ -976,24 +1008,35 @@ pub async fn fetch_upstream_models(
     if base_url.is_empty() {
         return Err("该提供商没有配置 baseUrl，无法拉取模型清单".to_string());
     }
-    let url = if protocol == PROTOCOL_ANTHROPIC {
-        format!("{base_url}/v1/models")
-    } else {
-        format!("{base_url}/models")
-    };
     let credential = store
         .first_custom_credential(provider_id)
         .ok_or_else(|| {
             "请先添加账号：拉取模型清单需要一条启用且可用（填了 apiKey，或声明了无需鉴权）的账号"
                 .to_string()
         })?;
-    let client = egress::client_for(credential.proxy.as_ref());
+    fetch_models_with_key(&protocol, credential.base_url_override.as_deref().unwrap_or(&base_url),
+        &credential.api_key, credential.proxy.as_ref()).await
+}
+
+/// Probe a draft channel/key without persisting credentials or model candidates.
+pub async fn fetch_models_with_key(
+    protocol: &str,
+    base_url: &str,
+    api_key: &str,
+    proxy: Option<&crate::server::core::proxies::ResolvedProxy>,
+) -> Result<Vec<String>, String> {
+    if !valid_protocol(protocol) { return Err("不支持的协议".into()); }
+    let base_url = normalize_base_url(base_url)?;
+    let url = if protocol == PROTOCOL_ANTHROPIC {
+        format!("{base_url}/v1/models")
+    } else { format!("{base_url}/models") };
+    let client = egress::client_for(proxy);
     let mut builder = client
         .get(&url)
         .timeout(Duration::from_millis(FETCH_MODELS_TIMEOUT_MS));
     // 凭证为空（无需鉴权的账号）时**一个鉴权头都不发**：空 Bearer 对严格的上游
     // 等同凭证错误，与「这家不要凭证」的语义正好相反（见函数头的说明）
-    let api_key = credential.api_key.trim();
+    let api_key = api_key.trim();
     if !api_key.is_empty() {
         builder = if protocol == PROTOCOL_ANTHROPIC {
             builder
@@ -1009,7 +1052,8 @@ pub async fn fetch_upstream_models(
     let status = response.status().as_u16();
     let text = response.text().await.unwrap_or_default();
     if !response_ok(status) {
-        return Err(format!("上游返回 {status}: {text}"));
+        let safe = if api_key.is_empty() { text } else { text.replace(api_key, "[redacted]") };
+        return Err(format!("上游返回 {status}: {}", safe.chars().take(500).collect::<String>()));
     }
     let payload: Value = serde_json::from_str(&text)
         .map_err(|error| format!("上游响应不是合法 JSON: {error}"))?;
