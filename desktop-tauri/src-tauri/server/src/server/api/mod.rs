@@ -164,6 +164,7 @@ pub mod session;
 pub mod sidebar_layout;
 pub mod stats_api;
 pub mod storage_api;
+pub mod subscriptions;
 pub mod timeouts_api;
 pub mod update;
 pub mod upgrade_api;

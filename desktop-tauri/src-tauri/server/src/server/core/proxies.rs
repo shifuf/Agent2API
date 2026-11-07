@@ -150,7 +150,7 @@ pub fn normalize_account_proxy(input: &Value) -> Result<Option<Value>, ProxyConf
     }
 
     if source == "subscription" {
-        return Err(ProxyConfigError::new(crate::server::core::proxy_pool::RETIRED_HINT));
+        return Err(ProxyConfigError::new("订阅节点请在网络代理中导入后，通过代理池引用"));
     }
     if source == "clash" {
         let listener_uid = clean_string(object.get("listenerUid"), MAX_LABEL_LENGTH);
@@ -479,7 +479,7 @@ pub fn resolve_account_proxy(config: Option<&Value>) -> Option<ProxyResolution> 
     }
     if source != "clash" {
         return Some(ProxyResolution::Failed(if source == "subscription" {
-            crate::server::core::proxy_pool::RETIRED_HINT.to_string()
+            "订阅节点请在网络代理中导入后，通过代理池引用".to_string()
         } else {
             format!("不支持的代理来源: {source}")
         }));

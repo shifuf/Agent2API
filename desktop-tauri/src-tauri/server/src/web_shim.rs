@@ -1759,6 +1759,23 @@ pub fn shim_js() -> &'static str {
     // 成对存在，契约见 api::proxies 的模块头 settings 两条）
     getProxySettings: function () { return call('GET', '/api/proxies/settings'); },
     saveProxySettings: function (payload) { return call('POST', '/api/proxies/settings', payload || {}); },
+    // 订阅（「网络代理」页的订阅区块；与桌面壳 bridge.rs 的同名方法成对存在，
+    // 契约见 api::subscriptions 的模块头 —— 写操作后端投一条内核命令（异步），
+    // 节点数与运行状态由轮询 kernel 看结果）
+    getSubscriptions: function () { return call('GET', '/api/subscriptions'); },
+    addSubscription: function (payload) { return call('POST', '/api/subscriptions/add', payload || {}); },
+    saveSubscription: function (payload) { return call('POST', '/api/subscriptions/save', payload || {}); },
+    refreshSubscription: function (id) { return call('POST', '/api/subscriptions/refresh', { id: String(id || '') }); },
+    removeSubscription: function (id) { return call('POST', '/api/subscriptions/remove', { id: String(id || '') }); },
+    decodeQrImage: function (payload) { return call('POST', '/api/subscriptions/decode-qr', payload || {}); },
+    getKernelStatus: function () { return call('GET', '/api/subscriptions/kernel'); },
+    downloadKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/download', payload || {}); },
+    importKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/import', payload || {}); },
+    cancelKernelDownload: function () { return call('POST', '/api/subscriptions/kernel/download/cancel', {}); },
+    restartKernel: function () { return call('POST', '/api/subscriptions/kernel/restart', {}); },
+    // 手动关闭内核（与桌面壳 bridge.rs 的同名方法成对存在；只停进程，订阅与端口注册表保留）
+    stopKernel: function () { return call('POST', '/api/subscriptions/kernel/stop', {}); },
+    removeKernel: function () { return call('POST', '/api/subscriptions/kernel/remove', {}); },
     // 文件夹选择框是**壳的能力**（web 版没有壳）：回 `unsupported`，界面据此提示
     // 手输路径 —— 只回 `canceled` 的话，点一下按钮什么都不会发生，用户会以为卡了
     pickFolder: function () { return Promise.resolve({ canceled: true, unsupported: true }); },

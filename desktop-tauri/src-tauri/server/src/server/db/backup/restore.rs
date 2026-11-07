@@ -100,7 +100,16 @@ pub(super) fn import(
     }).ok_or("数据库连接不可用，恢复未执行")??;
     db.invalidate_accounts();
     set_phase(RestorePhase::Reloading);
+    // 内核进程仍使用恢复前的订阅与目录；先停旧进程，再用恢复后的配置重建。
+    let kernel_halted = crate::server::core::sub_kernel::is_manually_halted();
+    crate::server::core::sub_kernel::shutdown();
     config::reload();
+    let providers = crate::server::core::subscriptions::enabled_provider_inputs();
+    if providers.is_empty() {
+        crate::server::core::sub_kernel::request_stop();
+    } else if !kernel_halted && crate::server::core::sub_kernel::installed() {
+        crate::server::core::sub_kernel::request_restart(providers);
+    }
     usage_records::reload_facts();
     limiter::sources::reload();
     limiter::counter::invalidate();

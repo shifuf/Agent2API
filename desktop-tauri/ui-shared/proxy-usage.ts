@@ -1,4 +1,4 @@
-export type ProxyService = 'update'
+export type ProxyService = 'update' | 'kernelDownload'
 
 export type ProxyUsage = {
   usedBy?: Array<{ id?: string; name?: string; enabled?: boolean }>
@@ -10,7 +10,10 @@ export function hasProxyUsage(item: ProxyUsage): boolean {
 }
 
 export function proxyServiceLabels(item: ProxyUsage, t: (key: string) => string): string[] {
-  return [...new Set(item.usedByServices || [])]
-    .filter(service => service === 'update')
-    .map(() => t('软件 / 插件更新'))
+  return [...new Set(item.usedByServices || [])].filter(service => service === 'update' || service === 'kernelDownload').map(service => {
+    switch (service) {
+      case 'update': return t('软件 / 插件更新')
+      case 'kernelDownload': return t('代理内核下载')
+    }
+  })
 }

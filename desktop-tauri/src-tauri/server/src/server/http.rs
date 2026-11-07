@@ -74,10 +74,6 @@ const CORS_HEADERS: &str =
 ///
 /// 分端口部署（headless 设了 `AGENT2API_PANEL_PORT`）时不要用本函数：
 /// 用 [`panel_router`] + [`gateway_router`] 各挂一个监听（见 `mod::start`）。
-async fn retired_proxy_feature() -> Response {
-    errors::management_error(410, crate::server::core::proxy_pool::RETIRED_HINT)
-}
-
 pub fn router(state: ServerState) -> Router {
     panel_router(state.clone()).merge(gateway_router(state))
 }
@@ -479,9 +475,31 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/proxies/pool/test", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/sync-clash", any(api::accounts::proxies_entry))
         .route("/api/proxies/settings", any(api::accounts::proxies_entry))
-        // ── 已下线的订阅入口只返回状态，不再读取请求体或执行内核操作 ──
-        .route("/api/subscriptions", any(retired_proxy_feature))
-        .route("/api/subscriptions/{*rest}", any(retired_proxy_feature))
+        // ── 订阅（「网络代理」页的订阅区块：机场订阅 → 内核本地监听器）──
+        // 固定路径 + api::subscriptions::entry 按 (方法, 剩余段) 分发（理由同上：
+        // 通配段与 404 兜底互相干扰）。内核命令是异步的（重启 / 拉订阅要几秒
+        // 到几十秒），写操作立即返回列表 + 内核快照，前端轮询看结果 ——
+        // 契约详见 api::subscriptions 的模块头。
+        .route("/api/subscriptions", any(api::subscriptions::entry))
+        .route("/api/subscriptions/add", any(api::subscriptions::entry))
+        .route("/api/subscriptions/save", any(api::subscriptions::entry))
+        .route("/api/subscriptions/refresh", any(api::subscriptions::entry))
+        .route("/api/subscriptions/remove", any(api::subscriptions::entry))
+        .route("/api/subscriptions/decode-qr", any(api::subscriptions::entry))
+        .route("/api/subscriptions/kernel", any(api::subscriptions::entry))
+        .route("/api/subscriptions/kernel/download", any(api::subscriptions::entry))
+        .merge(
+            Router::new()
+                .route("/api/subscriptions/kernel/import", any(api::subscriptions::entry))
+                .layer(axum::extract::DefaultBodyLimit::max(api::subscriptions::MAX_KERNEL_UPLOAD_BYTES)),
+        )
+        // 停止下载是**独立一条路径**（不是 download 上的查询参数）：它是另一个
+        // 动作，且必须在下载进行中也能到达 —— 与 download 共用一条路径会让
+        // 「按方法区分」的相邻语义（POST=开始）在同一个路径上出现两种含义
+        .route("/api/subscriptions/kernel/download/cancel", any(api::subscriptions::entry))
+        .route("/api/subscriptions/kernel/restart", any(api::subscriptions::entry))
+        .route("/api/subscriptions/kernel/stop", any(api::subscriptions::entry))
+        .route("/api/subscriptions/kernel/remove", any(api::subscriptions::entry))
         // ── 积分 / 签到 / 运营活动（对照 server.mjs 871-911 行）──
         // 六条都挂在 protected（Node 版每条都调了 checkApiKey），
         // 失败时的 body 是 OpenAI 风格（那几条在 server.mjs 的大 try 里）

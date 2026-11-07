@@ -109,7 +109,7 @@ pub fn candidate_ids(config: &Value) -> Vec<String> {
 /// 条目的**廉价**可用性（不发网络）：用于展示摘要里的
 /// 「可用 N 条」。真正的取用判定在解析那一步（`proxy_pool::resolve_reference`）。
 fn entry_ready(item: &Value) -> Result<(), String> {
-    if item.get("source").and_then(Value::as_str) == Some("clash") {
+    if matches!(item.get("source").and_then(Value::as_str), Some("clash" | "subscription")) {
         return match crate::server::core::proxy_pool::resolve_item(item) {
             Some(crate::server::core::proxies::ProxyResolution::Resolved(_)) => Ok(()),
             Some(crate::server::core::proxies::ProxyResolution::Failed(reason)) => Err(reason),

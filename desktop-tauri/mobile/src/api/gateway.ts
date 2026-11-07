@@ -374,6 +374,9 @@ export type PoolItem = ProxyUsage & {
   sourceEnabled?: boolean
   localDisabled?: boolean
   listenerUid?: string
+  providerId?: string
+  node?: string
+  orphan?: boolean
   protocol: string
   host: string
   port: number | null
@@ -384,7 +387,7 @@ export type PoolItem = ProxyUsage & {
   lastTest?: { at?: number; success?: boolean; ip?: string; error?: string; durationMs?: number } | null
 }
 
-export type PoolPayload = { items?: PoolItem[]; clash?: import('../../../ui-shared/clash-proxy').ClashProxySnapshot; changes?: number; syncError?: string | null }
+export type PoolPayload = { kernelInstalled?: boolean; items?: PoolItem[]; clash?: import('../../../ui-shared/clash-proxy').ClashProxySnapshot; changes?: number; syncError?: string | null }
 export type ProxyDraft = Pick<PoolItem, 'name' | 'protocol' | 'host' | 'port' | 'username' | 'password' | 'enabled'>
 export type ProxyTestResult = PoolPayload & {
   success?: boolean

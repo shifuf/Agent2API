@@ -219,6 +219,7 @@ async fn dispatch(
                 let changed = config::update_proxy() != normalized;
                 let saved = config::set_update_proxy(normalized);
                 if changed {
+                    crate::server::api::proxies::reconcile_listeners(state);
                     state.update().clear_check_cooldown();
                     state.update().reset_source_preference();
                     crate::server::core::plugin_host::update::clear_cooldown();

@@ -106,10 +106,37 @@ async fn add_plugin_account(
         },
         None => None,
     };
+    // 未被账号引用的订阅节点尚无专用端口。归一凭证时暂借串行测试口，
+    // 落库仍只保存 pool id，保存后按引用补建正式监听器。
+    let mut subscription_guard = None;
+    let mut subscription_proxy = None;
+    if let Some(id) = proxy_config.as_ref().and_then(crate::server::core::proxy_pool::usage::pool_reference_id) {
+        let item = crate::server::core::proxy_pool::raw_items().into_iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(id));
+        if item.as_ref().is_some_and(|item|
+            item.get("source").and_then(Value::as_str) == Some("subscription")
+                && crate::server::core::proxy_pool::is_enabled(item)
+                && crate::server::core::proxy_pool::resolve_reference(id).is_err()) {
+            subscription_guard = Some(super::proxies::SUB_TEST_LOCK.lock().await);
+            let target = match crate::server::core::proxy_pool::test_target(id) {
+                Ok(target) => target,
+                Err(error) => return management_error(400, error),
+            };
+            let port = match crate::server::core::sub_kernel::runtime::select_test_node(&target.provider_id, &target.node).await {
+                Ok(port) => port,
+                Err(error) => return management_error(400, error),
+            };
+            subscription_proxy = Some(ResolvedProxy {
+                source: "pool".to_string(), protocol: "http".to_string(), host: "127.0.0.1".to_string(),
+                port: Some(port), username: String::new(), password: String::new(), label: target.name,
+            });
+        }
+    }
     // normalize 与落账号共用同一归一配置；pool/Clash 解析失败不能静默直连。
     let selected_proxy = match proxy_config.as_ref() {
         None => None,
         Some(config) if config.get("source").and_then(Value::as_str) == Some("direct") => None,
+        Some(_) if subscription_proxy.is_some() => subscription_proxy,
         Some(config) => {
             if crate::server::core::proxies::is_rotate_config(config) {
                 return management_error(400, "添加标准账号不支持轮询代理，请选择直连或一条代理");
@@ -190,6 +217,7 @@ async fn add_plugin_account(
         }
     };
 
+    drop(subscription_guard);
     let id = account.identity.clone();
     let name = account
         .public
@@ -208,12 +236,15 @@ async fn add_plugin_account(
         account_source,
         proxy_config.as_ref(),
     ) {
-        Ok((record, proxy_saved)) => ok_json(json!({
+        Ok((record, proxy_saved)) => {
+            super::proxies::reconcile_listeners(state);
+            ok_json(json!({
             "account": record,
             "created": true,
             "proxySaved": proxy_saved,
             "list": state.store().list_visible_accounts(),
-        })),
+        }))
+        },
         Err(message) => {
             logging::log("[Accounts]", &format!("❌ {message}"));
             management_error(500, &message)
@@ -287,6 +318,21 @@ pub async fn accounts_entry(State(state): State<ServerState>, request: axum::ext
     let suffix = full_path.strip_prefix("/api/accounts").unwrap_or("");
     let rest = suffix.strip_prefix('/').map(str::to_string);
     dispatch(state, method, rest.as_deref(), &full_path, &query, &body).await
+}
+
+/// 账号写、批量改代理 / 删除账号后的**监听器对账**（lazy listeners 的触发点，
+/// 见 `api::proxies::reconcile_listeners`）。
+///
+/// 用「改动前后引用 id 集合」的差集来判：改个备注名 / 改密钥不该付一次内核
+/// 重启的等待（重启要重建全部监听器，几秒）。引用增加要补监听器、引用减少
+/// 要回收端口（删账号 / 改走别的代理 / 改直连）—— 两个方向都交给对账的缺口
+/// 检测收敛，这里不猜方向，只拦「没变化」这一种白重启。
+pub(super) fn reconcile_kernel_listeners(state: &ServerState, before: &std::collections::HashSet<String>) {
+    let after = state.store().referenced_pool_ids();
+    if &after == before {
+        return; // 引用集合没变（纯改配置），不重启
+    }
+    super::proxies::reconcile_listeners(state);
 }
 
 /// `/api/proxies*` 的入口（同样接受任意方法）。
@@ -564,6 +610,9 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
+    // 引用集合快照（成功落账号后对账，见 `reconcile_kernel_listeners`）。
+    // 只有插件家的落库路径会走到收尾，所以快照在那里现取（见 `add_plugin_account`
+    // 的调用点）；内置分支全部直接返回 503，这里不再需要。
     let provider = payload
         .get("provider")
         .and_then(Value::as_str)
@@ -604,13 +653,16 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
     if crate::server::core::custom_providers::is_custom_provider_id(provider) {
         let result = store.add_custom_account(provider, &payload, import_name);
         return match result {
-            Ok(upsert) => ok_json(json!({
+            Ok(upsert) => {
+                super::proxies::reconcile_listeners(state);
+                ok_json(json!({
                 "account": upsert.account,
                 // 幂等合并（同 key / 同家无需鉴权）时为 false：前端据此把提示
                 // 说成「已更新」而不是「已添加」，见 CustomAccountUpsert 的说明
                 "created": upsert.created,
                 "list": store.list_visible_accounts(),
-            })),
+            }))
+            },
             Err(error) => store_error(error),
         };
     }
@@ -1307,6 +1359,8 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
     if !patch.is_object() {
         return management_error(400, "请求内容必须是 JSON 对象");
     }
+    // 引用集合快照（改代理成功后对账，见 `reconcile_kernel_listeners`）
+    let refs_before = state.store().referenced_pool_ids();
     // CatPaw 的余额查询凭证（`balanceToken`）先落盘：它是**这一家独有**的字段，
     // 通用 `update_account` 不认识它（见 `update_catpaw_balance_token` 的说明：
     // 不把它塞进四家共用的 apply_patch）。放在通用 patch 之前做，于是同一次
@@ -1456,6 +1510,7 @@ pub async fn patch_account(state: &ServerState, id: &str, body: &Bytes) -> Respo
         Ok((account, mut changes)) => {
             changes.extend(balance_changes);
             // 改代理成功后对账：新引用的补监听器、旧引用失去的回收端口
+            reconcile_kernel_listeners(state, &refs_before);
             ok_json(json!({
                 "account": account,
                 "changes": changes,
@@ -1580,8 +1635,10 @@ pub fn delete_account(state: &ServerState, id: &str) -> Response {
     }
     // 引用快照要在删除**之前**取：被删账号撇下的引用要靠对账回收端口
     // （最后一个引用消失 → 这个节点的监听器该收了）
+    let refs_before = state.store().referenced_pool_ids();
     match state.store().remove_account(id) {
         Ok(()) => {
+            reconcile_kernel_listeners(state, &refs_before);
             ok_json(json!({ "list": state.store().list_visible_accounts() }))
         }
         Err(error) => store_error(error),

@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import { type ProxyUsage } from '../../../ui-shared/proxy-usage'
+import { hasProxyUsage, type ProxyUsage } from '../../../ui-shared/proxy-usage'
 import type { BalanceQueryPublic } from './balance-query'
 import type { LimiterGroup, LimiterSnapshot } from './accounts-limiter-types'
 import type { AccountSorting, AccountSortRule as GroupSortRule } from '../../../ui-shared/account-sorting'
@@ -361,7 +361,7 @@ export type AccountsBridge = {
     sorting?: AccountSorting
   } | null | undefined>
   getProxies(): Promise<{ clash?: import('../../../ui-shared/clash-proxy').ClashProxySnapshot } | null | undefined>
-  getProxyPool(): Promise<{ items?: PoolItem[] } | null | undefined>
+  getProxyPool(): Promise<{ items?: PoolItem[]; kernelInstalled?: boolean } | null | undefined>
   /** 测一条池条目（账号表单里选中池引用时的「测试出口」）：
    *  结果会记进那条代理的「上次测试」，与代理页那颗按钮同一个动作 */
   testProxyPoolItem(id: string): Promise<{
@@ -414,10 +414,28 @@ export type PoolItem = ProxyUsage & {
   port?: number | null
   resolved?: { protocol?: string; host?: string; port?: number | null; label?: string } | null
   resolveError?: string | null
+  orphan?: boolean
+}
+
+export function isPortlessSubscription(item: PoolItem): boolean {
+  return item.source === 'subscription' && (item.port === null || item.port === undefined)
+}
+
+let kernelInstalledCache: boolean | null = null
+export function setKernelInstalled(value: boolean | null): void { kernelInstalledCache = value }
+export function kernelInstalled(): boolean | null { return kernelInstalledCache }
+
+export function portlessSubscriptionLabel(item: PoolItem, installed: boolean | null = kernelInstalledCache): string {
+  if (installed === false) return t('内核未安装')
+  if (item.orphan) return t('订阅已移除')
+  if (item.enabled === false) return t('已禁用')
+  if (hasProxyUsage(item)) return t('端口准备中')
+  return t('未被使用')
 }
 
 /** 代理统一展示实时解析出的协议地址，供列表与下拉核对。 */
-export function poolItemAddress(item: PoolItem): string {
+export function poolItemAddress(item: PoolItem, installed: boolean | null = kernelInstalledCache): string {
+  if (isPortlessSubscription(item)) return portlessSubscriptionLabel(item, installed)
   const proxy = item.resolved || item
   if (proxy.protocol && proxy.host && proxy.port) {
     const host = proxy.host.includes(':') && !proxy.host.startsWith('[') ? `[${proxy.host}]` : proxy.host
@@ -428,7 +446,7 @@ export function poolItemAddress(item: PoolItem): string {
 
 export function poolItemLabel(item: PoolItem): string {
   const name = item.name || item.id
-  const parts = [item.source === 'clash' ? 'Clash Verge' : '', item.resolveError ? t('解析失败') : poolItemAddress(item), item.enabled === false ? t('已禁用') : ''].filter(Boolean)
+  const parts = [item.source === 'clash' ? 'Clash Verge' : item.source === 'subscription' ? t('订阅') : '', item.resolveError && !isPortlessSubscription(item) ? t('解析失败') : poolItemAddress(item), item.enabled === false ? t('已禁用') : ''].filter(Boolean)
   return parts.length ? t('{name}（{parts}）', { name, parts: parts.join(' · ') }) : name
 }
 

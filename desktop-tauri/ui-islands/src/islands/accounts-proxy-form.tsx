@@ -66,7 +66,7 @@ export function draftOfProxy(proxy: AccountRecord['proxy']): ProxyDraft {
 /** 草稿 → 接口 payload；非法输入抛出「面向用户」的错误（消息直接进 toast / 弹窗状态行） */
 export function readProxyDraft(draft: ProxyDraft): ProxyPayload {
   if (draft.mode === 'none') return null
-  if (draft.mode === 'retired') throw new Error(t('原代理来源已下线，请选择已保存的代理、自定义地址或直连'))
+  if (draft.mode === 'retired') throw new Error(t('订阅节点请先在网络代理中导入，再选择已保存的代理'))
   if (draft.mode === 'clash') {
     if (!draft.listenerUid) throw new Error(t('请先选择 Clash Verge 出口'))
     return { source: 'clash', listenerUid: draft.listenerUid }
@@ -258,7 +258,7 @@ export function ProxyForm({
 
   return (
     <div className='acct-proxy-form flex flex-col'>
-      {draft.mode === 'retired' ? <p className='mb-3 text-xs text-destructive'>{t('原代理来源已下线，请选择已保存的代理、自定义地址或直连')}</p> : null}
+      {draft.mode === 'retired' ? <p className='mb-3 text-xs text-destructive'>{t('订阅节点请先在网络代理中导入，再选择已保存的代理')}</p> : null}
       {/* 出网方式：档位一行。走组件库的分段控件（与添加账号弹窗同一档尺寸）——
           这里原先拿 RadioGroup 拼了一套自己的观感，跟别处的分段对不上。 */}
       <SegmentedControl<ProxyDraft['mode']>

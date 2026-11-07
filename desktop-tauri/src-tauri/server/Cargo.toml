@@ -87,7 +87,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 # 的 Mozilla 根集，只是两家依赖锁在 0.26 / 1.x 两个版本上，属同一套数据，
 # 不是第二套 TLS 栈；刻意不用 native-roots，免得再拉平台证书库那一串依赖）。
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
-# 只读 Clash Verge 配置，不管理或运行代理内核。
+# Clash Verge 配置与代理订阅 YAML。
 serde_yaml = "0.9"
 sha2 = "0.10"
 # Loomy 账号（CAccount）请求签名的 HMAC-SHA1（复刻客户端指纹，不是安全边界，
@@ -148,6 +148,8 @@ rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks"] }
 # 管理面板登录的密码哈希（AGENT2API_ADMIN_PASSWORD_HASH）：
 # bcrypt 与 htpasswd -nBC 的输出格式互通，生成命令无需额外工具
 bcrypt = "0.15"
+# 订阅二维码导入，复用 image 的解码能力。
+rqrr = "0.11"
 # 提供商插件包的安装（core/plugin_host/install.rs）：用户拿到的是各平台的 zip，
 # 网关负责解包 + 校验清单 + 落进版本目录。只开 `deflate`（绝大多数打包工具
 # 用的就是它），不引 bzip2 / zstd 那几套压缩后端 —— 插件包是自家脚本产出的，

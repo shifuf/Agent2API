@@ -13,10 +13,10 @@ import { formatRelative } from '../lib/format'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
 import { proxyServiceLabels } from '../../../ui-shared/proxy-usage'
-import { shouldShowProxyRetirement } from '../../../ui-shared/proxy-retirement'
-import { ProxyRetirementDialog } from '../../../ui-shared/proxy-retirement-dialog'
 import { ProxyEditorSheet, ProxyTestSettingsSheet } from './proxy-editor-sheet'
 import { serverIdentity } from '../lib/servers'
+import { getKernelStatus, kernelAction, type KernelStatus } from '../api/kernel'
+import { KernelImportSheet } from './KernelImportSheet'
 
 export function ProxiesPage() {
   const [data, setData] = useState<PoolPayload | null>(null)
@@ -29,7 +29,9 @@ export function ProxiesPage() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [deleting, setDeleting] = useState<PoolItem | null>(null)
   const identity = serverIdentity()
-  const [noticeOpen, setNoticeOpen] = useState(() => shouldShowProxyRetirement(identity))
+  const [kernel, setKernel] = useState<KernelStatus | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [kernelError, setKernelError] = useState('')
 
   const load = async () => {
     try {
@@ -42,7 +44,26 @@ export function ProxiesPage() {
     }
   }
   usePolling(load, 120_000)
-  const pull = usePullToRefresh({ onRefresh: load })
+  const loadKernel = async () => {
+    try {
+      const next = await getKernelStatus()
+      if (serverIdentity() !== identity) return
+      setKernel(next)
+      setKernelError('')
+    } catch (failure) { if (serverIdentity() === identity) setKernelError(message(failure)) }
+  }
+  usePolling(loadKernel, kernel?.installBusy ? 1500 : 15_000)
+  const refresh = async () => { await Promise.all([load(), loadKernel()]) }
+  const pull = usePullToRefresh({ onRefresh: refresh })
+  const controlKernel = async (action: 'restart' | 'stop' | 'download') => {
+    if (busy) return
+    setBusy('kernel')
+    try {
+      await kernelAction(action)
+      if (serverIdentity() === identity) await refresh()
+    } catch (failure) { if (serverIdentity() === identity) store.toast(message(failure), 'err') }
+    finally { if (serverIdentity() === identity) setBusy('') }
+  }
   const items = data?.items || []
   const query = keyword.trim().toLowerCase()
   const shown = items.filter(item => (status === 'all' || stateOf(item) === status)
@@ -112,7 +133,7 @@ export function ProxiesPage() {
   return <div className='m-page' ref={pull.bindRef}>
     <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
     <PageIntro subtitle={data ? t('已启用 {n} 个', { n: items.filter(item => item.enabled).length }) : t('加载中…')}
-      actions={<><IconButton name='refresh' label={t('刷新')} onClick={() => void load()} />
+      actions={<><IconButton name='refresh' label={t('刷新')} onClick={() => void refresh()} />
         <IconButton name='plus' label={t('新增代理')} primary onClick={() => setEditor({ item: null })} /></>} />
     <div className='m-section mt-0'>
       <Card className='m-card m-card-pad'>
@@ -124,6 +145,21 @@ export function ProxiesPage() {
         <SegmentedControl className='mt-3 w-full flex-wrap' options={statuses} value={status} onValueChange={setStatus} aria-label={t('按状态筛选')} />
       </Card>
     </div>
+      {kernel ? <div className='m-section' style={{ marginTop: 0 }}>
+        <Card className='m-card m-card-pad'>
+          <div className='m-t1'>{t('代理内核')} · {kernel.running ? t('内核运行中') : kernel.installed ? t('内核已停止') : t('内核未安装')}</div>
+          <p className='m-t2 m-mono break-all'>{kernel.platform} / {kernel.arch} · {kernel.installedVersion || kernel.version}</p>
+          <p className='m-t2 break-all'>{kernel.kernelDir}</p>
+          {kernel.import?.active ? <p className='m-t2'>{t('正在导入…')}</p> : null}
+          {kernel.import?.error ? <p className='m-t2 text-destructive'>{kernel.import.error}</p> : null}
+          <div className='mt-3 flex flex-wrap gap-2'>
+            <Button variant='outline' disabled={Boolean(busy) || kernel.installBusy} onClick={() => void controlKernel(kernel.installed ? kernel.running ? 'stop' : 'restart' : 'download')}>{kernel.installed ? kernel.running ? t('关闭内核') : t('启动内核') : t('下载内核')}</Button>
+          <Button variant='outline' disabled={kernel.installBusy && !kernel.import?.active} onClick={() => setImportOpen(true)}>{t('手动导入内核')}</Button></div>
+        </Card>
+      </div> : null}
+      {kernelError ? <ErrorNote text={kernelError} /> : null}
+      {importOpen && kernel ? <KernelImportSheet status={kernel} onClose={() => setImportOpen(false)} onChanged={refresh} /> : null}
+
     {error ? <ErrorNote text={error} /> : null}
     {!data ? <SkeletonList rows={3} height={120} /> : null}
     {data && !items.length ? <div className='m-section'><Card className='m-card m-card-pad'>
@@ -137,6 +173,7 @@ export function ProxiesPage() {
       <Card className='m-card m-card-pad'>
         <div className='flex items-center gap-3'><GlyphLogo name='globe' /><div className='min-w-0 flex-1'>
           <strong className='text-sm'>{item.name || t('未命名')}</strong>
+          {item.source === 'subscription' ? <p className='mt-1 text-[10px] text-subtle'>{t('订阅节点')} · {item.node || item.name}</p> : null}
           {item.source === 'clash' ? <p className='mt-1 text-[10px] text-subtle'>Clash Verge · {t('只读：在 Clash Verge 里改')}</p> : null}
           <div className='mt-1 flex items-center gap-1.5'>
             <span className='break-all font-mono text-[11px] text-subtle'>{addressOf(item)}</span>
@@ -144,7 +181,7 @@ export function ProxiesPage() {
           </div>
         </div><Switch checked={item.enabled} disabled={Boolean(busy) || item.source === 'clash' && item.sourceEnabled === false} aria-label={t('启用「{name}」', { name: item.name })} onCheckedChange={next => void toggle(item, next)} /></div>
         {item.source === 'clash' && item.sourceEnabled === false ? <p className='mt-2 text-[11px] text-subtle'>{t('这条在 Clash Verge 里是停用的，本页启用不生效 —— 到 Clash Verge 里打开它')}</p> : null}
-        {item.resolveError ? <p className='mt-2 break-all text-[11px] text-destructive'>{item.resolveError}</p> : null}
+        {item.resolveError && !(item.source === 'subscription' && !item.port && !item.orphan) ? <p className='mt-2 break-all text-[11px] text-destructive'>{item.resolveError}</p> : null}
         <div className='mt-3 border-t border-border pt-3 text-xs'>
           <div className={item.lastTest?.at ? item.lastTest.success ? 'text-success' : 'text-destructive' : 'text-subtle'}>
             {testing === item.id ? t('测试中…') : item.lastTest?.at ? item.lastTest.success ? t('连接成功') : t('连接失败') : t('未检测')}
@@ -161,7 +198,7 @@ export function ProxiesPage() {
         </div>
         <div className='mt-3 flex justify-end gap-2'>
           <Button size='touch-sm' variant='outline' disabled={Boolean(busy)} onClick={() => void test(item)}>{t('测试')}</Button>
-          {item.source !== 'clash' ? <>
+          {item.source !== 'clash' && item.source !== 'subscription' ? <>
             <Button size='touch-sm' variant='outline' disabled={Boolean(busy)} onClick={() => setEditor({ item })}>{t('编辑')}</Button>
             <Button size='touch-sm' variant='ghost' className='text-destructive' disabled={Boolean(busy)} onClick={() => setDeleting(item)}>{t('删除')}</Button>
           </> : null}
@@ -170,7 +207,6 @@ export function ProxiesPage() {
     </div>)}
     {editor ? <ProxyEditorSheet item={editor.item} onClose={() => setEditor(null)} onSaved={setData} /> : null}
     {settingsOpen ? <ProxyTestSettingsSheet onClose={() => setSettingsOpen(false)} /> : null}
-    <ProxyRetirementDialog open={noticeOpen} onClose={() => setNoticeOpen(false)} t={t} scope={identity} />
     <Dialog open={Boolean(deleting)} onOpenChange={open => { if (!open && !busy) setDeleting(null) }}>
       <DialogContent className='max-w-[440px]'><DialogHeader><DialogTitle>{t('删除代理')}</DialogTitle></DialogHeader>
         <DialogBody>
@@ -186,7 +222,7 @@ export function ProxiesPage() {
 
 function addressOf(item: PoolItem): string {
   const proxy = item.resolved || item
-  if (!proxy.host || !proxy.port) return t('地址不完整')
+  if (!proxy.host || !proxy.port) return item.source === 'subscription' ? t('未分配端口') : t('地址不完整')
   const host = proxy.host.includes(':') && !proxy.host.startsWith('[') ? `[${proxy.host}]` : proxy.host
   return `${proxy.protocol || 'http'}://${host}:${proxy.port}`
 }
