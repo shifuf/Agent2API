@@ -1,13 +1,13 @@
 import * as React from 'react'
 import { confirmDialog } from '@ui'
 import { t } from '../i18n'
-import { bridge, errorMessage, host, notify, type RouteGroup, type RouteGroups } from './routing-types'
+import { bridge, errorMessage, host, notify, type RouteGroup, type RouteGroups, type RoutingGroupsAction, type RoutingGroupsBridge } from './routing-types'
 
 type GroupDraft = { group: RouteGroup; baseline: RouteGroup | null; revision: string }
 export const groupDirty = (draft: GroupDraft) => JSON.stringify(draft.group) !== JSON.stringify(draft.baseline)
 
 /** 按组保留草稿。新组在保存前不发布到模型目录。 */
-export function useRouteGroups(onSaved: () => void, onRemoved: () => void) {
+export function useRouteGroups(onSaved: () => void, onRemoved: () => void, api?: RoutingGroupsBridge) {
   const [data, setData] = React.useState<RouteGroups | null>(null)
   const [drafts, setDrafts] = React.useState<Record<string, GroupDraft>>({})
   const [selected, setSelected] = React.useState('')
@@ -34,10 +34,10 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void) {
   const load = React.useCallback(async () => {
     if (refs.current.busy || refs.current.loading) return
     refs.current.loading = true; setLoading(true); setError('')
-    try { apply(await bridge().getRoutingGroups()) }
+    try { apply(await (api || bridge()).getRoutingGroups()) }
     catch (failure) { setError(errorMessage(failure)) }
     finally { refs.current.loading = false; setLoading(false) }
-  }, [apply])
+  }, [apply, api])
   React.useEffect(() => { void load() }, [load])
   const reload = async () => {
     const id = refs.current.selected, draft = refs.current.drafts[id]
@@ -47,7 +47,7 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void) {
     })) return
     refs.current.loading = true; setLoading(true); setError('')
     try {
-      const next = await bridge().getRoutingGroups()
+      const next = await (api || bridge()).getRoutingGroups()
       apply(next, id)
       if (!next.groups.some(row => row.group.id === id)) setSelected('')
     } catch (failure) { setError(errorMessage(failure)) }
@@ -55,7 +55,8 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void) {
   }
   const create = (group: RouteGroup): boolean => {
     if (!data || refs.current.busy || refs.current.loading) return false
-    setDrafts(current => ({ ...current, [group.id]: { group, baseline: null, revision: data.newRevision } }))
+    if (refs.current.drafts[group.id]) { setSelected(group.id); return true }
+    setDrafts(current => ({ ...current, [group.id]: { group: { ...structuredClone(group), auto: false }, baseline: null, revision: data.newRevision } }))
     setSelected(group.id)
     return true
   }
@@ -71,13 +72,16 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void) {
   const save = async () => {
     const draft = refs.current.drafts[refs.current.selected]
     if (!draft || refs.current.busy || refs.current.loading || !groupDirty(draft)) return
-    if (!draft.group.members.some(member => member.included && member.accounts.length)
+    if (!draft.group.match?.some(pattern => pattern.trim()) && !draft.group.members.some(member => member.included && (member.group || member.accountScope === 'all' || member.accounts.length))
       && !await confirmDialog(t('此入口没有参与路由的账号。保存后请求将明确失败，不会回退全局或自动恢复参与名单。'), {
         title: t('保存空路由'), confirmText: t('仍然保存'), destructive: true,
       })) return
     refs.current.busy = true; setBusy(true); setError('')
     try {
-      apply(await bridge().saveRoutingGroup({ id: draft.group.id, group: draft.group, revision: draft.revision }), draft.group.id)
+      const cleanList = (values?: string[]) => values ? [...new Set(values.map(value => value.trim()).filter(Boolean))] : undefined
+      const group = { ...draft.group, match: cleanList(draft.group.match), rules: draft.group.rules?.map(rule => ({ ...rule,
+        agents: cleanList(rule.agents), folders: cleanList(rule.folders), exceptFolders: cleanList(rule.exceptFolders), intent: rule.intent?.trim() })) }
+      apply(await (api || bridge()).saveRoutingGroup({ id: group.id, group, revision: draft.revision }), group.id)
       notify(t('路由配置已保存，仅影响后续选路')); void host().wbApp?.refresh?.(); onSaved()
     } catch (failure) { setError(errorMessage(failure)) }
     finally { refs.current.busy = false; setBusy(false) }
@@ -89,7 +93,7 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void) {
     })) return
     refs.current.busy = true; setBusy(true); setError('')
     try {
-      if (draft.baseline) apply(await bridge().saveRoutingGroup({ id: draft.group.id, group: null, revision: draft.revision }), draft.group.id)
+      if (draft.baseline) apply(await (api || bridge()).saveRoutingGroup({ id: draft.group.id, group: null, revision: draft.revision }), draft.group.id)
       else setDrafts(current => { const next = { ...current }; delete next[draft.group.id]; return next })
       setSelected(''); onRemoved(); onSaved()
     } catch (failure) { setError(errorMessage(failure)) }
@@ -103,12 +107,34 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void) {
     } else setDrafts(current => ({ ...current, [draft.group.id]: { ...draft, group: structuredClone(draft.baseline!) } }))
     setError('')
   }
+  const action = async (payload: RoutingGroupsAction) => {
+    if (!data || refs.current.busy || refs.current.loading) return false
+    refs.current.busy = true; setBusy(true); setError('')
+    try {
+      const next = await (api || bridge()).routingGroupsAction({ ...payload, revision: data.collectionRevision || data.newRevision })
+      apply(next)
+      if (next.selectedId) setSelected(next.selectedId)
+      onSaved()
+      return true
+    } catch (failure) { setError(errorMessage(failure)); return false }
+    finally { refs.current.busy = false; setBusy(false) }
+  }
+  const toggle = async (id: string, enabled: boolean) => {
+    const draft = refs.current.drafts[id]
+    if (!draft || groupDirty(draft) || refs.current.busy || refs.current.loading) return
+    refs.current.busy = true; setBusy(true); setError('')
+    try {
+      apply(await (api || bridge()).saveRoutingGroup({ id, group: { ...draft.group, enabled }, revision: draft.revision }), id)
+      onSaved()
+    } catch (failure) { setError(errorMessage(failure)) }
+    finally { refs.current.busy = false; setBusy(false) }
+  }
   React.useEffect(() => {
     const listener = (event: BeforeUnloadEvent) => { if (Object.values(refs.current.drafts).some(groupDirty)) event.preventDefault() }
     window.addEventListener('beforeunload', listener)
     return () => window.removeEventListener('beforeunload', listener)
   }, [])
-  return { data, drafts, selected, select: setSelected, draft: drafts[selected], create, update, save, remove, discard, load, reload, busy, loading, error,
+  return { data, drafts, selected, select: setSelected, draft: drafts[selected], create, update, save, remove, discard, load, reload, action, toggle, busy, loading, error,
     dirtyCount: Object.values(drafts).filter(groupDirty).length }
 }
 export type RouteGroupEditor = ReturnType<typeof useRouteGroups>

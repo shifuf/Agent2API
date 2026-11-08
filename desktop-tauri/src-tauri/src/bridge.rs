@@ -370,6 +370,7 @@ const BRIDGE_JS: &str = r#"
     saveRoutingProfile: payload => call('PUT', '/api/routing/profile', payload || {}),
     getRoutingGroups: () => call('GET', '/api/routing/groups'),
     saveRoutingGroup: payload => call('PUT', '/api/routing/groups', payload),
+    routingGroupsAction: payload => call('POST', '/api/routing/groups/actions', payload),
     previewRouting: payload => call('POST', '/api/routing/preview', payload),
     getRoutingSticky: model => call('GET', '/api/routing/sticky' + toQuery({ model })),
     clearRoutingSticky: payload => call('POST', '/api/routing/sticky/clear', payload || {}),

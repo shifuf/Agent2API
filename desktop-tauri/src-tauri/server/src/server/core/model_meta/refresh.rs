@@ -119,6 +119,7 @@ pub async fn refresh(manual: bool, interval_ms: i64) -> Value {
 async fn fetch_and_reduce() -> Result<(Snapshot, usize), String> {
     let (api, models) = tokio::try_join!(fetch_json(API_URL), fetch_json(MODELS_URL))?;
     let built = reduce(&api, &models).ok_or_else(|| "models.dev 返回的模型条目为空".to_string())?;
+    crate::server::core::routing_metadata::update(&api, &models);
     let count = built.len();
     Ok((built, count))
 }

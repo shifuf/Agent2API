@@ -14,6 +14,7 @@
 
 export { Button, buttonVariants, type ButtonProps } from './button'
 export { Input } from './input'
+export { Combobox } from '@base-ui/react/combobox'
 export { Textarea } from './textarea'
 export {
   InputGroup,

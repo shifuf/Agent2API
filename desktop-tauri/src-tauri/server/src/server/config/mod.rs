@@ -74,6 +74,7 @@ mod mutations;
 pub(crate) use mutations::try_update_raw_field;
 pub(crate) mod parse;
 pub(crate) mod routing_groups;
+pub(crate) mod routing_rules;
 mod routing_profiles;
 pub(crate) mod routing_workspace;
 mod sanitize_config;
@@ -94,13 +95,15 @@ pub use sanitize_config::{
     set_sanitize_settings, SanitizePatch, SanitizeSettings, KEY_SANITIZE_PROVIDERS,
     KEY_SANITIZE_RULES, MAX_SANITIZE_PROVIDERS,
 };
-pub use routing_groups::{RoutingGroup, RoutingMember};
+pub use routing_groups::{RoutingAccountScope, RoutingGroup, RoutingMember};
+pub use routing_rules::{RoutingRule, RoutingTimeWindow};
 pub use routing_profiles::{
     normalize_model as normalize_routing_model, routing_profiles, routing_snapshot, save_routing_profile,
     settings_for_model as routing_settings_for_model,
     validate_shape as validate_routing_profile, RoutingProfile, RoutingProfiles, RoutingProviderScope,
     KEY_ROUTING_PROFILES,
 };
+pub(crate) use routing_profiles::from_raw as routing_profiles_from_raw;
 pub use types::*;
 pub use update_policy::{
     set_update_channels, update_beta, update_channels, UpdateChannels, UpdateChannelsPatch,

@@ -1,8 +1,9 @@
 //! 跨模型成员投影。运行时字段只存在于候选副本，不写入账号库。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use crate::server::config::{self, RoutingGroup, RoutingMember};
 use super::{account_store::AccountStore, capability, custom_providers, key_scope::{self, KeyScope}, models::model_id, providers, routing};
 
@@ -66,21 +67,29 @@ pub fn catalog_model(provider: &str, model: &str) -> Option<Value> {
 pub fn choices(store: &AccountStore) -> Vec<Value> {
     let accounts = store.routing_snapshot();
     let mut ids: Vec<_> = accounts.accounts.iter().map(|account| routing::provider_of(account).to_string()).collect();
-    ids.extend(providers::executable_provider_ids());
-    ids.extend(custom_providers::list().iter().filter_map(|provider| provider.get("id").and_then(Value::as_str).map(str::to_string)));
     ids.sort(); ids.dedup();
     let mut result = Vec::new();
     for provider in ids {
-        if !super::account_store::store_view::account_visible(&provider) { continue; }
+        if !provider_active(&provider) { continue; }
+        let provider_accounts: Vec<_> = accounts.accounts.iter()
+            .filter(|account| routing::provider_of(account) == provider).collect();
         let models = manifest(&provider);
         let mut seen = HashSet::new();
         for item in models {
             let model = model_id(&item);
             if model.is_empty() || !seen.insert(model.to_ascii_lowercase()) { continue; }
             if providers::images::model_is_image(&item) { continue; }
+            // New choices use the same account and Key-group eligibility as forwarding.
+            // Saved group members are projected separately so unavailable entries remain editable.
+            let account_count = provider_accounts.iter()
+                .filter(|account| member_account_unavailable(account, &model).is_none()).count();
+            if account_count == 0 { continue; }
+            let identity = super::routing_metadata::describe(&model);
             result.push(json!({ "provider": provider, "providerLabel": providers::label_of(&provider), "model": model,
                 "name": item.get("name").and_then(Value::as_str).unwrap_or(&model), "capabilities": capability::effective(&item),
-                "accountCount": accounts.accounts.iter().filter(|account| routing::provider_of(account) == provider).count() }));
+                "canonicalModel": identity.canonical_model, "developer": identity.developer,
+                "developerName": identity.developer_name, "family": identity.family,
+                "accountCount": account_count }));
         }
     }
     result
@@ -118,45 +127,163 @@ fn member_account_unavailable(account: &Value, upstream_model: &str) -> Option<&
 }
 
 pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>) -> GroupProjection {
+    let profiles = super::routing_discovery::effective_profiles(&config::routing_profiles(), accounts);
+    project_with_groups(group, &profiles.groups, accounts, needs, scope)
+}
+
+pub fn project_with_groups(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>) -> GroupProjection {
+    let mut providers: HashSet<String> = accounts.iter().map(|account| routing::provider_of(account).to_string()).collect();
+    for group in std::iter::once(group).chain(groups.values()) {
+        providers.extend(group.members.iter().filter(|member| member.group.is_empty()).map(|member| member.provider.clone()));
+    }
+    let active: HashSet<_> = providers.iter().filter(|id| provider_active(id)).cloned().collect();
+    let catalog = providers.into_iter().map(|id| { let models = manifest(&id); (id, models) }).collect();
+    project_catalog(group, groups, accounts, needs, scope, &catalog, &active)
+}
+
+pub fn dynamic_member_id(provider: &str, model: &str) -> String {
+    let hash = format!("{:x}", Sha256::digest(format!("{}\0{}", provider.to_lowercase(), model.to_lowercase()).as_bytes()));
+    format!("match-{}", &hash[..24])
+}
+
+fn members_from_catalog(group: &RoutingGroup, catalog: &BTreeMap<String, Vec<Value>>) -> Vec<RoutingMember> {
+    let mut result = group.members.clone();
+    let mut named: HashSet<_> = result.iter().filter(|member| member.group.is_empty())
+        .map(|member| (member.provider.to_lowercase(), member.model.to_lowercase())).collect();
+    let patterns: Vec<_> = group.match_patterns.iter().filter_map(|pattern| config::routing_groups::compile_pattern(pattern).ok()).collect();
+    if patterns.is_empty() { return result; }
+    for (provider, models) in catalog {
+        for item in models {
+            let model = model_id(item);
+            if model.is_empty() || providers::images::model_is_image(item) || named.contains(&(provider.to_lowercase(), model.to_lowercase())) { continue; }
+            if !patterns.iter().any(|pattern| pattern.is_match(&format!("{provider}/{model}"))) { continue; }
+            named.insert((provider.to_lowercase(), model.to_lowercase()));
+            result.push(RoutingMember {id:dynamic_member_id(provider, &model), provider:provider.clone(), model,
+                included:true, accounts:Vec::new(), group:String::new(), account_scope:config::RoutingAccountScope::All,
+                weight:1, effort:String::new(), levels:Vec::new(), fast:false});
+            if result.len() >= 4096 { return result; }
+        }
+    }
+    result
+}
+
+/// Expanded editor members are derived and must never replace saved patterns.
+pub fn expanded_members(group: &RoutingGroup, accounts: &[Value]) -> Vec<RoutingMember> {
+    let providers: HashSet<_> = accounts.iter().map(|account| routing::provider_of(account).to_string()).collect();
+    let catalog = providers.into_iter().map(|id| { let models = manifest(&id); (id, models) }).collect();
+    members_from_catalog(group, &catalog)
+}
+
+struct ResolvedMember {
+    member: RoutingMember,
+    path: Vec<String>,
+    policies: Vec<Value>,
+    first_token: u64,
+    patience: i64,
+}
+
+fn resolve_members(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>, catalog: &BTreeMap<String, Vec<Value>>, blocked: &mut Vec<Value>) -> Vec<ResolvedMember> {
+    struct Walker<'a> {
+        groups: &'a BTreeMap<String, RoutingGroup>, catalog: &'a BTreeMap<String, Vec<Value>>,
+        output: Vec<ResolvedMember>, blocked: &'a mut Vec<Value>, visits: usize,
+    }
+    impl Walker<'_> {
+        fn walk(&mut self, group: &RoutingGroup, group_path: &[String], path: &[String], policies: &[Value], first_token: u64, patience: i64) {
+            if self.visits >= 8192 { return; }
+            self.visits += 1;
+            let reason = if !group.enabled || group.hidden { Some("路由组已停用") }
+                else if group_path.len() >= config::routing_groups::MAX_NESTING || group_path.contains(&group.id) { Some("路由组嵌套过深或循环引用") }
+                else { None };
+            if let Some(reason) = reason {
+                self.blocked.push(json!({"id":path.first().unwrap_or(&group.id),"memberPath":path,"state":"unavailable","reason":reason}));
+                return;
+            }
+            let mut group_path = group_path.to_vec(); group_path.push(group.id.clone());
+            let first_token = if group.first_token > 0 { group.first_token } else { first_token };
+            let patience = if group.patience != 0 { group.patience } else { patience };
+            let members = members_from_catalog(group, self.catalog);
+            let picked = members.iter().find(|member| member.id == group.pick).or_else(|| members.first()).map(|member| member.id.clone());
+            for member in members {
+                if !member.included || group.strategy == "manual" && picked.as_deref() != Some(member.id.as_str()) { continue; }
+                let mut member_path = path.to_vec(); member_path.push(member.id.clone());
+                let mut policy_path = policies.to_vec();
+                policy_path.push(json!({"groupId":group.id,"memberId":member.id,"strategy":group.strategy,
+                    "weight":member.weight,"pick":group.pick,"firstToken":group.first_token,"patience":group.patience,
+                    "sticky":group.sticky,"sink":group.sink}));
+                if !member.group.is_empty() {
+                    if let Some(child) = self.groups.get(&member.group) {
+                        self.walk(child, &group_path, &member_path, &policy_path, first_token, patience);
+                    } else {
+                        self.blocked.push(json!({"id":member.id,"memberId":member_path[0],"memberPath":member_path,"state":"unavailable","reason":"嵌套路由组不存在"}));
+                    }
+                } else {
+                    self.output.push(ResolvedMember {member,path:member_path,policies:policy_path,first_token,patience});
+                }
+                if self.output.len() >= 4096 { return; }
+            }
+        }
+    }
+    let mut walker = Walker {groups,catalog,output:Vec::new(),blocked,visits:0};
+    walker.walk(group, &[], &[], &[], group.first_token, group.patience);
+    walker.output
+}
+
+fn project_catalog(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>, manifests: &BTreeMap<String, Vec<Value>>, active: &HashSet<String>) -> GroupProjection {
     let mut result = GroupProjection::default();
+    if !key_scope::allows_model(scope, &group.model) {
+        result.blocked.push(json!({"id":group.id,"state":"unavailable","reason":"网关 Key 不允许此路由组模型"}));
+        return result;
+    }
     let by_id: HashMap<_, _> = accounts.iter().filter_map(|account| routing::account_id(account).map(|id| (id, account))).collect();
-    let manifests: HashMap<_, _> = group.members.iter().map(|member| member.provider.clone()).collect::<HashSet<_>>()
-        .into_iter().map(|id| { let items = manifest(&id); (id, items) }).collect();
-    for member in group.members.iter().filter(|member| member.included) {
+    for resolved in resolve_members(group, groups, manifests, &mut result.blocked) {
+        let member = &resolved.member;
+        let outer = &resolved.path[0];
         let item = manifests.get(&member.provider).and_then(|items| items.iter().find(|item| model_id(item).eq_ignore_ascii_case(&member.model))).cloned();
         let reason = if !key_scope::allows_provider(scope, &member.provider) { Some("网关 Key 不允许此提供商".to_string()) }
-            else if !provider_active(&member.provider) { Some("提供商当前不可用".to_string()) }
+            else if !active.contains(&member.provider) { Some("提供商当前不可用".to_string()) }
             else if let Some(item) = &item {
                 if providers::images::model_is_image(item) { Some("生图模型不能用于对话路由".to_string()) }
                 else { needs.reason(item) }
             } else { Some("模型已不在提供商目录中，配置保留但不参与转发".to_string()) };
         let actual = item.as_ref().map(model_id).unwrap_or_else(|| member.model.clone());
         if let Some(reason) = reason {
-            result.blocked.push(json!({ "id": member.id, "memberId": member.id, "provider": member.provider,
+            result.blocked.push(json!({ "id": member.id, "memberId": outer, "memberPath": resolved.path, "provider": member.provider,
                 "providerLabel": providers::label_of(&member.provider), "model": actual, "name": actual, "state": "unavailable", "reason": reason }));
             continue;
         }
-        if member.accounts.is_empty() {
-            result.blocked.push(json!({ "id": member.id, "memberId": member.id, "provider": member.provider, "model": actual,
+        let selected: Vec<&str> = if member.account_scope == config::RoutingAccountScope::All {
+            accounts.iter().filter(|account| routing::provider_of(account) == member.provider).filter_map(routing::account_id).collect()
+        } else { member.accounts.iter().map(String::as_str).collect() };
+        if selected.is_empty() {
+            result.blocked.push(json!({ "id": member.id, "memberId": outer, "memberPath": resolved.path, "provider": member.provider, "model": actual,
                 "name": actual, "state": "excluded", "reason": "该成员没有参与账号" }));
         }
-        for id in &member.accounts {
-            let Some(account) = by_id.get(id.as_str()).filter(|account| routing::provider_of(account) == member.provider) else {
-                result.blocked.push(json!({ "id": id, "memberId": member.id, "provider": member.provider, "model": actual,
+        for id in selected {
+            let Some(account) = by_id.get(id).filter(|account| routing::provider_of(account) == member.provider) else {
+                result.blocked.push(json!({ "id": id, "memberId": outer, "memberPath": resolved.path, "provider": member.provider, "model": actual,
                     "name": id, "state": "unavailable", "reason": "参与账号已移除或不属于此提供商" }));
                 continue;
             };
             if let Some(reason) = member_account_unavailable(account, &actual) {
-                result.blocked.push(json!({ "id": id, "memberId": member.id, "provider": member.provider, "model": actual,
+                result.blocked.push(json!({ "id": id, "memberId": outer, "memberPath": resolved.path, "provider": member.provider, "model": actual,
                     "name": account.get("name").and_then(Value::as_str).unwrap_or(id), "state": "unavailable", "reason": reason }));
                 continue;
             }
             let mut account = (*account).clone();
-            account["routingCandidateId"] = candidate_key(&member.id, id).into();
-            account["routingMemberId"] = member.id.clone().into();
+            account["routingCandidateId"] = candidate_key(&resolved.path.join("/"), id).into();
+            account["routingMemberId"] = outer.clone().into();
+            account["routingMemberPath"] = json!(resolved.path);
+            account["routingStrategyPath"] = json!(resolved.policies);
             account["routingModel"] = actual.clone().into();
+            account["routingWeight"] = member.weight.into();
+            account["routingEffort"] = member.effort.clone().into();
+            account["routingLevels"] = json!(member.levels);
+            account["routingFast"] = member.fast.into();
+            account["routingFirstToken"] = resolved.first_token.into();
+            account["routingPatience"] = resolved.patience.into();
             account["routingPriority"] = result.accounts.len().into();
             result.accounts.push(account);
+            if result.accounts.len() >= 10_000 { return result; }
         }
     }
     result
@@ -164,6 +291,7 @@ pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, s
 
 pub fn validate_members(group: &RoutingGroup, old: Option<&RoutingGroup>, accounts: &[Value]) -> Result<(), String> {
     for member in &group.members {
+        if !member.group.is_empty() { continue; }
         let previous = old.and_then(|group| group.members.iter().find(|item| item.id == member.id && item.provider == member.provider && item.model == member.model));
         match catalog_model(&member.provider, &member.model) {
             Some(item) if providers::images::model_is_image(&item) => return Err("对话路由组不能加入生图模型".into()),
@@ -182,22 +310,39 @@ pub fn validate_members(group: &RoutingGroup, old: Option<&RoutingGroup>, accoun
 /// Shared by the public catalog and gateway-key choices. An explicitly selected
 /// member is available only when at least one of its own accounts can use it.
 pub fn available_member_model(member: &RoutingMember, accounts: &[std::sync::Arc<Value>], scope: Option<&KeyScope>) -> Option<Value> {
-    if !member.included || !key_scope::allows_provider(scope, &member.provider) || !provider_active(&member.provider)
-        || !member.accounts.iter().any(|id| accounts.iter().any(|account|
-            routing::account_id(account) == Some(id) && routing::provider_of(account) == member.provider
-                && member_account_unavailable(account, &member.model).is_none())) {
+    if !member.group.is_empty() || !member.included || !key_scope::allows_provider(scope, &member.provider) || !provider_active(&member.provider)
+        || !accounts.iter().any(|account| routing::provider_of(account) == member.provider
+            && (member.account_scope == config::RoutingAccountScope::All || routing::account_id(account).is_some_and(|id| member.accounts.iter().any(|selected| selected == id)))
+            && member_account_unavailable(account, &member.model).is_none()) {
         return None;
     }
     catalog_model(&member.provider, &member.model).filter(|item| !providers::images::model_is_image(item))
 }
 
 pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut Vec<Value>) {
-    let accounts = store.routing_snapshot();
-    for group in config::routing_profiles().groups.values() {
-        if !key_scope::allows_model(scope, &group.model) || data.iter().any(|item| model_id(item).eq_ignore_ascii_case(&group.model)) { continue; }
-        let members: Vec<_> = group.members.iter()
-            .filter_map(|member| available_member_model(member, &accounts.accounts, scope)).collect();
+    let accounts: Vec<Value> = store.routing_snapshot().accounts.iter().map(|account| (**account).clone()).collect();
+    let profiles = super::routing_discovery::effective_profiles(&config::routing_profiles(), &accounts);
+    let mut ordered: Vec<_> = profiles.groups.values().collect();
+    ordered.sort_by_key(|group| profiles.group_order.iter().position(|id| id == &group.id).unwrap_or(usize::MAX));
+    let mut hide = HashSet::new();
+    for group in ordered {
+        if !group.enabled || group.hidden || !key_scope::allows_model(scope, &group.model) { continue; }
+        let projection = project_with_groups(group, &profiles.groups, &accounts, &RequestNeeds::default(), scope);
+        let mut seen = HashSet::new();
+        let members: Vec<_> = projection.accounts.iter().filter_map(|account| {
+            let provider = routing::provider_of(account);
+            let model = candidate_model(account)?;
+            if !seen.insert((provider.to_string(), model.to_string())) { return None; }
+            catalog_model(provider, model)
+        }).collect();
         if members.is_empty() { continue; }
+        if group.unlists {
+            hide.extend(projection.accounts.iter().filter_map(candidate_model).map(|model| model.to_ascii_lowercase()));
+            for member in &group.members {
+                if let Some(child) = profiles.groups.get(&member.group) { hide.insert(child.model.to_ascii_lowercase()); }
+            }
+        }
+        if data.iter().any(|item| model_id(item).eq_ignore_ascii_case(&group.model)) { continue; }
         let mut item = json!({ "id": group.model, "name": group.name, "object": "model", "owned_by": "routing-group", "kind": "chat", "routing_group": true });
         for (key, public) in [("supportsToolCall", "supports_tool_call"), ("supportsImages", "supports_images"),
             ("supportsVideo", "supports_video"), ("supportsReasoning", "supports_reasoning")] {
@@ -208,6 +353,14 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
                 item[public] = members.iter().filter_map(|item| item.get(key).and_then(Value::as_u64)).min().map(Value::from).unwrap_or(Value::Null);
             }
         }
+        if group.context > 0 { item["max_input_tokens"] = group.context.into(); }
+        else if group.context == 0 {
+            if let Some(context) = members.iter().filter_map(|item| item.get("maxInputTokens").and_then(Value::as_u64)).max() {
+                item["max_input_tokens"] = context.into();
+            }
+        }
+        if !group.levels.is_empty() { item["reasoning_levels"] = json!(group.levels); }
+        item["family"] = group.family.clone().into();
         let mut modalities = vec!["text"];
         if item["supports_images"] == true { modalities.push("image"); }
         if item["supports_video"] == true { modalities.push("video"); }
@@ -216,6 +369,7 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
         item["is_default"] = false.into();
         data.push(item);
     }
+    data.retain(|item| !hide.contains(&model_id(item).to_ascii_lowercase()));
 }
 
 #[cfg(test)]
@@ -241,5 +395,88 @@ mod key_group_tests {
     fn legacy_accounts_keep_working_but_accounts_without_credentials_are_hidden() {
         assert_eq!(member_account_unavailable(&json!({"enabled":true,"hasCredentials":true}), "upstream-a"), None);
         assert!(member_account_unavailable(&json!({"enabled":true}), "upstream-a").is_some());
+    }
+
+    fn group(id: &str, members: Value) -> RoutingGroup {
+        serde_json::from_value(json!({"id":id,"name":id,"model":id,"strategy":"order","sticky":"auto","members":members})).unwrap()
+    }
+
+    fn fixture() -> (Vec<Value>, BTreeMap<String, Vec<Value>>, HashSet<String>) {
+        let accounts = vec![json!({"id":"a","provider":"relay","enabled":true,"hasCredentials":true}),
+            json!({"id":"b","provider":"relay","enabled":true,"hasCredentials":true,"keyGroup":{"enabled":true,"models":["other"]}}),
+            json!({"id":"c","provider":"other","enabled":true,"hasCredentials":true})];
+        let catalog = BTreeMap::from([("relay".into(), vec![json!({"id":"chat","supportsToolCall":true})]),
+            ("other".into(), vec![json!({"id":"chat","supportsToolCall":true})])]);
+        let active = HashSet::from(["relay".into(), "other".into()]);
+        (accounts, catalog, active)
+    }
+
+    #[test]
+    fn explicit_empty_accounts_stay_empty_while_all_scope_respects_credentials() {
+        let (accounts, catalog, active) = fixture();
+        let mut g = group("outer", json!([{"id":"leaf","provider":"relay","model":"chat","included":true,"accounts":[]}]));
+        let project = |g: &RoutingGroup| project_catalog(g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active);
+        assert!(project(&g).accounts.is_empty());
+        g.members[0].account_scope = config::RoutingAccountScope::All;
+        let result = project(&g);
+        assert_eq!(result.accounts.len(), 1);
+        assert_eq!(result.accounts[0]["id"], "a");
+    }
+
+    #[test]
+    fn nested_path_keeps_leaf_parameters_and_provider_restrictions() {
+        let (accounts, catalog, active) = fixture();
+        let mut child = group("child", json!([{"id":"leaf","provider":"relay","model":"chat","included":true,"accountScope":"all","weight":3,"effort":"high","fast":true}]));
+        child.strategy = "weight".into();
+        child.first_token = 30;
+        let outer = group("outer", json!([{"id":"branch","group":"child","included":true,"weight":2}]));
+        let groups = BTreeMap::from([("child".into(), child)]);
+        let result = project_catalog(&outer, &groups, &accounts, &RequestNeeds::default(), None, &catalog, &active);
+        assert_eq!(result.accounts.len(), 1);
+        let leaf = &result.accounts[0];
+        assert_eq!(leaf["routingMemberPath"], json!(["branch","leaf"]));
+        assert_eq!(leaf["routingMemberId"], "branch");
+        assert_eq!(leaf["routingCandidateId"], "branch/leaf\0a");
+        assert_eq!(leaf["routingEffort"], "high");
+        assert_eq!(leaf["routingFirstToken"], 30);
+        assert_eq!(leaf["routingStrategyPath"][1]["strategy"], "weight");
+        let scope = KeyScope::provider_only("other");
+        assert!(project_catalog(&outer, &groups, &accounts, &RequestNeeds::default(), Some(&scope), &catalog, &active).accounts.is_empty());
+    }
+
+    #[test]
+    fn group_authorization_uses_public_name_and_each_leaf_provider() {
+        let (accounts, catalog, active) = fixture();
+        let mut g = group("public-route", json!([]));
+        g.match_patterns = vec!["*/*".into()];
+        let make_scope = |models: Value, providers: Value| {
+            let raw = json!({"apiKeys":[{"id":"test","name":"test","key":"test-key", "enabled":true,
+                "allowedModels":models,"allowedProviders":providers}]});
+            let entries = super::super::api_keys::entries_from(raw.as_object().unwrap());
+            KeyScope::from_entry(&entries[0])
+        };
+        let scope = make_scope(json!(["public-route"]), json!(["relay"]));
+        let found = project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), Some(&scope), &catalog, &active);
+        assert_eq!(found.accounts.len(), 1);
+        assert_eq!(found.accounts[0]["id"], "a");
+        assert_eq!(found.accounts[0]["routingModel"], "chat");
+        let raw_model_only = make_scope(json!(["chat"]), json!(["relay"]));
+        assert!(project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), Some(&raw_model_only), &catalog, &active).accounts.is_empty());
+    }
+
+    #[test]
+    fn patterns_follow_catalog_and_disabled_or_cyclic_groups_do_not_expand() {
+        let (accounts, catalog, active) = fixture();
+        let mut g = group("outer", json!([]));
+        g.match_patterns = vec!["relay/*".into()];
+        let projected = project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active);
+        assert_eq!(projected.accounts.len(), 1);
+        let stable = projected.accounts[0]["routingCandidateId"].clone();
+        assert_eq!(project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active).accounts[0]["routingCandidateId"], stable);
+        g.enabled = false;
+        assert!(project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active).accounts.is_empty());
+        let g = group("loop", json!([{"id":"again","group":"loop","included":true}]));
+        let all = BTreeMap::from([("loop".into(), g.clone())]);
+        assert!(project_catalog(&g, &all, &accounts, &RequestNeeds::default(), None, &catalog, &active).accounts.is_empty());
     }
 }

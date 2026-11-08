@@ -60,3 +60,18 @@ test('deduplicated candidates remain searchable by provider IDs and all associat
   }
   assert.equal(catalogHelpers.modelCandidates(directory, sources, saved, { origin: 'directory', manufacturer: 'maker-b', search: 'Saved public name' })[0].existing, saved[0])
 })
+
+test('the custom developer offers configured upstreams and saved models without including the public directory', () => {
+  const saved = [{ id: 'my-custom', name: 'Saved alias', enabled: true, bindings: [{ provider: 'channel-a', model: 'private' }] }]
+  const sources = [
+    { id: 'channel-a', name: 'Channel A', accountCount: 1, models: [{ id: 'private' }, { id: 'my-custom' }, { id: 'Private' }] },
+    { id: 'empty', name: 'No accounts', accountCount: 0, models: [{ id: 'ghost' }] },
+  ]
+  const filter = { origin: '', manufacturer: 'custom', search: '' }
+  const rows = catalogHelpers.modelCandidates(providers, sources, saved, filter)
+  assert.deepEqual(rows.map(row => row.model.id), ['private', 'my-custom', 'Private'])
+  assert.deepEqual(rows[1].origins, ['upstream', 'custom'])
+  assert.equal(rows[1].existing, saved[0])
+  assert.deepEqual(catalogHelpers.modelCandidates(providers, sources, saved, { ...filter, search: 'SAVED alias' }).map(row => row.model.id), ['my-custom'])
+  assert.deepEqual(catalogHelpers.modelCandidates(providers, sources, saved, { ...filter, manufacturer: 'maker-b' }).map(row => row.model.name), ['Shared B'])
+})

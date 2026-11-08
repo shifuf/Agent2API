@@ -39,6 +39,7 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
     let legacy_global_participation = config::routing_workspace::global_accounts::legacy_snapshot(profiles.global.as_ref(), &account_state.accounts);
     drop(guard);
     let accounts = routing::accounts_of(&account_snapshot);
+    let profiles = std::sync::Arc::new(crate::server::core::routing_discovery::effective_profiles(&profiles, &accounts));
     let all_providers = available_providers(&accounts);
     let eligible = model.as_deref().map(providers::catalog::forwarding_providers)
         .unwrap_or_else(|| all_providers.clone());
@@ -85,6 +86,7 @@ fn workspace_json(state: &ServerState, model: Option<String>) -> Value {
         "legacyGlobalParticipation": legacy_global_participation,
         "configuredModels": profiles.models.keys().collect::<Vec<_>>(),
         "models": models,
+        "modelsByProvider": providers::catalog::models_by_provider(&store),
         "profile": effective,
         "inheritedProfile": inherited_profile,
         "providers": provider_rows,

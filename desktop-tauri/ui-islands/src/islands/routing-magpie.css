@@ -1,0 +1,178 @@
+.routing-magpie-dashboard { display: flex; flex: 1; flex-direction: column; gap: 18px; min-width: 0; min-height: 0; padding: 18px 20px; overflow-y: auto; }
+.routing-magpie-toolbar, .routing-magpie-toolbar-actions, .routing-magpie-tags, .routing-magpie-card footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.routing-magpie-toolbar { justify-content: space-between; }
+.routing-dashboard-heading { gap: 14px; }
+.routing-dashboard-title, .routing-dashboard-section-title { display: flex; align-items: center; gap: 8px; }
+.routing-dashboard-title h2 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
+.routing-dashboard-heading p { margin-top: 5px; line-height: 1.6; }
+.routing-dashboard-section-title h3 { font-size: 13px; font-weight: 600; }
+.routing-magpie-toolbar p, .routing-magpie-discovery p, .routing-magpie-description { font-size: 12px; color: var(--ui-text-2, var(--text-3)); overflow-wrap: anywhere; }
+.routing-magpie-toolbar-actions > button { border-radius: 8px; }
+.routing-magpie-cards { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%,340px),1fr)); gap: 14px; align-items: stretch; }
+.routing-magpie-cards:empty { display: none; }
+.routing-magpie-card, .routing-magpie-discovery { min-width: 0; border: 1px solid var(--ui-border, var(--border)); background: var(--ui-surface, var(--surface)); border-radius: 14px; }
+.routing-magpie-card { display: flex; flex-direction: column; gap: 13px; padding: 16px; box-shadow: 0 1px 2px #00000003; }
+.routing-magpie-card header { display: flex; align-items: center; gap: 10px; }
+.routing-group-symbol, .routing-dialog-symbol, .routing-nested-symbol, .routing-source-all { display: inline-flex; flex: none; align-items: center; justify-content: center; background: var(--ui-surface-2, var(--surface-2)); color: var(--ui-text-2, var(--text-2)); border: 1px solid var(--ui-border, var(--border)); }
+.routing-group-symbol { width: 36px; height: 36px; border-radius: 10px; }
+.routing-nested-symbol, .routing-source-all { width: 24px; height: 24px; border-radius: 7px; }
+.routing-magpie-card-title { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding: 0; border: 0; background: transparent; box-shadow: none; text-align: left; cursor: pointer; color: inherit; }
+.routing-magpie-card-title:hover { background: transparent; color: var(--ui-primary, var(--primary)); }
+.routing-magpie-card-title:focus-visible { outline: 2px solid var(--ui-primary, var(--primary)); outline-offset: 4px; border-radius: 4px; }
+.routing-magpie-card-title strong { max-width: 100%; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routing-magpie-card-title code { max-width: 100%; padding: 1px 5px; border-radius: 5px; background: var(--ui-surface-2, var(--surface-2)); font-size: 10.5px; line-height: 1.5; color: var(--ui-text-2, var(--text-3)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.routing-card-state { display: flex; align-items: center; gap: 7px; flex: none; }
+.routing-card-state > span { color: var(--ui-text-2, var(--text-3)); font-size: 10.5px; white-space: nowrap; }
+.routing-card-state > span[data-enabled] { color: var(--ui-success, #39805b); }
+.routing-magpie-tags { gap: 7px 10px; color: var(--ui-text-2, var(--text-3)); font-size: 11px; }
+.routing-magpie-tags [data-slot='badge'] { font-size: 10.5px; }
+.routing-magpie-description { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.6; margin: -2px 0 0; }
+.routing-card-members { display: flex; flex-direction: column; gap: 9px; padding: 12px; border-radius: 10px; background: var(--ui-surface-2, var(--surface-2)); }
+.routing-card-members-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 1px; font-size: 10.5px; color: var(--ui-text-2, var(--text-3)); }
+.routing-card-member { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.routing-card-member > div { flex: 1; min-width: 0; }
+.routing-card-member b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.routing-card-member small { display: block; margin-top: 1px; font-size: 10.5px; color: var(--ui-text-2, var(--text-3)); }
+.routing-card-member[data-excluded] { opacity: .6; }
+.routing-member-state { flex: none; font-size: 10px; color: var(--ui-text-2, var(--text-3)); }
+.routing-card-more { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 6px 0 0; border: 0; border-top: 1px solid var(--ui-border, var(--border)); background: transparent; box-shadow: none; font-size: 11px; color: var(--ui-text-2, var(--text-3)); cursor: pointer; }
+.routing-card-more:hover { background: transparent; color: var(--ui-primary, var(--primary)); }
+.routing-card-no-members { padding: 10px 0; font-size: 11px; color: var(--ui-text-2, var(--text-3)); line-height: 1.6; }
+.routing-magpie-card footer { margin-top: auto; justify-content: space-between; gap: 4px; padding-top: 2px; }
+.routing-magpie-card footer > button { border-radius: 7px; }
+.routing-card-tools { display: flex; align-items: center; gap: 2px; }
+.routing-card-tool-divider { width: 1px; height: 14px; margin: 0 3px; background: var(--ui-border, var(--border)); }
+.routing-magpie-inline, .routing-magpie-discovery label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.routing-magpie-inline { cursor: pointer; color: var(--ui-text-2, var(--text-3)); }
+.routing-magpie-discovery { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: center; padding: 14px 16px; }
+.routing-discovery-copy { flex: 1 1 300px; min-width: 0; }
+.routing-discovery-copy b { font-size: 12px; font-weight: 600; }
+.routing-discovery-copy p { margin: 6px 0 0; line-height: 1.6; }
+.routing-discovery-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; color: var(--ui-text-2, var(--text-3)); }
+.routing-magpie-discovery small { font-size: 10.5px; }
+.routing-dashboard-filter { gap: 12px; }
+.routing-dashboard-filter > .routing-search-field { flex: 1; max-width: 430px; }
+.routing-dashboard-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 240px; padding: 28px 20px; border: 1px dashed var(--ui-border, var(--border)); border-radius: 14px; text-align: center; }
+.routing-dashboard-empty [data-slot='empty'] { padding: 0; min-height: 0; }
+.routing-dashboard-empty > p { max-width: 360px; margin: 0; font-size: 12px; line-height: 1.6; color: var(--ui-text-2, var(--text-3)); }
+.routing-magpie-template-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.routing-magpie-template-list p { grid-column: 1/-1; font-size: 12px; }
+
+/* Shared by the desktop and mobile editors. */
+.routing-magpie-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.routing-magpie-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12px; }
+.routing-magpie-field input, .routing-magpie-field select, .routing-magpie-field textarea { width: 100%; min-width: 0; }
+.routing-magpie-field select { min-height: 30px; border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 4px 8px; }
+.routing-magpie-details { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.routing-magpie-details summary { cursor: pointer; font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+.routing-magpie-details p { font-size: 11px; color: var(--text-muted,var(--muted-foreground)); margin: 8px 0; }
+.routing-magpie-rules { display: flex; flex-direction: column; gap: 10px; }
+.routing-magpie-rule { border: 1px solid var(--border); border-radius: 8px; padding: 10px; min-width: 0; }
+.routing-magpie-rule header { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.routing-magpie-rule header strong { flex: 1; font-size: 12px; }
+.routing-magpie-member-settings { padding: 10px; border-top: 1px solid var(--border); }
+.routing-magpie-levels { display: flex; flex-wrap: wrap; gap: 8px; }
+.routing-magpie-levels label { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.routing-magpie-full { grid-column: 1/-1; }
+.routing-magpie-mobile { padding: 12px; min-width: 0; }
+.routing-magpie-mobile .routing-magpie-dashboard { padding: 0; overflow: visible; }
+.routing-magpie-mobile-editor { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.routing-config-card .routing-magpie-fields { grid-template-columns: minmax(0,1fr); }
+.routing-magpie-mobile-editor .routing-magpie-card header strong { min-width: 0; overflow-wrap: anywhere; }
+
+/* Source-aware route creation keeps the same compact dialog on both clients. */
+.routing-create-dialog { width: min(680px,calc(100vw - 32px)); border-radius: 16px; }
+.routing-create-dialog [data-slot='dialog-header'] { padding: 20px 48px 18px 22px; gap: 12px; }
+.routing-dialog-symbol { width: 42px; height: 42px; border-radius: 12px; }
+.routing-dialog-heading { min-width: 0; }
+.routing-dialog-heading [data-slot='dialog-title'] { font-size: 16px; line-height: 1.4; }
+.routing-dialog-heading [data-slot='dialog-description'] { margin-top: 4px; font-size: 11.5px; line-height: 1.6; color: var(--ui-text-2, var(--text-3)); }
+.routing-create-dialog [data-slot='dialog-body'] { gap: 14px; padding: 18px 22px; }
+.routing-create-dialog [data-slot='dialog-footer'] { gap: 8px; padding: 14px 22px; background: var(--ui-surface-2, var(--surface-2)); }
+.routing-create-dialog input { min-height: 40px; border-radius: 9px; }
+.routing-create-dialog .routing-group-form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.routing-create-dialog .routing-group-form label { font-size: 12px; }
+.routing-create-dialog .routing-config-note { font-size: 11.5px; line-height: 1.7; color: var(--ui-text-2, var(--text-3)); }
+.routing-create-types { align-self: stretch; width: 100%; }
+.routing-create-types > [data-slot='segmented-item'] { flex: 1; justify-content: center; min-height: 34px; }
+.routing-create-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--ui-text-2, var(--text-3)); }
+.routing-model-selection { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.routing-picker-tools { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); align-items: end; gap: 12px; }
+.routing-source-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.routing-source-field > label { font-size: 12px; }
+.routing-source-trigger { width: 100%; height: 40px; min-height: 40px; padding: 6px 10px; border-radius: 9px; }
+.routing-source-label { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; text-align: left; }
+.routing-source-label > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.routing-source-label [data-slot='badge'] { flex: none; font-size: 10px; }
+.routing-source-options { width: var(--anchor-width); max-width: calc(100vw - 32px); border-radius: 10px; }
+.routing-source-options [data-slot='select-item'] { min-height: 40px; padding: 7px 9px; border-radius: 7px; }
+.routing-source-options .routing-source-label > span:nth-child(2) { white-space: normal; overflow-wrap: anywhere; }
+.routing-search-field { position: relative; display: flex; align-items: center; min-width: 0; }
+.routing-search-field > .ico, .routing-search-field > svg { position: absolute; left: 11px; color: var(--ui-text-2, var(--text-3)); pointer-events: none; }
+.routing-search-field > input { width: 100%; min-width: 0; min-height: 40px; padding-left: 34px; border-radius: 9px; }
+.routing-picker-caption { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; font-size: 10.5px; line-height: 1.6; color: var(--ui-text-2, var(--text-3)); }
+.routing-picker-caption > span:last-child { flex: none; }
+.routing-picker-list { display: flex; flex: none; flex-direction: column; min-height: 130px; max-height: min(34vh,340px); gap: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--ui-border, var(--border)); border-radius: 11px; }
+.routing-group-picker-row { display: flex; gap: 8px; align-items: center; padding: 9px 2px; min-width: 0; }
+.routing-group-picker-row > div { flex: 1; min-width: 0; }
+.routing-group-picker-row b, .routing-group-picker-row small { display: block; overflow-wrap: anywhere; }
+.routing-group-picker-row small { font-size: 11px; }
+.routing-picker-list .routing-choice-row { display: flex; flex: none; align-items: center; gap: 11px; min-width: 0; min-height: 65px; padding: 11px 12px; margin: 0; border: 0; border-bottom: 1px solid var(--ui-border, var(--border)); border-radius: 0; font-weight: 400; cursor: pointer; }
+.routing-picker-list .routing-choice-row:last-child { border-bottom: 0; }
+.routing-picker-list .routing-choice-row:hover { background: var(--ui-surface-2, var(--surface-2)); }
+.routing-picker-list .routing-choice-row[data-checked] { background: var(--ui-primary-soft, var(--primary-soft)); color: inherit; box-shadow: inset 2px 0 var(--ui-primary, var(--primary)); }
+.routing-picker-list .routing-choice-copy { display: block; flex: 1; min-width: 0; }
+.routing-choice-copy > b { display: block; font-size: 12.5px; font-weight: 550; line-height: 1.5; overflow-wrap: anywhere; }
+.routing-choice-copy > code { display: block; margin-top: 2px; font-size: 10.5px; line-height: 1.5; font-weight: 400; color: var(--ui-text-2, var(--text-3)); overflow-wrap: anywhere; }
+.routing-choice-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.routing-choice-meta:empty { display: none; }
+.routing-choice-meta > span { padding: 1px 5px; border: 1px solid var(--ui-border, var(--border)); border-radius: 4px; font-size: 9.5px; line-height: 1.4; color: var(--ui-text-2, var(--text-3)); }
+.routing-choice-accounts { flex: none; margin-left: auto; font-size: 10.5px; color: var(--ui-text-2, var(--text-3)); }
+.routing-model-sources { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 10px; margin-top: 6px; }
+.routing-model-sources > span { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--ui-text-2, var(--text-3)); }
+.routing-model-sources .model-brand { width: 16px; height: 16px; border-radius: 4px; font-size: 8px; }
+.routing-picker-empty { display: flex; align-items: center; flex-direction: column; justify-content: center; gap: 9px; min-height: 170px; padding: 24px; text-align: center; color: var(--ui-text-2, var(--text-3)); }
+.routing-picker-empty > b { font-size: 13px; font-weight: 500; color: var(--ui-text, var(--text)); }
+.routing-picker-empty > p { max-width: 380px; margin: 0; font-size: 11.5px; line-height: 1.7; }
+.routing-model-selection-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 0; color: var(--ui-text-2, var(--text-3)); font-size: 11px; }
+.routing-selected-models { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-height: 110px; overflow-y: auto; }
+.routing-selected-model { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 3px 3px 5px; border: 1px solid var(--ui-border, var(--border)); border-radius: 8px; background: var(--ui-surface-2, var(--surface-2)); }
+.routing-selected-model > span:not(.model-brand):not([data-slot='badge']) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; }
+.routing-selected-model .model-brand { width: 19px; height: 19px; border-radius: 5px; font-size: 9px; }
+.routing-selected-model > button { flex: none; height: 22px; width: 22px; border-radius: 6px; }
+
+.routing-page-bar.routing-workbench-bar { gap: 10px 16px; padding: 10px 12px; border: 1px solid var(--ui-border, var(--border)); border-radius: 12px; background: var(--ui-surface, var(--surface)); }
+.routing-workbench-bar .routing-page-actions { flex-wrap: wrap; gap: 6px; }
+.routing-overview-tabs { display: flex; align-items: center; gap: 3px; padding: 3px; border-radius: 8px; background: var(--ui-surface-2, var(--surface-2)); }
+.routing-overview-tabs > button { border-radius: 6px; font-size: 11.5px; }
+.routing-overview-tabs > button[data-active] { background: var(--ui-surface, var(--surface)); color: var(--ui-text, var(--text)); box-shadow: 0 1px 3px #0000000a; }
+.routing-workbench-bar .routing-page-policy:empty { display: none; }
+
+@media (max-width: 767px) {
+  .routing-magpie-dashboard { padding: 12px; gap: 14px; }
+  .routing-magpie-fields { grid-template-columns: minmax(0,1fr); }
+  .routing-magpie-full { grid-column: auto; }
+  .routing-magpie-card { padding: 14px; }
+  .routing-magpie-card footer button { min-height: 34px; }
+  .routing-magpie-toolbar-actions { width: 100%; gap: 6px; }
+  .routing-magpie-toolbar-actions > button { flex: 1; min-height: 34px; padding-inline: 9px; font-size: 11.5px; }
+  .routing-magpie-field select { min-height: 40px; }
+  .routing-magpie-discovery { padding: 13px; }
+  .routing-discovery-copy { flex-basis: 100%; }
+  .routing-discovery-meta { flex: 1; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+  .routing-dashboard-filter { align-items: center; }
+  .routing-dashboard-filter > .routing-search-field { flex-basis: 220px; max-width: none; }
+  .routing-create-dialog [data-slot='dialog-header'] { padding: 17px 40px 15px 16px; }
+  .routing-create-dialog [data-slot='dialog-body'], .routing-create-dialog [data-slot='dialog-footer'] { padding: 15px 16px; }
+  .routing-create-dialog .routing-group-form { grid-template-columns: minmax(0,1fr); }
+  .routing-picker-tools { grid-template-columns: minmax(0,1fr); gap: 10px; }
+  .routing-picker-list { max-height: min(32vh,320px); }
+  .routing-picker-list .routing-choice-row { gap: 9px; padding: 10px; }
+  .routing-picker-list .routing-choice-copy { min-width: 0; }
+  .routing-choice-accounts { max-width: 52px; text-align: right; font-size: 10px; }
+  .routing-create-summary { flex-basis: 100%; }
+  .routing-page-bar.routing-workbench-bar { padding: 9px; }
+  .routing-workbench-bar .routing-page-actions { width: 100%; margin-left: 0; }
+  .routing-workbench-bar .routing-page-actions > button { min-height: 34px; }
+  .routing-overview-tabs { margin-right: auto; }
+}

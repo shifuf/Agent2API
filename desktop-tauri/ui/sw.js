@@ -31,7 +31,7 @@
  * 填的表单会被一次自动刷新清掉。页面侧在设置页给「重启以更新」按钮。
  */
 
-const CACHE = 'agent2api-mobile-7a6e9717eaca'
+const CACHE = 'agent2api-mobile-627d54700b6e'
 
 /** 预缓存的外壳文件（相对 SW 所在目录，即 `ui/` 根） */
 const SHELL = [

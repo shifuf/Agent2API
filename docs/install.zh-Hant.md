@@ -11,12 +11,22 @@
 本分支對整個閘道使用手動模型目錄。既有帳號、金鑰和上游清單會保留，但上游模型不會自動對外開放；升級後請先新增對外模型，已建立的路由群組繼續保留。
 
 1. 在帳號頁點擊「新增自訂渠道」（也可從「新增帳號 → API 範本」進入），選擇 API 提供商或範本，填寫 API 位址並新增命名 Key 群組。每組可填寫多把 Key，Key 與「支援的模型」分區管理；可以先儲存尚未選擇模型的渠道，稍後再設定。依群組取得模型或點擊「取得全部群組模型」後，需選擇並確認模型；取得清單不會自動選取，未選擇模型或已停用的群組不轉發。
-2. 在「模型管理 → 新增模型」獨立建立模型，依開發者或廠商搜尋目錄候選，自動填入對外模型 ID、名稱等資料，也可修改資料或使用自訂 ID；建立時不要求選擇渠道，新模型預設停用。儲存資料後，在清單中開啟「關聯渠道」，為每個渠道選擇一個上游模型並「儲存關聯」，最後啟用模型。一個對外模型可關聯多個渠道，桌面端和手機端均可管理。
+2. 在「模型管理 → 新增模型」選擇開發者或廠商，再搜尋並選擇對外模型 ID，也可直接填寫自訂 ID 和備註。新增視窗僅保留廠商、模型 ID 和備註，模型資料從目錄自動填入。建立時不要求選擇渠道，新模型預設停用。儲存後，在清單中開啟「關聯渠道」，先從下拉選單選擇有帳號的提供商，再為該提供商選擇一個上游模型；切換提供商會保留已選關聯。點選「儲存關聯」後啟用模型。一個對外模型可關聯多個渠道，桌面端和手機端均可管理。
 3. 在「閘道 Key」分別建立、編輯或檢視 Key，透過清單中的「可用範圍」獨立選擇允許的渠道和對外模型；選擇面板支援搜尋、已選預覽和確認。兩項同時設定按交集生效；未選擇渠道表示全部渠道，未選擇模型表示全部已發布模型。刪除渠道會保留 Key 的原有限制。
 4. 在「代理」頁管理訂閱並安裝或匯入核心。訂閱節點可用於帳號和代理池；停止核心或停用節點後，綁定的請求不會自動改成直連。
 
 新增和編輯渠道使用置中表單，Key 編輯與模型選擇分別在旁側面板中進行；確認後套用模型選擇。模型候選預載入自 PublicProviderConf 的 `dist/all.json`，依開發商整理並依 ID 去重，快取一小時；也可選擇既有帳號的上游模型並修改為自訂 ID，或搜尋並編輯既有自訂模型。停用、封存、未關聯渠道或沒有可用上游的模型不會出現在用戶端可呼叫模型清單及閘道 Key 候選中；渠道候選僅顯示已啟用且有可用帳號的渠道。失效的舊 Key 限制另行顯示並保留，可手動移除。點擊「更新模型目錄」可立即重新整理，網路異常時保留快取；選取目錄候選或僅儲存模型資料不會自動發布模型。
 
+
+### 路由群組與直接模型選擇
+
+新增模型時，選定開發者後直接在「對外模型 ID」輸入框搜尋並選取模型；也可輸入自訂 ID。候選整合已快取的廠商目錄及已連接帳號，合併既有模型與重複 ID。
+
+「路由」頁辨識廠商，提供同模型跨渠道群組建議。建議預設不發布；明確啟用自動群組，或儲存並啟用自訂群組後才對外開放。可隱藏、還原、複製、排序、匯入及匯出群組；副本和匯入群組預設停用。匯出不含帳號 ID 或本機目錄規則，匯入後請檢查渠道與帳號範圍再啟用。
+
+策略涵蓋順序、輪詢、智慧、最少用量、消耗節奏、免費、速度、權重、手動及提供商優先。成員可指定帳號或動態納入渠道帳號，並支援巢狀群組與模型比對模式。規則支援 token 數、圖片、推理等級、用戶端、意圖、壓縮請求、時區及目錄。意圖與自動推理等級需要分類器，會增加上游呼叫；逾時或無效結果會回退一般選路。
+
+預演可輸入請求條件，查看命中規則、首選與跳過原因，不送出請求或推進輪詢。首內容逾時僅於尚未輸出內容時切換上游；嚴格綁定不更換帳號。新群組可設定暫態錯誤等待預算，舊群組保留既有等待行為。手機端從「更多 → 路由」管理群組。停用或無可用帳號的群組不會列入用戶端與 Key 模型候選；Key 模型與渠道限制始終生效。
 
 ## 目錄
 
@@ -236,6 +246,76 @@ services:
 
 從原始碼建置：複製本儲存庫後執行 `docker compose up -d --build --pull never`。Dockerfile 依 lock 檔安裝相依套件並重建前端，最終映像只包含閘道和面板，不含 Node / Rust 工具鏈。
 
+### 從上游容器遷移到此 fork
+
+先等待此 fork 的 **Docker package** 建置成功，並確認目標 `sha-<完整 40 位提交 SHA>` 映像可拉取。儲存庫中有工作流程檔案，不代表映像已發布。以下假設 Linux 上有以 `docker run` 建立的 `agent2api`、連接埠 `3065:3065`、`AGENT2API_PROXY_HOME=/data`，以及 bind mount `/www/server/panel/data:/data`。路徑僅為範例，先核對實際掛載，不可從目前目錄推測原本的 `./data`：
+
+```bash
+docker inspect --format '{{.Config.Image}}{{println}}{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}' agent2api
+```
+
+保留整個資料目錄，包括 `agent2api.db`、可能存在的 `-wal` / `-shm`、`account.key`、`update-token.key`、`cloud-sync.key`、外掛及舊設定。若舊容器設有 `AGENT2API_ACCOUNT_KEY`，必須保留原值；有效環境金鑰優先於 `account.key`，不可重新產生替代金鑰。下方僅將此環境變數存入受保護的檔案，不在終端顯示。其他自訂環境變數、連接埠、網路及額外掛載也要沿用。
+
+新版使用獨立目錄中的副本，原目錄留給舊容器。`/www/server/panel/data` 可能同時屬於伺服器面板，不可整體移動、覆寫或清空。副本與備份可能包含其他檔案，請將遷移目錄和金鑰檔案當作敏感備份保管。在伺服器的 **root Bash** 執行並替換映像佔位符；先拉取映像，再停止舊容器、複製及打包，任一步驟失敗即停止。請預留副本與封存檔的空間；停機時間包含複製、備份和新版啟動時間。
+
+```bash
+set -euo pipefail
+umask 077
+NEW_IMAGE='ghcr.io/shifuf/agent2api:sha-<PUBLISHED_FULL_40_CHARACTER_SHA>'
+SOURCE_DATA='/www/server/panel/data'
+test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' agent2api)" = "$SOURCE_DATA"
+test -d "$SOURCE_DATA"
+docker pull "$NEW_IMAGE"
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+MIGRATION_DIR="/opt/agent2api/migrations/$STAMP"
+FORK_DATA="$MIGRATION_DIR/data"
+OLD_CONTAINER="agent2api-before-fork-$STAMP"
+test ! -e "$MIGRATION_DIR"
+mkdir -p "$FORK_DATA"
+chmod 700 "$MIGRATION_DIR"
+printf '%s\n' "$OLD_CONTAINER" > "$MIGRATION_DIR/old-container-name.txt"
+docker inspect --format 'container={{.Id}} image={{.Config.Image}} imageId={{.Image}}' agent2api > "$MIGRATION_DIR/container-image.txt"
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' agent2api |
+  sed -n '/^AGENT2API_ACCOUNT_KEY=/p' > "$MIGRATION_DIR/account-key.env"
+
+docker stop --time 60 agent2api
+cp -a -- "$SOURCE_DATA/." "$FORK_DATA/"
+tar --numeric-owner -cpf "$MIGRATION_DIR/data-before-fork.tar" -C "$FORK_DATA" .
+tar -tf "$MIGRATION_DIR/data-before-fork.tar" >/dev/null
+docker rename agent2api "$OLD_CONTAINER"
+docker run -d --name agent2api --restart unless-stopped \
+  -p 3065:3065 \
+  --env-file "$MIGRATION_DIR/account-key.env" \
+  -e AGENT2API_SELF_UPDATE=0 \
+  -e AGENT2API_CAPTCHA_ENABLED=1 \
+  -v "$FORK_DATA:/data" \
+  "$NEW_IMAGE"
+printf 'old_container=%s\nmigration_dir=%s\n' "$OLD_CONTAINER" "$MIGRATION_DIR"
+```
+
+保存最後輸出的 `migration_dir`。若複製或打包失敗，舊容器尚未改名，可執行 `docker start agent2api` 恢復服務，再處理備份問題；不要繼續替換命令。保留舊容器也會保留可寫層：若曾透過面板原地更新，這比重新拉取舊映像標籤更能準確還原原程式。
+
+啟動後檢查 `/health`，並在面板核對帳號、憑證狀態、網關 Key、外掛和路由。目前分支採手動對外模型目錄：帳號與 Key 保留，但上游模型不會自動發布。請新增對外模型、關聯渠道並啟用，盡量沿用客戶端原模型 ID，再用原 Key 驗證實際請求。健康檢查通過不代表業務已連續恢復；遷移包含模型設定與短暫停機。之後升級請持續掛載輸出目錄內的 `data`，並維持 `AGENT2API_SELF_UPDATE=0`。
+
+回復舊版時，將遷移目錄替換為剛才記錄的路徑。先停止新版，再啟動保留的舊容器；舊容器仍使用未被新版升級的原目錄，因此不必覆寫任何資料庫：
+
+```bash
+set -euo pipefail
+MIGRATION_DIR='/opt/agent2api/migrations/<MIGRATION_TIMESTAMP>'
+OLD_CONTAINER=$(cat "$MIGRATION_DIR/old-container-name.txt")
+docker container inspect "$OLD_CONTAINER" >/dev/null
+STAMP=$(date +%Y%m%d-%H%M%S)
+if docker container inspect agent2api >/dev/null 2>&1; then
+  docker stop --time 60 agent2api
+  docker rename agent2api "agent2api-fork-stopped-$STAMP"
+fi
+docker rename "$OLD_CONTAINER" agent2api
+docker start agent2api
+```
+
+保留舊容器、原資料目錄、`data-before-fork.tar` 和 `account-key.env`，不要同時執行新舊實例。若選擇在原目錄就地升級，回復時必須還原升級前的完整資料及原金鑰，不能只換舊映像：例如 `3.3.0-beta.5/.6` 的 schema 22 會升為 `3.4.2` 的 schema 24，舊程式拒絕開啟較新版資料庫。Compose 部署也應先停止服務、備份並複製到獨立目錄，再修改映像、資料掛載及 `AGENT2API_SELF_UPDATE`，並保留原 Compose 設定供回復。
+
 ### 記憶體佔用
 
 映像裡的閘道（Linux 目標）已內建 jemalloc 記憶體配置器。長時間執行、多帳號並行轉發時，它比系統內建的配置器更不容易產生記憶體碎片、RSS 也不容易緩慢成長 —— 這正是小記憶體機器最常被拖垮或 OOM 的一環。
@@ -392,7 +472,7 @@ Release 裡的 `Agent2API-<版本>.ipa` **預設是未簽名包** —— 蘋果�
 | 新增、編輯、刪除對外模型，選擇渠道與上游模型，啟停模型 | 修改來源模型對應、思考等級、能力位 |
 | 複製閘道 Key、啟停 Key | 新建 Key、設定可用範圍白名單 |
 | 管理與測試 HTTP / SOCKS5 代理及訂閱節點，同步 Clash Verge 端點，下載、匯入和啟停核心 | 新增、編輯、重新整理代理訂閱及匯入訂閱檔案 |
-| 啟停定時任務、改間隔 | 改連接埠、路由、重試、逾時、資料保留 |
+| 啟停定時任務、改間隔；建立、編輯、預演與管理路由群組 | 改連接埠、全域重試、全域逾時、資料保留 |
 | 助手快捷查詢（餘額 / 重複模型 / 今日用量 / 限流帳號） | 助手的自由對話與工具呼叫 |
 | 檢視 Agent 接管狀態、還原 | 改寫用戶端設定（手機讀不到本機檔案） |
 

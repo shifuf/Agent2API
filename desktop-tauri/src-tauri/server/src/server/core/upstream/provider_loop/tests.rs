@@ -336,6 +336,40 @@ async fn a_real_413_response_is_sent_once_and_handed_back() {
     );
 }
 
+#[tokio::test]
+async fn explicit_adapter_stop_survives_the_outer_group_retry_layer() {
+    struct StoppingAdapter;
+    impl ProviderAdapter for StoppingAdapter {
+        fn kind(&self) -> ProviderKind { ProviderKind::WorkBuddy }
+        fn list_models(&self) -> Vec<Value> { Vec::new() }
+        fn build_chat_request(&self, account: &Value, body: &Value, headers: &axum::http::HeaderMap)
+            -> Result<crate::server::core::providers::adapter::ChatRequestPlan, GatewayError> {
+            adapter_for(self.kind()).build_chat_request(account, body, headers)
+        }
+        fn ensure_access_token<'a>(&'a self, store: &'a crate::server::core::account_store::AccountStore, id: &'a str)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<String, GatewayError>> + Send + 'a>> {
+            adapter_for(self.kind()).ensure_access_token(store, id)
+        }
+        fn refresh_models<'a>(&'a self, store: &'a crate::server::core::account_store::AccountStore, id: &'a str, force: bool)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output=crate::server::core::providers::adapter::ModelRefreshOutcome> + Send + 'a>> {
+            adapter_for(self.kind()).refresh_models(store, id, force)
+        }
+        fn classify_error(&self, status: u16, _body: &Value) -> UpstreamErrorClass { fatal(status) }
+        fn retry_decision_async<'a>(&'a self, _status: u16, _body: &'a Value, _attempt: usize, _budget: usize)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output=RetryDecision> + Send + 'a>> {
+            Box::pin(async { RetryDecision::Stop { reason: "upstream explicitly stopped".into() } })
+        }
+    }
+    let (transport, hits, task) = mock_upstream(503, "application/json", "{\"error\":\"stop\"}").await;
+    let result = send_with_retry(&StoppingAdapter, &transport, &mut RetryBudget::new(3), None,
+        &Arc::new(RequestTelemetry::new()), false, None, None).await;
+    task.abort();
+    let failure = result.err().expect("503 is not a success");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(failure.error.retry_forbidden);
+    assert!(!super::super::route_content::transient(&failure.error));
+}
+
 #[test]
 fn a_deterministic_404_skips_the_in_place_resend() {
     // issue #255 的形状：OfficeAce 对目录里有、套餐里没有的名字回

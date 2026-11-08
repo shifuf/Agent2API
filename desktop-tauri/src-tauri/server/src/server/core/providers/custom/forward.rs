@@ -20,7 +20,9 @@
 //!   - 请求体：客户端的字节**原样**出去（send_body 已做过系统提示词/脱敏两层
 //!     处理），唯一的改写是 `model` 字段（映射 alias → 上游真名）与按需注入
 //!     `reasoning_effort`（思考等级绑定）—— 都是「客户端语义」的修正，不是
-//!     协议翻译。**唯一的例外**是记录显式开了 `clientEmulation`
+//!     协议翻译。Grok 工具 schema 的缺省/null required 会补为空数组
+//!     （见 `tool_schema`），以兼容把缺省值序列化成 null 的中转。
+//!     另一个例外是记录显式开了 `clientEmulation`
 //!     （见 [`emulation`]：OpenCode Zen 的免费档要求请求体是「智能体形态」，
 //!     要补两个桩工具）—— 那是 opt-in 的形态伪装，默认一个字节都不动；
 //!   - 响应：上游永远以 `stream:true` 被请求（编排层入口已强制注入），流式
@@ -258,6 +260,7 @@ pub(crate) async fn forward(
     // 与最终发出去的字节同源（模型名换了不影响 messages，两种取法等价，
     // 但同源更不容易在将来改坏）
     quirks.apply_emulation_to_body(&mut outbound, &base_url);
+    super::tool_schema::normalize_grok_tools(&mut outbound);
     let payload = serde_json::to_string(&outbound)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
     // ── 出站头（三段拼装，顺序不可换）────────────────────────────
@@ -529,7 +532,7 @@ async fn forward_translated(
     let api_key = api_key.trim();
     let has_key = !api_key.is_empty();
 
-    let (url, headers, payload) = match kind {
+    let (url, headers, mut payload) = match kind {
         OutboundKind::Responses => {
             let url = format!(
                 "{}/responses{}",
@@ -604,6 +607,7 @@ async fn forward_translated(
             (url, headers, payload)
         }
     };
+    super::tool_schema::normalize_grok_tools(&mut payload);
     let payload = serde_json::to_string(&payload)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
 

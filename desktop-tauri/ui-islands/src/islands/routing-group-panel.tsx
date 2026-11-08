@@ -1,18 +1,20 @@
 import * as React from 'react'
-import { Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Empty, InputGroup, InputGroupAddon, InputGroupInput, Label, confirmDialog } from '@ui'
+import { Button, Collapsible, CollapsibleContent, CollapsibleTrigger, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Empty, InputGroup, InputGroupAddon, InputGroupInput, confirmDialog } from '@ui'
 import { t } from '../i18n'
 import type { AccountRecord, AccountSorting } from './accounts-shared'
 import { displayNameOf } from './accounts-domain'
 import { RoutingDragOverlay, reorderRoute, useRoutingDrag, type RoutingDrop } from './routing-drag'
 import { RoutingGroupDialog, RoutingMemberAccounts, RoutingMemberDialog } from './routing-group-dialogs'
 import { groupDirty, type RouteGroupEditor } from './routing-group-state'
-import { RoutingSelect } from './routing-select'
 import { RoutingActions } from './routing-canvas-controls'
 import { RoutingCanvasLayout, RoutingDraftFooter } from './routing-canvas-layout'
 import { RoutingMemberCard } from './routing-member-card'
 import { routingAccountSections, routingCollapsedSections, useRoutingExpansion } from './routing-account-sections'
 import { IconButton, RouteIcon } from './routing-ui'
 import { notify, type RouteGroup, type RouteMember } from './routing-types'
+import { RoutingGroupOptions } from './routing-group-options'
+import { RoutingPreviewPanel } from './routing-preview-panel'
+import { useRoutingPreviewMembers } from './routing-preview-members'
 
 export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting, now, onAccount, onSort }: {
   editor: RouteGroupEditor; accounts: AccountRecord[]; reserved: string[]; baseUrl: string; sorting?: AccountSorting | null; now: number
@@ -22,6 +24,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   const [accountMember, setAccountMember] = React.useState<string | null>(null)
   const { setOpened, sectionOpen, setSectionOpen, search, setSearch, query, isOpen } = useRoutingExpansion()
   const group = editor.draft?.group
+  const preview = useRoutingPreviewMembers(group, editor.data)
   const locked = editor.busy || editor.loading
   const update = (mutate: (group: RouteGroup) => void) => editor.update(mutate)
   const drop = ({ kind, provider, id, target, after }: RoutingDrop) => update(next => {
@@ -38,10 +41,17 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   if (!group || !editor.draft) return <Empty>{t('选择路由入口')}</Empty>
   const active = group.members.filter(member => member.included)
   const sections = routingAccountSections(group.members, accounts, member => member.provider, member => member.included)
+  for (const key of ['empty', 'disabled'] as const) {
+    const nested = sections[key].filter(member => member.group)
+    sections[key] = sections[key].filter(member => !member.group)
+    for (const member of nested) sections[member.included ? 'active' : 'excluded'].push(member)
+  }
+  for (const members of Object.values(sections)) members.sort((a, b) => group.members.indexOf(a) - group.members.indexOf(b))
   const orderingPeers = (id: string) => (Object.values(sections).find(members => members.some(member => member.id === id)) || []).filter(member => member.included)
   const dirty = groupDirty(editor.draft)
   const label = (provider: string) => editor.data?.catalog.find(choice => choice.provider === provider)?.providerLabel || provider
-  const name = (member: RouteMember) => editor.data?.catalog.find(choice => choice.provider === member.provider && choice.model.toLowerCase() === member.model.toLowerCase())?.name || member.model
+  const name = (member: RouteMember) => member.group ? editor.drafts[member.group]?.group.name || member.group
+    : editor.data?.catalog.find(choice => choice.provider === member.provider && choice.model.toLowerCase() === member.model.toLowerCase())?.name || member.model
   const editMember = (id: string, mutate: (member: RouteMember) => void) => update(next => { const member = next.members.find(item => item.id === id); if (member) mutate(member) })
   const move = (id: string, direction: number) => {
     const peers = orderingPeers(id), target = peers[peers.findIndex(member => member.id === id) + direction]
@@ -67,12 +77,13 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   const visible = sections.active.filter(matches)
   const expandable = [...sections.active, ...routingCollapsedSections.flatMap(({ key }) => sectionOpen[key] ? sections[key] : [])].filter(matches)
   const allOpen = expandable.length > 0 && expandable.every(member => isOpen(member.id))
-  const renderMember = (member: RouteMember) => <RoutingMemberCard key={member.id} member={member} accounts={accounts} name={name(member)} label={label(member.provider)}
+  const renderMember = (member: RouteMember) => <RoutingMemberCard key={member.id} member={member} accounts={accounts} name={name(member)} label={member.group ? t('嵌套路由组') : label(member.provider)}
     index={active.indexOf(member)} first={orderingPeers(member.id)[0]?.id === member.id} last={orderingPeers(member.id).at(-1)?.id === member.id}
     open={isOpen(member.id)} locked={locked} query={query} drag={drag}
     onOpen={open => setOpened(current => ({ ...current, [member.id]: open }))} onJoin={on => editMember(member.id, next => { next.included = on })}
     onMove={direction => move(member.id, direction)} onAccounts={() => setAccountMember(member.id)} onMoveAccount={(id, direction) => moveAccount(member, id, direction)}
     onToggleAccount={id => editMember(member.id, next => { next.accounts = next.accounts.includes(id) ? next.accounts.filter(key => key !== id) : [...next.accounts, id] })}
+    onChange={patch => editMember(member.id, next => Object.assign(next, patch))}
     onAccount={onAccount} sorting={sorting} now={now} onSort={() => onSort(member.provider)} />
   const selectedAccountMember = group.members.find(member => member.id === accountMember)
   const members = <section className='routing-groups-column'>
@@ -106,7 +117,7 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
   return <>
     <RoutingCanvasLayout title={t('自定义路由组')} groups={members} note={t('只影响这个路由成员，不改变账号启用状态，也不影响其他模型。新增账号需要手动加入。')}>
       <div className='routing-config-card' data-route-source>
-        <div className='routing-config-card-scroll'>
+      <div className='routing-config-card-scroll'>
           <header className='routing-config-head'><div><span className='routing-config-eyebrow'>{t('跨模型组合')}</span><h2>{group.name}</h2></div>
             <RoutingActions label={t('路由配置操作')} actions={[
               { label: t('编辑路由组'), icon: 'settings', disabled: locked, onClick: () => setDialog('edit') },
@@ -117,13 +128,11 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
           {group.description ? <p className='routing-config-note'>{group.description}</p> : null}
           <div className='routing-config-alias'><span>{t('对外模型 ID')}</span><code title={group.model}>{group.model}</code>
             <IconButton name='copy' title={t('复制')} onClick={() => void copy(group.model)} /></div>
-          <div className='routing-config-rules'>
-            <div className='routing-rule-field'><Label>{t('路由策略')}</Label><RoutingSelect label={t('路由策略')} value={group.strategy} disabled={locked}
-              options={[[ 'order', t('顺序优先') ], ['rotate', t('负载均衡')], ['provider', t('成员内轮询')]]} onChange={value => update(next => { next.strategy = value })} /></div>
-            <div className='routing-rule-field'><Label>{t('会话粘滞')}</Label><RoutingSelect label={t('会话粘滞')} value={group.sticky} disabled={locked}
-              options={[[ 'auto', t('自动') ], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('关闭')]]} onChange={value => update(next => { next.sticky = value })} /></div>
-          </div>
-          <p className='routing-config-note'>{group.sticky === 'auto' || group.sticky === 'session' ? t('同一会话优先保持模型与账号，不可用时才顺延。') : t('每轮重新选路，不保留跨请求的账号绑定。')}</p>
+          <RoutingGroupOptions group={group} choices={editor.data?.catalog || []} groups={Object.values(editor.drafts).map(draft => draft.group)} expandedMembers={preview.expandedMembers} disabled={locked} update={update} />
+          <RoutingPreviewPanel model={group.model} group={group} preview={preview.preview} onOpenScope={model => {
+            const found = Object.values(editor.drafts).find(draft => draft.group.model === model)
+            if (found) editor.select(found.group.id)
+          }} />
           <Button variant='link' size='sm' className='routing-group-example' onClick={() => setDialog('example')}>{t('调用示例')}</Button>
         </div>
         <RoutingDraftFooter dirty={dirty} busy={editor.busy} disabled={locked} error={editor.error} onDiscard={editor.discard} onSave={() => void editor.save()} />
@@ -132,7 +141,8 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
     <RoutingDragOverlay state={drag.state} />
     {dialog === 'edit' ? <RoutingGroupDialog group={group} reserved={reserved} onSave={group => update(next => Object.assign(next, group))} onClose={() => setDialog(null)} /> : null}
     {dialog === 'add' ? <RoutingMemberDialog choices={(editor.data?.catalog || []).filter(choice => choice.model.toLowerCase() !== group.model.toLowerCase()
-      && !Object.values(editor.drafts).some(draft => draft.group.model.toLowerCase() === choice.model.toLowerCase()))} members={group.members} accounts={accounts} onAdd={members => update(next => { next.members.push(...members) })} onClose={() => setDialog(null)} /> : null}
+      && !Object.values(editor.drafts).some(draft => draft.group.model.toLowerCase() === choice.model.toLowerCase()))} members={group.members} accounts={accounts} groups={Object.values(editor.drafts).filter(draft => draft.baseline).map(draft => draft.group)} currentId={group.id}
+      onAdd={members => update(next => { next.members.push(...members) })} onClose={() => setDialog(null)} /> : null}
     {selectedAccountMember ? <RoutingMemberAccounts member={selectedAccountMember} accounts={accounts} onSave={ids => editMember(selectedAccountMember.id, member => { member.accounts = ids })} onClose={() => setAccountMember(null)} /> : null}
     {dialog === 'example' ? <Dialog open onOpenChange={open => { if (!open) setDialog(null) }}><DialogContent>
       <DialogHeader><DialogTitle>{t('调用示例')}</DialogTitle></DialogHeader><DialogBody><p className='text-sm text-muted-foreground'>{t('保存路由后，在客户端填写此模型 ID。密钥使用你自己的网关 Key。')}</p><pre className='routing-group-code'>{snippet}</pre></DialogBody>

@@ -51,15 +51,31 @@ fs.mkdirSync(out, { recursive: true });
 const apiKey = `smoke-${randomUUID()}`;
 const results = { runId, binary, steps: [], consoleErrors: [], pageErrors: [], failedRequests: [], responseErrors: [], screenshots: [] };
 const publicCatalog = { providers: [
-  { id: 'maker-a', name: 'Maker A', models: [{ id: 'Alpha/Latest', name: 'Alpha Latest', kind: 'chat' }, { id: 'shared', name: 'Shared A', kind: 'chat' }] },
+  { id: 'maker-a', name: 'Maker A', models: [{ id: 'Alpha/Latest', name: 'Alpha Latest', kind: 'chat', type: 'chat', icon: 'deepseek', family: 'alpha', modelCard: { limit: { context: 8192 }, modalities: { input: ['text', 'image'] }, toolCall: true } }, { id: 'shared', name: 'Shared A', kind: 'chat' }] },
   { id: 'maker-b', name: 'Maker B', models: [{ id: 'shared', name: 'Shared B', kind: 'chat' }] },
+  { id: 'deepseek', name: 'DeepSeek', models: [] },
+  { id: 'alims-intl', name: 'Model Studio International', models: [] },
 ], sourceUrl: 'https://raw.githubusercontent.com/ThinkInAIXYZ/PublicProviderConf/refs/heads/dev/dist/all.json', fetchedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stale: false };
 let directoryRequests = 0;
-const mockCatalog = async context => context.route('**/api/models/public-catalog', route => {
-  directoryRequests++;
-  const refreshed = route.request().method() === 'POST';
-  return route.fulfill({ json: { success: true, data: { ...publicCatalog, stale: refreshed, ...(refreshed ? { error: 'upstream unavailable' } : {}) } } });
-});
+const longUpstreamName = 'LongUpstreamDisplayName'.repeat(6);
+const mockCatalog = async context => {
+  await context.route('**/api/models/public-catalog', route => {
+    directoryRequests++;
+    const refreshed = route.request().method() === 'POST';
+    return route.fulfill({ json: { success: true, data: { ...publicCatalog, stale: refreshed, ...(refreshed ? { error: 'upstream unavailable' } : {}) } } });
+  });
+  // Custom channels currently expose IDs only. Exercise the optional display name
+  // supplied by other provider catalogs without requiring a real provider login.
+  await context.route('**/api/models/catalog', async route => {
+    // Saves also return a fresh catalog, so decorate both read and write responses.
+    const response = await route.fetch();
+    const json = await response.json();
+    for (const source of json.data?.sources || []) {
+      for (const model of source.models) if (model.id === 'upstream-b') model.name = longUpstreamName;
+    }
+    return route.fulfill({ response, json });
+  });
+};
 const serverLog = fs.openSync(path.join(out, 'server.log'), 'a');
 const mock = http.createServer((request, response) => {
   const key = request.headers.authorization || '';
@@ -91,8 +107,8 @@ let browser;
 let desktop;
 let mobile;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-const api = async (url, body) => {
-  const response = await fetch(`${base}${url}`, { method: body ? 'POST' : 'GET', headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+const api = async (url, body, method = body ? 'POST' : 'GET') => {
+  const response = await fetch(`${base}${url}`, { method, headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const result = await response.json();
   assert(response.ok && result.success !== false, `${url}: ${JSON.stringify(result)}`);
   return result.data ?? result;
@@ -118,6 +134,7 @@ const step = async (name, work, page = desktop) => {
     if (page) {
       await screenshot(page, `failed-${results.steps.length}`).catch(() => {});
       fs.writeFileSync(path.join(out, `failed-${results.steps.length}.txt`), await page.locator('body').innerText().catch(() => ''));
+      fs.writeFileSync(path.join(out, `failed-${results.steps.length}-aria.txt`), await page.locator('body').ariaSnapshot().catch(() => ''));
     }
     console.error(`FAIL ${name}: ${error}`);
   }
@@ -158,13 +175,22 @@ try {
 
   await step('standalone model creation works without any configured account or channel', async () => {
     await desktop.getByRole('button', { name: '添加模型', exact: true }).click();
-    await desktop.getByRole('combobox', { name: '开发者 / 厂商', exact: true }).selectOption('maker-a');
-    await desktop.getByRole('button', { name: '从目录或上游选择', exact: true }).click();
-    await desktop.getByRole('button', { name: 'Maker A / Alpha/Latest', exact: true }).click();
+    assert.equal(await desktop.locator('#managed-model-name, #managed-model-icon, #managed-model-group, #managed-model-type, .models-card-fields').count(), 0, 'Model editor should omit metadata fields and the entire model card');
+    await desktop.getByRole('combobox', { name: '开发者 / 厂商', exact: true }).click();
+    const brand = desktop.getByRole('option', { name: 'DeepSeek', exact: true }).locator('img');
+    await brand.waitFor();
+    await brand.evaluate(img => img.decode());
+    assert.equal(await desktop.getByRole('option', { name: 'Model Studio International', exact: true }).locator('img').count(), 1, 'Regional brands should use their bundled logo');
+    await screenshot(desktop, 'model-manufacturer-picker');
+    await desktop.getByRole('option', { name: 'Maker A', exact: true }).click();
+    assert.equal(await desktop.getByRole('combobox', { name: '对外模型 ID', exact: true }).count(), 1);
+    await desktop.locator('#managed-model-id').fill('alpha');
+    await desktop.getByRole('option', { name: 'Maker A / Alpha/Latest', exact: true }).waitFor();
+    await desktop.locator('#managed-model-id').press('ArrowDown');
+    await desktop.locator('#managed-model-id').press('Enter');
     assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
-    await desktop.locator('#managed-model-name').fill('Standalone catalog model');
-    await desktop.locator('#model-input-modalities').pressSequentially('text, image');
-    await desktop.locator('#model-limit-context').fill('128000');
+    await desktop.locator('#managed-model-remark').fill('Standalone catalog model');
+    await screenshot(desktop, 'model-workspace-editor');
     await desktop.getByRole('button', { name: '保存', exact: true }).click();
     await desktop.getByRole('cell', { name: 'Alpha/Latest', exact: true }).waitFor();
     const model = (await api('/api/models/catalog')).models.find(item => item.id === 'Alpha/Latest');
@@ -172,19 +198,50 @@ try {
     assert.deepEqual(model.bindings, []);
     assert.equal(model.developer, 'maker-a');
     assert.deepEqual(model.modelCard.modalities.input, ['text', 'image']);
-    assert.equal(model.modelCard.limit.context, 128000);
+    assert.equal(model.modelCard.limit.context, 8192);
+    assert.equal(model.name, 'Alpha Latest');
+    assert.equal(model.icon, 'deepseek');
+    assert.equal(model.group, 'alpha');
+    assert.equal(model.remark, 'Standalone catalog model');
     assert.deepEqual((await api('/api/keys')).modelsByProvider, {});
     await screenshot(desktop, 'model-workspace-standalone');
+    await desktop.getByRole('button', { name: '关联渠道 Alpha/Latest', exact: true }).click();
+    assert.equal(await desktop.getByRole('combobox', { name: '账号提供商', exact: true }).isDisabled(), true);
+    await desktop.getByRole('button', { name: '取消', exact: true }).click();
   });
+  if (results.steps.some(item => item.status === 'failed')) throw new Error('Standalone model creation failed');
 
   let providerId;
+  let secondProviderId;
+  let secondAccountId;
   await step('associating an upstream is a separate operation that preserves model information', async () => {
     const created = await api('/api/custom-providers', { name: 'Workspace channel', protocol: 'chat_completions', baseUrl: upstreamBase,
       keyGroups: [{ id: 'first', name: 'First', enabled: true, apiKeys: ['smoke-key-a'], accountIds: [], models: ['upstream-a', 'shared-model'] }] });
     providerId = created.provider.id;
+    const second = await api('/api/custom-providers', { name: 'Second channel', protocol: 'chat_completions', baseUrl: upstreamBase,
+      keyGroups: [{ id: 'second', name: 'Second', enabled: true, apiKeys: ['smoke-key-b'], accountIds: [], models: ['upstream-b', 'shared-model'] }] });
+    secondProviderId = second.provider.id;
+    secondAccountId = second.accounts[0].id;
+    const accountless = await api('/api/custom-providers', { name: 'Accountless channel', protocol: 'chat_completions', baseUrl: upstreamBase,
+      keyGroups: [{ id: 'removed', name: 'Removed', enabled: true, apiKeys: ['smoke-key-removed'], accountIds: [], models: ['unused-model'] }] });
+    await api(`/api/accounts/${accountless.accounts[0].id}`, undefined, 'DELETE');
     await desktop.getByRole('button', { name: '刷新', exact: true }).click();
     await desktop.getByRole('button', { name: '关联渠道 Alpha/Latest', exact: true }).click();
+    await desktop.getByRole('combobox', { name: '账号提供商', exact: true }).click();
+    assert.equal(await desktop.getByRole('option', { name: 'Accountless channel', exact: true }).count(), 0);
+    await screenshot(desktop, 'model-association-provider-picker');
+    await desktop.getByRole('option', { name: 'Workspace channel', exact: true }).click();
+    assert.equal(await desktop.getByRole('checkbox', { name: 'Second channel / upstream-b', exact: true }).count(), 0);
     await desktop.getByRole('checkbox', { name: 'Workspace channel / upstream-a', exact: true }).check();
+    await desktop.getByRole('combobox', { name: '账号提供商', exact: true }).click();
+    await desktop.getByRole('option', { name: 'Second channel', exact: true }).click();
+    assert.equal(await desktop.getByRole('checkbox', { name: 'Workspace channel / upstream-a', exact: true }).count(), 0);
+    await desktop.getByRole('checkbox', { name: 'Second channel / upstream-b', exact: true }).check();
+    await desktop.getByRole('checkbox', { name: 'Second channel / shared-model', exact: true }).check();
+    assert.equal(await desktop.getByRole('checkbox', { name: 'Second channel / upstream-b', exact: true }).isChecked(), false);
+    await desktop.getByRole('combobox', { name: '账号提供商', exact: true }).click();
+    await desktop.getByRole('option', { name: 'Workspace channel', exact: true }).click();
+    assert.equal(await desktop.getByRole('checkbox', { name: 'Workspace channel / upstream-a', exact: true }).isChecked(), true);
     await screenshot(desktop, 'model-workspace-associations');
     await desktop.getByRole('button', { name: '保存关联', exact: true }).click();
     await desktop.getByRole('heading', { name: '关联渠道', exact: true }).waitFor({ state: 'hidden' });
@@ -193,11 +250,13 @@ try {
     assert.equal((await enabled).status(), 200);
     await desktop.locator('[data-model-row="Alpha/Latest"] [role=switch][aria-checked=true]').waitFor();
     const model = (await api('/api/models/catalog')).models.find(item => item.id === 'Alpha/Latest');
-    assert.equal(model.name, 'Standalone catalog model');
+    assert.equal(model.name, 'Alpha Latest');
+    assert.equal(model.remark, 'Standalone catalog model');
     assert.equal(model.enabled, true);
-    assert.deepEqual(model.bindings, [{ provider: providerId, model: 'upstream-a' }]);
+    assert.deepEqual(model.bindings, [{ provider: providerId, model: 'upstream-a' }, { provider: secondProviderId, model: 'shared-model' }]);
     assert((await api('/api/keys')).modelsByProvider[providerId].includes('Alpha/Latest'));
   });
+  if (results.steps.some(item => item.status === 'failed')) throw new Error('Association setup failed');
 
   await step('batch directory selection deduplicates IDs and creates disabled standalone records atomically', async () => {
     await desktop.getByRole('button', { name: '批量添加', exact: true }).click();
@@ -228,33 +287,36 @@ try {
     assert.equal(model.bindings[0].model, 'upstream-a');
   });
 
-  await step('selecting the current custom model preserves its model card and associations', async () => {
+  await step('selecting the current model preserves its draft remark, hidden metadata and associations', async () => {
     const before = (await api('/api/models/catalog')).models.find(model => model.id === 'Alpha/Latest');
     await desktop.getByRole('button', { name: '编辑 Alpha/Latest', exact: true }).click();
-    await desktop.getByRole('button', { name: '从目录或上游选择', exact: true }).click();
-    await desktop.getByRole('combobox', { name: '模型来源', exact: true }).selectOption('custom');
-    await desktop.getByRole('button', { name: '已有自定义模型 / Alpha/Latest', exact: true }).click();
+    await desktop.locator('#managed-model-remark').fill('Preserved draft remark');
+    await desktop.locator('#managed-model-id').fill('Alpha');
+    await desktop.getByRole('option', { name: 'Maker A / Alpha/Latest', exact: true }).click();
+    assert.equal(await desktop.locator('#managed-model-id').inputValue(), 'Alpha/Latest');
+    assert.equal(await desktop.locator('#managed-model-remark').inputValue(), 'Preserved draft remark');
     await desktop.getByRole('button', { name: '保存', exact: true }).click();
     await desktop.getByRole('heading', { name: '编辑模型', exact: true }).waitFor({ state: 'hidden' });
     const after = (await api('/api/models/catalog')).models.find(model => model.id === 'Alpha/Latest');
-    for (const field of ['developer', 'type', 'icon', 'group', 'modelCard', 'bindings']) assert.deepEqual(after[field], before[field], field);
+    for (const field of ['name', 'developer', 'type', 'icon', 'group', 'modelCard', 'bindings', 'enabled']) assert.deepEqual(after[field], before[field], field);
+    assert.equal(after.remark, 'Preserved draft remark');
   });
 
   await step('a concurrent catalog change can be refreshed without losing the editor draft', async () => {
     await desktop.getByRole('button', { name: '编辑 Alpha/Latest', exact: true }).click();
-    await desktop.locator('#managed-model-name').fill('Draft after concurrent change');
+    await desktop.locator('#managed-model-remark').fill('Draft after concurrent change');
     const latest = await api('/api/models/catalog');
     await api('/api/models/catalog', { action: 'create', revision: latest.revision, models: [{ id: 'concurrent-model', name: 'External creation', enabled: false, bindings: [] }] });
     const rejected = desktop.waitForResponse(response => response.url() === `${base}/api/models/catalog` && response.request().method() === 'POST');
     await desktop.getByRole('button', { name: '保存', exact: true }).click();
     assert.equal((await rejected).status(), 400);
     await desktop.getByRole('button', { name: '刷新目录，保留草稿', exact: true }).click();
-    assert.equal(await desktop.locator('#managed-model-name').inputValue(), 'Draft after concurrent change');
+    assert.equal(await desktop.locator('#managed-model-remark').inputValue(), 'Draft after concurrent change');
     await desktop.getByRole('button', { name: '保存', exact: true }).click();
     await desktop.getByRole('heading', { name: '编辑模型', exact: true }).waitFor({ state: 'hidden' });
     const saved = (await api('/api/models/catalog')).models;
     assert(saved.some(model => model.id === 'concurrent-model'));
-    assert.equal(saved.find(model => model.id === 'Alpha/Latest').name, 'Draft after concurrent change');
+    assert.equal(saved.find(model => model.id === 'Alpha/Latest').remark, 'Draft after concurrent change');
     results.expectedErrors = results.responseErrors.filter(error => error.status === 400 && error.url === `${base}/api/models/catalog`);
     assert.equal(results.expectedErrors.length, 1);
     results.responseErrors = results.responseErrors.filter(error => !results.expectedErrors.includes(error));
@@ -272,13 +334,50 @@ try {
   await step('mobile uses the same model editor without horizontal overflow or metadata loss', async () => {
     await mobile.goto(`${base}/m#models`, { waitUntil: 'domcontentloaded' });
     await mobile.getByRole('button', { name: '编辑 Alpha/Latest', exact: true }).click();
-    await mobile.locator('#managed-model-name').fill('Mobile workspace name');
+    await mobile.locator('#managed-model-id').click();
+    await mobile.getByRole('option', { name: 'Maker A / Alpha/Latest', exact: true }).waitFor();
+    assert.equal(await mobile.locator('[data-model-id-options]').evaluate(element => element.scrollWidth > element.clientWidth), false);
+    assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await screenshot(mobile, 'mobile-model-id-picker');
+    await mobile.keyboard.press('Escape');
+    assert.equal(await mobile.locator('#managed-model-name, #managed-model-icon, #managed-model-group, #managed-model-type, .models-card-fields').count(), 0);
+    await mobile.locator('#managed-model-remark').fill('Mobile workspace remark');
     assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await screenshot(mobile, 'mobile-model-workspace-editor');
     await mobile.getByRole('button', { name: '保存', exact: true }).click();
-    await mobile.getByText('Mobile workspace name', { exact: true }).waitFor();
+    await mobile.getByRole('heading', { name: '编辑模型', exact: true }).waitFor({ state: 'hidden' });
     assert.equal((await api('/api/models/catalog')).models.find(item => item.id === 'Alpha/Latest').developer, 'maker-a');
+    assert.equal((await api('/api/models/catalog')).models.find(item => item.id === 'Alpha/Latest').remark, 'Mobile workspace remark');
+    await mobile.getByRole('button', { name: '关联渠道 Alpha/Latest', exact: true }).click();
+    await mobile.getByRole('combobox', { name: '账号提供商', exact: true }).click();
+    await screenshot(mobile, 'mobile-association-provider-picker');
+    await mobile.getByRole('option', { name: 'Second channel', exact: true }).click();
+    assert.equal(await mobile.getByRole('checkbox', { name: 'Second channel / shared-model', exact: true }).isChecked(), true);
+    assert.equal(await mobile.getByRole('checkbox', { name: 'Workspace channel / upstream-a', exact: true }).count(), 0);
+    await mobile.getByText(longUpstreamName, { exact: true }).waitFor();
+    assert.equal(await mobile.locator('.models-association-list').evaluate(element => element.scrollWidth > element.clientWidth), false, 'Long upstream display names must wrap inside the list');
+    assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await screenshot(mobile, 'mobile-model-association');
+    await mobile.getByRole('button', { name: '取消', exact: true }).click();
   }, mobile);
+
+  await step('unavailable saved associations remain intact until explicitly removed', async () => {
+    await api(`/api/accounts/${secondAccountId}`, { enabled: false }, 'PATCH');
+    await desktop.getByRole('button', { name: '刷新', exact: true }).click();
+    await desktop.getByRole('button', { name: '关联渠道 Alpha/Latest', exact: true }).click();
+    await desktop.getByText('以下关联暂时不可用，仍会保留；可手动移除。', { exact: true }).waitFor();
+    await desktop.getByRole('combobox', { name: '账号提供商', exact: true }).click();
+    assert.equal(await desktop.getByRole('option', { name: 'Second channel', exact: true }).count(), 0);
+    await desktop.keyboard.press('Escape');
+    await desktop.getByRole('button', { name: '保存关联', exact: true }).click();
+    await desktop.getByRole('heading', { name: '关联渠道', exact: true }).waitFor({ state: 'hidden' });
+    assert.equal((await api('/api/models/catalog')).models.find(item => item.id === 'Alpha/Latest').bindings.length, 2);
+    await desktop.getByRole('button', { name: '关联渠道 Alpha/Latest', exact: true }).click();
+    await desktop.getByRole('button', { name: '移除', exact: true }).click();
+    await desktop.getByRole('button', { name: '保存关联', exact: true }).click();
+    await desktop.getByRole('heading', { name: '关联渠道', exact: true }).waitFor({ state: 'hidden' });
+    assert.deepEqual((await api('/api/models/catalog')).models.find(item => item.id === 'Alpha/Latest').bindings, [{ provider: providerId, model: 'upstream-a' }]);
+  });
 } catch (error) {
   results.fatalError = String(error);
   console.error(error);

@@ -470,7 +470,7 @@ struct TestOutcome {
 
 /// A source test names an upstream model, while gateway Key allowlists name public models.
 /// Compare the resolved target to the Key's published bindings, never the two names alone.
-fn source_test_allowed(scope: &KeyScope, provider: &str, requested: &str, account_id: &str) -> bool {
+fn source_test_allowed(store: &crate::server::core::account_store::AccountStore, scope: &KeyScope, provider: &str, requested: &str, account_id: &str) -> bool {
     if !scope.restricts_models() { return true; }
     let target = if crate::server::core::custom_providers::is_custom_provider_id(provider) {
         crate::server::core::custom_providers::source_wire_model_for(provider, requested).0
@@ -482,13 +482,13 @@ fn source_test_allowed(scope: &KeyScope, provider: &str, requested: &str, accoun
             binding.provider.eq_ignore_ascii_case(provider) && binding.model.eq_ignore_ascii_case(&target)
         })
     }) { return true; }
-    // Routing-group access is additionally limited to the group's explicit accounts.
-    !account_id.is_empty() && crate::server::config::routing_profiles().groups.values().any(|group| {
-        scope.allows_model(&group.model) && group.members.iter().any(|member| {
-            member.included && member.provider.eq_ignore_ascii_case(provider)
-                && member.model.eq_ignore_ascii_case(&target)
-                && member.accounts.iter().any(|id| id == account_id)
-        })
+    let accounts: Vec<_> = store.routing_snapshot().accounts.iter().map(|account|account.as_ref().clone()).collect();
+    let profiles = crate::server::core::routing_discovery::effective_profiles(&crate::server::config::routing_profiles(), &accounts);
+    !account_id.is_empty() && profiles.groups.values().filter(|group|group.enabled && !group.hidden && scope.allows_model(&group.model)).any(|group| {
+        crate::server::core::routing_groups::project_with_groups(group, &profiles.groups, &accounts, &Default::default(), Some(scope)).accounts.iter().any(|account|
+            crate::server::core::routing::account_id(account) == Some(account_id)
+                && crate::server::core::routing::provider_of(account).eq_ignore_ascii_case(provider)
+                && crate::server::core::routing_groups::candidate_model(account).is_some_and(|model|model.eq_ignore_ascii_case(&target)))
     })
 }
 
@@ -512,7 +512,7 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
     }
     let key_scope = access.scope.clone().unwrap_or_default();
     let account_id = text_field(&payload, "account_id", 128);
-    if !source_test_allowed(&key_scope, &provider, &model, &account_id) {
+    if !source_test_allowed(state.store(), &key_scope, &provider, &model, &account_id) {
         let error = errors::GatewayError::with_status(404, format!("模型 '{model}' 不在这把网关 Key 的可用模型列表里"))
             .with_code("model_not_found");
         pipeline::record_early_failure(&state, logging::now_ms(), &model, "", &access.source, &error);

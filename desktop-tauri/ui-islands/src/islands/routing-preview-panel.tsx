@@ -1,14 +1,17 @@
 import * as React from 'react'
 import { Button, Checkbox, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle, Label, Spinner } from '@ui'
 import { t } from '../i18n'
-import { bridge, errorMessage, type RouteGroup, type RoutePreview, type RouteProfile } from './routing-types'
+import { bridge, errorMessage, type RouteClassification, type RouteGroup, type RoutePreview, type RouteProfile, type RouteRequestFacts, type RoutingBridge } from './routing-types'
 import { RoutingLivePanel } from './routing-live-panel'
 import { RoutingSelect } from './routing-select'
 import { RouteIcon } from './routing-ui'
+import { RoutingPreviewFacts, RoutingPreviewRuleTrace } from './routing-preview-rules'
+
+const previewRouting: RoutingBridge['previewRouting'] = input => bridge().previewRouting(input)
 
 /** 草稿也在服务端做纯预演；不触发真实请求、轮转或会话续期。 */
-export function RoutingPreviewPanel({ model, group, profile, globalScope = false, onOpenScope }: {
-  model: string; group?: RouteGroup; profile?: RouteProfile; globalScope?: boolean; onOpenScope(model: string): void
+export function RoutingPreviewPanel({ model, group, profile, globalScope = false, onOpenScope, preview = previewRouting }: {
+  model: string; group?: RouteGroup; profile?: RouteProfile; globalScope?: boolean; onOpenScope(model: string): void; preview?: RoutingBridge['previewRouting']
 }) {
   const [needs, setNeeds] = React.useState('text')
   const [failFirst, setFailFirst] = React.useState(false)
@@ -17,8 +20,11 @@ export function RoutingPreviewPanel({ model, group, profile, globalScope = false
   const [error, setError] = React.useState('')
   const [loading, setLoading] = React.useState(false)
   const [revision, setRevision] = React.useState(0)
+  const [facts, setFacts] = React.useState<RouteRequestFacts>({})
+  const [classification, setClassification] = React.useState<RouteClassification | undefined>()
   const effectiveNeeds = group ? needs : 'text'
-  const input = JSON.stringify({ model, group, profile, global: globalScope, needs: { tools: effectiveNeeds === 'tools', images: effectiveNeeds === 'images', video: effectiveNeeds === 'video' }, failFirst })
+  const input = JSON.stringify({ model, group, profile, global: globalScope, needs: { tools: effectiveNeeds === 'tools', images: effectiveNeeds === 'images', video: effectiveNeeds === 'video' }, failFirst,
+    ...(group ? { facts: { ...facts, images: facts.images || effectiveNeeds === 'images' }, classification } : {}) })
   const [resolvedInput, setResolvedInput] = React.useState('')
   React.useEffect(() => {
     let alive = true
@@ -26,12 +32,12 @@ export function RoutingPreviewPanel({ model, group, profile, globalScope = false
     if (!model) { setLoading(false); return }
     setLoading(true)
     const timer = window.setTimeout(() => {
-      bridge().previewRouting(JSON.parse(input)).then(next => { if (alive) { setResult(next); setResolvedInput(input) } })
+      preview(JSON.parse(input)).then(next => { if (alive) { setResult(next); setResolvedInput(input) } })
         .catch(failure => { if (alive) { setError(errorMessage(failure)); setResolvedInput(input) } })
         .finally(() => { if (alive) setLoading(false) })
     }, 200)
     return () => { alive = false; window.clearTimeout(timer) }
-  }, [input, revision, model])
+  }, [input, revision, model, preview])
   const refresh = () => setRevision(value => value + 1)
   const current = resolvedInput === input ? result : null
   const pending = Boolean(model) && (loading || resolvedInput !== input)
@@ -45,6 +51,10 @@ export function RoutingPreviewPanel({ model, group, profile, globalScope = false
     </div>
     <RoutingLivePanel compact workspace={current} model={model} loading={pending} error={failure} dirty={false} globalScope={globalScope}
       modelsAvailable={Boolean(model)} onOpenScope={onOpenScope} onRefresh={refresh} preview />
+    {group ? <>
+      <RoutingPreviewFacts facts={facts} classification={classification} imagesRequired={effectiveNeeds === 'images'} onFacts={setFacts} onClassification={setClassification} />
+      <RoutingPreviewRuleTrace rules={current?.rules} group={group} expandedMembers={current?.expandedMembers} loading={pending} />
+    </> : null}
     {failFirst || effectiveNeeds !== 'text' ? <p className='routing-preview-simulation'>{t('已启用模拟条件')}</p> : null}
     <p className='routing-preview-foot'>{t('按当前草稿预演，不发送请求，不消耗额度。')}</p>
     <Dialog open={details} onOpenChange={setDetails}><DialogContent className='routing-preview-dialog'>

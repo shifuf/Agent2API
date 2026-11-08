@@ -359,13 +359,13 @@ pub fn models_by_provider(store: &AccountStore) -> Value {
             }
         }
     }
-    for group in config::routing_profiles().groups.values() {
-        for member in group.members.iter().filter(|member| {
-            super::routing_groups::available_member_model(member, &snapshot.accounts, None)
-                .is_some()
-        }) {
+    let accounts: Vec<_> = snapshot.accounts.iter().map(|account| account.as_ref().clone()).collect();
+    let profiles = super::routing_discovery::effective_profiles(&config::routing_profiles(), &accounts);
+    for group in profiles.groups.values().filter(|group| group.enabled && !group.hidden) {
+        let projection = super::routing_groups::project_with_groups(group, &profiles.groups, &accounts, &Default::default(), None);
+        for candidate in &projection.accounts {
             result
-                .entry(member.provider.clone())
+                .entry(super::routing::provider_of(candidate).to_string())
                 .or_default()
                 .push(group.model.clone());
         }
@@ -430,7 +430,7 @@ pub fn management(store: &AccountStore) -> Result<Value, String> {
     let models = parse(raw)?;
     Ok(
         json!({ "models": models, "revision": revision_of(raw), "sources": choices(store),
-        "routingGroups": config::routing_profiles().groups.values().collect::<Vec<_>>() }),
+        "routingGroups": super::routing_discovery::snapshot(store).groups.values().collect::<Vec<_>>() }),
     )
 }
 

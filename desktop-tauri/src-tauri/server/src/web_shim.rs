@@ -1714,6 +1714,7 @@ pub fn shim_js() -> &'static str {
     saveRoutingProfile: function (payload) { return call('PUT', '/api/routing/profile', payload || {}); },
     getRoutingGroups: function () { return call('GET', '/api/routing/groups'); },
     saveRoutingGroup: function (payload) { return call('PUT', '/api/routing/groups', payload); },
+    routingGroupsAction: function (payload) { return call('POST', '/api/routing/groups/actions', payload); },
     previewRouting: function (payload) { return call('POST', '/api/routing/preview', payload); },
     getRoutingSticky: function (model) { return call('GET', '/api/routing/sticky' + toQuery({ model: model })); },
     clearRoutingSticky: function (payload) { return call('POST', '/api/routing/sticky/clear', payload || {}); },

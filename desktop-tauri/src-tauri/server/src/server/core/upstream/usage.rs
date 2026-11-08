@@ -1033,6 +1033,16 @@ impl RequestTelemetry {
     /// **不做在途回写**：error 列一旦有值，前端就不再把这一行当「进行中」
     /// （判据见 `ui/requests-panel.js` 的 `isRunning`），而转发中途的失败往往只是
     /// 换号前的一次尝试失败 —— 那次失败由尝试明细如实带出，整行仍应是「进行中」。
+    pub(super) fn clear_uncommitted_error(&self) {
+        let mut guard = self.lock();
+        guard.error = None;
+        guard.first_response_at = None;
+        guard.prompt_tokens = 0;
+        guard.completion_tokens = 0;
+        guard.total_tokens = 0;
+        guard.cache_read_tokens = 0;
+    }
+
     pub fn note_error(&self, message: &str) {
         if message.is_empty() {
             return;

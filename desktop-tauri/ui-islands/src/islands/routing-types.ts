@@ -14,13 +14,31 @@ export type RouteProfile = {
   strategy?: string
   sticky?: string
 }
-export type RouteMember = { id: string; provider: string; model: string; included: boolean; accounts: string[] }
-export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; members: RouteMember[] }
+export type RoutingRule = { use: string; more?: string[]; useEffort?: string; tokens?: number; images?: boolean; effort?: string;
+  agents?: string[]; intent?: string; compact?: boolean; time?: { from: string; to: string; days: string[]; zone: string };
+  folders?: string[]; exceptFolders?: string[]; pause?: boolean }
+export type RouteMember = { id: string; provider: string; model: string; included: boolean; accounts: string[];
+  group?: string; accountScope?: RouteProviderScope; weight?: number; effort?: string; levels?: string[]; fast?: boolean }
+export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; members: RouteMember[];
+  enabled?: boolean; auto?: boolean; hidden?: boolean; match?: string[]; pick?: string; sink?: boolean | null; firstToken?: number; patience?: number;
+  rules?: RoutingRule[]; classifier?: string; classifierTimeout?: number; effort?: string; context?: number; levels?: string[]; family?: string; unlists?: boolean }
 export type RouteModelChoice = { provider: string; providerLabel: string; model: string; name: string; accountCount: number;
+  developer?: string; developerName?: string; family?: string; canonicalModel?: string; displayName?: string;
   capabilities: { supportsToolCall?: boolean | null; supportsImages?: boolean | null; supportsVideo?: boolean | null; supportsReasoning?: boolean | null; maxInputTokens?: number | null; maxOutputTokens?: number | null } }
-export type RouteGroups = { groups: Array<{ group: RouteGroup; revision: string }>; newRevision: string; catalog: RouteModelChoice[] }
-export type RoutePreviewInput = { model: string; group?: RouteGroup; profile?: RouteProfile; global?: boolean; needs?: { tools?: boolean; images?: boolean; video?: boolean }; failFirst?: boolean }
-export type RoutePreview = Pick<RoutingWorkspace, 'model' | 'customized' | 'settings' | 'queue'> & { group?: RouteGroup | null; preview: boolean }
+export type RouteGroups = { groups: Array<{ group: RouteGroup; revision: string; expandedMembers?: RouteMember[] }>; newRevision: string; catalog: RouteModelChoice[];
+  foundGroups?: Array<{ group: RouteGroup; revision: string; expandedMembers?: RouteMember[] }>; autoGroupsEnabled?: boolean; collectionRevision?: string;
+  metadata?: { source: string; updatedAt: number; count: number; stale?: boolean; error?: string }; selectedId?: string; importedIds?: string[] }
+export type RoutingGroupsAction = { action: string; revision?: string; [key: string]: unknown }
+export type RoutingGroupsBridge = Pick<RoutingBridge, 'getRoutingGroups' | 'saveRoutingGroup' | 'routingGroupsAction'>
+export type RouteRequestFacts = { tokens?: number; images?: boolean; effort?: string; agent?: string; compact?: boolean; folder?: string; home?: string; atMs?: number }
+export type RouteClassification = { intent: string; effort: string }
+export type RouteRuleTrace = { groupId: string; cached?: boolean; classifier?: { state: string }; decision: {
+  preferred: string[]; excluded: string[]; effortByMember: Record<string, string>; effort?: string | null; intents: string[];
+  matched: Array<{ index: number; targets: string[]; pause: boolean; reasons: string[] }>
+} }
+export type RoutePreviewInput = { model: string; group?: RouteGroup; profile?: RouteProfile; global?: boolean; needs?: { tools?: boolean; images?: boolean; video?: boolean }; failFirst?: boolean;
+  facts?: RouteRequestFacts; classification?: RouteClassification }
+export type RoutePreview = Pick<RoutingWorkspace, 'model' | 'customized' | 'settings' | 'queue'> & { group?: RouteGroup | null; preview: boolean; rules?: RouteRuleTrace[]; expandedMembers?: RouteMember[] }
 
 export type RouteEntry = {
   candidateId?: string
@@ -69,6 +87,7 @@ export type RoutingWorkspace = {
   legacyGlobalParticipation?: { revision: string; accounts: Array<{ id: string; name: string; provider: string; providerLabel: string }> } | null
   configuredModels: string[]
   models: string[]
+  modelsByProvider?: Record<string, string[]>
   profile: RouteProfile
   inheritedProfile?: RouteProfile
   providers: Array<{ id: string; label: string; accountCount: number; custom: boolean; available: boolean }>
@@ -166,6 +185,7 @@ export type StickyEntry = {
 export type RoutingBridge = {
   getRoutingGroups(): Promise<RouteGroups>
   saveRoutingGroup(payload: { id: string; group: RouteGroup | null; revision: string }): Promise<RouteGroups>
+  routingGroupsAction(payload: RoutingGroupsAction): Promise<RouteGroups>
   previewRouting(payload: RoutePreviewInput): Promise<RoutePreview>
   getRoutingWorkspace(model?: string): Promise<RoutingWorkspace>
   getRoutingFlow(query: import('./routing-flow-types').FlowQuery): Promise<import('./routing-flow-types').FlowSnapshot & import('./routing-flow-types').FlowDetails>

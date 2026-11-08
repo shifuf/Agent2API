@@ -36,17 +36,17 @@ export function modelCandidates(providers: PublicProvider[], sources: ModelSourc
       if (existing) current.existing = existing
     } else rows.set(model.id, { provider, model, origins: [origin], labels: provider.name ? [provider.name] : [], existing })
   }
-  if (!filter.origin || filter.origin === 'directory') {
+  if (filter.manufacturer !== 'custom' && (!filter.origin || filter.origin === 'directory')) {
     for (const provider of providers.filter(item => !filter.manufacturer || item.id === filter.manufacturer)) {
       for (const model of provider.models) put(provider, model, 'directory')
     }
   }
-  if (!filter.manufacturer && (!filter.origin || filter.origin === 'upstream')) {
+  if ((!filter.manufacturer || filter.manufacturer === 'custom') && (!filter.origin || filter.origin === 'upstream')) {
     for (const source of sources.filter(item => item.accountCount > 0)) {
       for (const model of source.models) put(source, { id: model.id, name: model.name || model.id, kind: model.kind || 'chat' }, 'upstream')
     }
   }
-  if (!filter.manufacturer && (!filter.origin || filter.origin === 'custom')) {
+  if ((!filter.manufacturer || filter.manufacturer === 'custom') && (!filter.origin || filter.origin === 'custom')) {
     for (const model of saved) put({ id: 'custom', name: '' }, { id: model.id, name: model.name || model.id, kind: '' }, 'custom')
   }
   const query = filter.search.trim().toLowerCase()

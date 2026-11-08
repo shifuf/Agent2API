@@ -5,6 +5,7 @@ import { groupDirty, type RouteGroupEditor } from './routing-group-state'
 import { draftDirty, type RoutingEditorState } from './routing-editor-state'
 import type { RoutingWorkspace } from './routing-types'
 import { RouteIcon } from './routing-ui'
+import { routingGroupMatches } from './routing-group-tools'
 
 export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd }: {
   editor: RoutingEditorState; groups: RouteGroupEditor; workspace?: RoutingWorkspace | null
@@ -21,7 +22,7 @@ export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd
   const addDisabled = disabled || editor.loading || !(editor.draft || workspace) || !groups.data
   const query = search.trim().toLowerCase()
   const shownModels = models.filter(model => model.toLowerCase().includes(query))
-  const shownGroups = Object.values(groups.drafts).filter(({ group }) => `${group.name} ${group.model}`.toLowerCase().includes(query))
+  const shownGroups = Object.values(groups.drafts).filter(({ group }) => routingGroupMatches(group, query, groups.data?.catalog || [], Object.values(groups.drafts).map(draft => draft.group)))
   const showGlobal = !query || t('全局默认').toLowerCase().includes(query)
   const dirtyDot = (dirty: boolean) => dirty ? <span className='routing-rail-dirty' title={t('有未保存的修改')} aria-label={t('有未保存的修改')}><StatusDot variant='warning' /></span> : undefined
   return <Sidebar className='routing-config-rail'>

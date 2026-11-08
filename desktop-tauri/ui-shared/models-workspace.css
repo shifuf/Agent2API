@@ -11,11 +11,25 @@
 .models-developer-row { background: var(--ui-surface-2); }
 .models-group-toggle { display: flex; align-items: center; gap: 10px; width: 100%; padding: 2px; border: 0; background: transparent; box-shadow: none; font-size: 13px; font-weight: 600; text-align: left; cursor: pointer; }
 .models-name { display: flex; align-items: center; gap: 10px; min-width: 150px; max-width: 260px; }
-.models-avatar { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 30px; height: 30px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-surface-2); font-size: 12px; font-weight: 600; }
 .models-id { max-width: 260px; overflow-wrap: anywhere; font-family: monospace; font-size: 12px; }
 .models-row-actions { flex-wrap: nowrap; gap: 0; }
 .models-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--ui-text-2); }
-.models-editor-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; min-width: 0; padding: 0; border: 0; }
+.models-editor-grid { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; padding: 0; border: 0; }
+.models-compact-dialog { border-radius: 16px; }
+.models-compact-dialog [data-slot='dialog-header'] { gap: 12px; padding: 22px 48px 18px 24px; }
+.models-compact-dialog [data-slot='dialog-body'] { gap: 16px; padding: 20px 24px; }
+.models-compact-dialog [data-slot='dialog-footer'] { padding: 16px 24px; background: var(--ui-surface-2); }
+.models-compact-dialog input, .models-compact-dialog textarea { border-radius: 9px; }
+.models-compact-dialog input { min-height: 40px; }
+.models-compact-dialog .models-id-trigger { border: 0; border-radius: 0 9px 9px 0; background: transparent; box-shadow: none; }
+.models-compact-dialog .models-id-trigger:hover { background: var(--ui-surface-2); }
+.models-compact-dialog .models-id-trigger:focus-visible { outline: 2px solid var(--ui-primary, #1677ff); outline-offset: -3px; }
+.models-provider-trigger { width: 100%; height: 42px; border-radius: 9px; padding: 6px 11px; }
+.models-provider-label { display: flex; align-items: center; gap: 9px; min-width: 0; text-align: left; }
+.models-provider-label > span:not(.model-brand) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.models-provider-options { width: var(--anchor-width); max-width: calc(100vw - 32px); border-radius: 11px; }
+.models-provider-options [data-slot='select-item'] { min-height: 40px; padding: 6px 9px; border-radius: 7px; }
+.models-provider-options .models-provider-label > span:not(.model-brand) { white-space: normal; overflow-wrap: anywhere; }
 .models-basic-fields, .models-card-fields { display: flex; min-width: 0; flex-direction: column; gap: 16px; }
 .models-editor-grid h3 { margin-bottom: 6px; font-size: 14px; font-weight: 600; }
 .models-editor-grid h4 { font-size: 12px; font-weight: 600; }
@@ -25,10 +39,13 @@
 .models-field-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .models-card-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; border: 1px solid var(--ui-border); border-radius: 8px; }
 .models-card-options label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.models-association-list { max-height: min(46vh, 460px); min-height: 100px; overflow-y: auto; border: 1px solid var(--ui-border); border-radius: 8px; }
-.models-choice { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-bottom: 1px solid var(--ui-border); font-size: 13px; }
+.models-association-list { max-height: min(32vh, 300px); min-height: 100px; flex-shrink: 0; overflow-y: auto; border: 1px solid var(--ui-border); border-radius: 10px; }
+.models-choice { display: flex; align-items: center; gap: 10px; padding: 12px; border-bottom: 1px solid var(--ui-border); font-size: 13px; cursor: pointer; }
 .models-choice:last-child { border-bottom: 0; }
 .models-choice:hover { background: var(--ui-surface-2); }
+.models-choice[data-selected] { background: var(--ui-primary-soft, var(--ui-surface-2)); }
+.models-associated-summary { display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; flex-shrink: 0; padding: 12px; border-radius: 10px; background: var(--ui-surface-2); }
+.models-associated-row { display: flex; align-items: center; gap: 9px; }
 @media (max-width: 640px) {
   .models-heading, .models-workspace-body { padding: 12px; }
   .models-toolbar > select { flex: 1 1 100px; }
@@ -36,5 +53,7 @@
   .models-card-fields { border-left: 0; border-top: 1px solid var(--ui-border); padding-left: 0; padding-top: 20px; }
   .models-field-grid { gap: 8px; }
   .models-table-wrap table { min-width: 790px; }
+  .models-compact-dialog [data-slot='dialog-header'] { padding: 18px 40px 16px 16px; }
+  .models-compact-dialog [data-slot='dialog-body'], .models-compact-dialog [data-slot='dialog-footer'] { padding: 16px; }
 }
 

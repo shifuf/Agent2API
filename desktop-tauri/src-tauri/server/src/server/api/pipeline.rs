@@ -159,7 +159,10 @@ fn resolve_model_for(
     }
     let requested_model = model_field_text(payload);
     // 空路由也是已登记入口；权限照常检查，具体不可用原因交给组内选路报告。
-    if let Some(group) = config::routing_profiles().group_for_model(&requested_model) {
+    if let Some(group) = crate::server::core::routing_discovery::snapshot(state.store()).group_for_model(&requested_model) {
+        if !group.enabled || group.hidden {
+            return Err(GatewayError::with_status(404, "路由组已停用").with_code("model_not_found"));
+        }
         if !key_scope::allows_model(scope, &requested_model) {
             return Err(GatewayError::with_status(404, "此路由组不在网关 Key 的可用模型列表里").with_code("model_not_found"));
         }

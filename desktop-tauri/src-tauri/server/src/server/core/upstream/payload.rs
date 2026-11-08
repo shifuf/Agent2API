@@ -362,12 +362,24 @@ pub(super) async fn send_body<'a>(
     if ctx.compact_routed {
         crate::server::core::compact_routing::parameters::cap_output(&mut body, provider_id, &wire.model);
     }
+    let route_effort = account.and_then(|account| selected_effort(account, body.as_ref()));
+    if let Some(level) = &route_effort {
+        if let Some(object) = body.to_mut().as_object_mut() {
+            for field in ["reasoning_effort", "reasoningEffort", "effort", "reasoning", "thinking"] { object.remove(field); }
+            if crate::server::core::custom_providers::is_custom_provider_id(provider_id) {
+                object.insert("reasoning_effort".into(), level.clone().into());
+            }
+        }
+    }
+    if account.and_then(|account| account.get("routingFast")).and_then(Value::as_bool) == Some(true) {
+        if let Some(object) = body.to_mut().as_object_mut() { object.insert("service_tier".into(), "priority".into()); }
+    }
     let injected = apply_reasoning(
         &mut body,
         provider_id,
         &requested,
         &wire.model,
-        wire.reasoning.as_deref(),
+        route_effort.as_deref().or(wire.reasoning.as_deref()),
     )
     .await;
     // 采集「实际随上游请求发出的思考等级」（请求日志模型列的 `(等级)`）。
@@ -379,6 +391,32 @@ pub(super) async fn send_body<'a>(
     let upstream_reasoning = injected.or_else(|| outbound_reasoning_of(provider_id, &body));
     ctx.telemetry.note_upstream_reasoning(upstream_reasoning.clone());
     SendBody { body, wire_model: wire.model, wire_reasoning: upstream_reasoning }
+}
+
+fn selected_effort(account: &Value, body: &Value) -> Option<String> {
+    let fixed = account.get("routingEffort").and_then(Value::as_str).filter(|value| !value.is_empty());
+    if let Some(fixed) = fixed { return Some(fixed.into()); }
+    let requested = account.get("routingRuleEffort").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned)
+        .or_else(|| crate::server::core::model_rules::read_client_level(body));
+    let requested = requested?;
+    let levels: Vec<_> = account.get("routingLevels").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+    if levels.is_empty() { return account.get("routingRuleEffort").and_then(Value::as_str).map(str::to_owned); }
+    const LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let rank = LEVELS.iter().position(|level| *level == requested)?;
+    levels.into_iter().filter_map(|level| LEVELS.iter().position(|known| known == &level).map(|position| (position.abs_diff(rank), position, level)))
+        .min_by_key(|(distance, position, _)| (*distance, *position)).map(|(_, _, level)| level.to_owned())
+}
+
+#[cfg(test)]
+mod route_effort_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn fixed_effort_wins_and_levels_choose_the_nearest_supported_value() {
+        assert_eq!(selected_effort(&json!({"routingEffort":"low","routingRuleEffort":"high"}), &json!({"reasoning_effort":"max"})).as_deref(), Some("low"));
+        assert_eq!(selected_effort(&json!({"routingLevels":["low","high"]}), &json!({"reasoning_effort":"medium"})).as_deref(), Some("low"));
+        assert!(selected_effort(&json!({}), &json!({"reasoning_effort":"high"})).is_none());
+    }
 }
 
 /// 承载家的 [`ProviderAdapter::outbound_reasoning`]（读发送体里随行的等级）。

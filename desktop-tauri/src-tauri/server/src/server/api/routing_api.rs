@@ -52,11 +52,7 @@ pub async fn put_routing(State(_state): State<ServerState>, body: Bytes) -> Resp
         let Some(text) = value.as_str() else {
             return errors::management_error(400, "strategy 必须是字符串");
         };
-        let known = [
-            config::ROUTING_STRATEGY_ORDER,
-            config::ROUTING_STRATEGY_ROTATE,
-            config::ROUTING_STRATEGY_PROVIDER,
-        ];
+        let known = config::routing_groups::PROFILE_STRATEGIES;
         if !known.contains(&text) {
             return errors::management_error(
                 400,
@@ -74,6 +70,7 @@ pub async fn put_routing(State(_state): State<ServerState>, body: Bytes) -> Resp
             config::STICKY_SESSION,
             config::STICKY_TURN,
             config::STICKY_OFF,
+            "strict",
         ];
         if !known.contains(&text) {
             return errors::management_error(
@@ -183,7 +180,7 @@ pub(crate) fn queue_json(state: &ServerState, model: Option<String>) -> Value {
 }
 
 pub(crate) fn queue_for_accounts(state: &ServerState, model: Option<String>, accounts: &[Value]) -> Value {
-    if let Some(group) = model.as_deref().and_then(|model| config::routing_profiles().group_for_model(model).cloned()) {
+    if let Some(group) = model.as_deref().and_then(|model| crate::server::core::routing_discovery::effective_profiles(&config::routing_profiles(), accounts).group_for_model(model).cloned()) {
         return super::routing_groups::group_queue(state, group);
     }
     let snapshot = config::current();

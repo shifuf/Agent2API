@@ -8,13 +8,15 @@ import type { RouteMember } from './routing-types'
 import type { useRoutingDrag } from './routing-drag'
 import { RoutingAccountRow, RoutingActions, RoutingProviderMark, routingOrderKey } from './routing-canvas-controls'
 import { RouteIcon } from './routing-ui'
+import { RoutingMemberOptions } from './routing-group-options'
 
 export function RoutingMemberCard({ member, accounts, label, name, index, first, last, open, locked, query, drag, sorting, now,
-  onOpen, onJoin, onMove, onAccounts, onToggleAccount, onMoveAccount, onAccount, onSort }: {
+  onOpen, onJoin, onMove, onAccounts, onToggleAccount, onMoveAccount, onAccount, onSort, onChange }: {
   member: RouteMember; accounts: AccountRecord[]; label: string; name: string; index: number; first: boolean; last: boolean; open: boolean; locked: boolean; query: string
   drag: ReturnType<typeof useRoutingDrag>; onOpen(open: boolean): void; onJoin(on: boolean): void; onMove(direction: number): void
   onAccounts(): void; onToggleAccount(id: string): void; onMoveAccount(id: string, direction: number): void; onAccount(id: string): void
   sorting?: AccountSorting | null; now: number; onSort(): void
+  onChange(patch: Partial<RouteMember>): void
 }) {
   const available = accounts.filter(account => providerOf(account) === member.provider)
   const order = [...new Set([...member.accounts, ...available.map(account => account.id)])]
@@ -34,19 +36,21 @@ export function RoutingMemberCard({ member, accounts, label, name, index, first,
         <small title={`${label} · ${member.model}`}>{label} · {member.model}</small></span><RouteIcon name='chevronDown' size={13} /></CollapsibleTrigger>
       <Switch checked={member.included} disabled={locked} onCheckedChange={onJoin} aria-label={t('{model} 参与本路由', { model: name })}
         title={member.included ? t('移出本路由') : t('加入路由')} />
-      <Button variant='ghost' size='icon-sm' className='routing-settings-button' disabled={locked}
+      <Button variant='ghost' size='icon-sm' className='routing-settings-button' disabled={locked || Boolean(member.group)}
         title={t('分组设置')} aria-label={t('{name} · 分组设置', { name: label })} onClick={onSort}><RouteIcon name='settings' size={14} /></Button>
       <RoutingActions label={t('路由成员操作')} actions={[
         { label: t('提高优先级'), icon: 'arrowUp', disabled: orderLocked || !member.included || first, onClick: () => onMove(-1) },
         { label: t('降低优先级'), icon: 'arrowDown', disabled: orderLocked || !member.included || last, onClick: () => onMove(1) },
-        { label: t('参与账号'), icon: 'accounts', disabled: locked, onClick: onAccounts },
+        { label: t('参与账号'), icon: 'accounts', disabled: locked || Boolean(member.group) || member.accountScope === 'all', onClick: onAccounts },
       ]} />
     </header>
-    <RoutingConsumptionOrder provider={member.provider} sorting={sorting} independent disabled={locked} onSettings={onSort} />
+    {!member.group ? <RoutingConsumptionOrder provider={member.provider} sorting={sorting} independent disabled={locked} onSettings={onSort} /> : null}
     <CollapsibleContent className='routing-config-accounts'>
+      <RoutingMemberOptions member={member} disabled={locked} onChange={onChange} />
+      {!member.group ? <>
       <div className='routing-member-summary'><span>{t('{selected} / {total} 个账号参与', { selected: member.accounts.length, total: available.length })}</span>
-        <Button variant='link' size='sm' disabled={locked} onClick={onAccounts}>{t('选择账号')}</Button></div>
-      {[true, false].map(joined => <div key={String(joined)} data-route-list>
+        <Button variant='link' size='sm' disabled={locked || member.accountScope === 'all'} onClick={onAccounts}>{t('选择账号')}</Button></div>
+      {member.accountScope === 'all' ? <p className='routing-config-note'>{t('自动使用此提供商全部可用账号，包含之后新增的账号。')}</p> : [true, false].map(joined => <div key={String(joined)} data-route-list>
         {!joined && order.some(id => !member.accounts.includes(id)) ? <p className='routing-account-section'>{t('未参与本路由')}</p> : null}
         {order.filter(id => member.accounts.includes(id) === joined).filter(id => !query || searchingMember
           || displayNameOf(available.find(account => account.id === id)).toLowerCase().includes(query)).map(id => {
@@ -62,7 +66,7 @@ export function RoutingMemberCard({ member, accounts, label, name, index, first,
             onToggle={() => onToggleAccount(id)} onAccount={account ? () => onAccount(id) : undefined} />
         })}
       </div>)}
-      {!order.length ? <p className='routing-config-note'>{t('该提供商没有账号，请先到账号页添加。')}</p> : null}
+      {!order.length ? <p className='routing-config-note'>{t('该提供商没有账号，请先到账号页添加。')}</p> : null}</> : null}
     </CollapsibleContent>
   </Collapsible>
 }

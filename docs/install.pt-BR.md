@@ -11,12 +11,22 @@ Depois de instalar, qualquer forma é gerenciada pelo **painel no navegador** (c
 Este fork usa um catálogo manual de modelos em todo o gateway. Contas, chaves e catálogos upstream existentes são preservados, mas os modelos upstream não são publicados automaticamente. Adicione modelos públicos após atualizar; os grupos de roteamento existentes são mantidos.
 
 1. Em Contas, clique em Adicionar canal personalizado (também disponível em Adicionar conta → Modelo de API), escolha um provedor ou modelo de API e informe a URL da API e os grupos de Key nomeados. Cada grupo aceita várias chaves, com Keys e Modelos compatíveis gerenciados em seções separadas. Você pode salvar um canal sem selecionar modelos e configurá-los depois. Busque modelos por grupo ou use Buscar modelos de todos os grupos; depois selecione os modelos e confirme. Buscar a lista não seleciona modelos automaticamente; grupos sem modelos selecionados ou desativados não encaminham solicitações.
-2. Em Gerenciamento de modelos → Adicionar modelo, crie um modelo independentemente dos canais. Pesquise candidatos no catálogo por desenvolvedor ou fornecedor para preencher o ID público, o nome e outros dados. Você pode editar esses dados ou usar um ID personalizado. Não é necessário selecionar canais na criação, e novos modelos ficam desativados por padrão. Depois de salvar os dados, abra Associar canais na lista, escolha um modelo upstream por canal, use Salvar associações e, por fim, ative o modelo. Um modelo público pode usar vários canais. O gerenciamento funciona no desktop e no celular.
+2. Em Gerenciamento de modelos → Adicionar modelo, escolha o desenvolvedor ou provedor e pesquise o ID público do modelo, ou digite um ID personalizado e uma observação. O editor contém apenas provedor, ID e observação; os metadados são preenchidos automaticamente pelo catálogo. Nenhum canal é necessário na criação, e novos modelos ficam desativados. Após salvar, abra Associar canais, selecione no menu um provedor com contas e escolha um de seus modelos upstream. Trocar de provedor preserva as associações selecionadas. Salve as associações e ative o modelo. Um modelo público pode usar vários canais no desktop e no celular.
 3. Crie, edite ou visualize uma Key do gateway separadamente e use Escopo permitido na lista para selecionar canais e modelos públicos de forma independente. Os painéis de seleção oferecem busca, prévia da seleção e confirmação. As duas restrições se aplicam juntas. Sem canais selecionados, todos são permitidos; sem modelos selecionados, todos os modelos publicados são permitidos. Excluir um canal preserva as restrições existentes das Keys.
 4. Gerencie assinaturas e instale ou importe o núcleo na página Proxies. Os nós podem ser usados por contas e pools de proxies. Parar o núcleo ou desativar um nó não faz as solicitações vinculadas usarem uma conexão direta.
 
 A criação e edição de canais usam um formulário central, com painéis laterais separados para editar Keys e selecionar modelos. As seleções de modelos são aplicadas após confirmação. Os candidatos são carregados de `dist/all.json` do PublicProviderConf, organizados por desenvolvedor, sem IDs duplicados, e mantidos em cache por uma hora. Você também pode escolher um modelo upstream de uma conta e personalizar seu ID público, ou buscar e editar um modelo personalizado existente. Modelos desativados, arquivados, sem associação a canais ou sem upstream disponível não aparecem na lista de modelos que os clientes podem chamar nem nas opções de Key do gateway. As opções de canais incluem apenas canais ativos com contas utilizáveis. Restrições salvas indisponíveis continuam visíveis separadamente e podem ser removidas explicitamente. Atualizar catálogo de modelos permite atualizar imediatamente; falhas de rede preservam o cache. Selecionar um candidato do catálogo ou apenas salvar os dados do modelo não o publica automaticamente.
 
+
+### Grupos de roteamento e seleção direta de modelos
+
+Ao adicionar um modelo, escolha o desenvolvedor e pesquise ou selecione diretamente no campo de ID público. IDs personalizados também são aceitos. Os candidatos combinam o catálogo de desenvolvedores em cache e as contas conectadas, unificando modelos existentes e IDs duplicados.
+
+A página de roteamento identifica desenvolvedores e sugere grupos do mesmo modelo em canais diferentes. As sugestões não são publicadas por padrão. Ative os grupos automáticos explicitamente ou salve e ative um grupo personalizado. É possível ocultar, restaurar, copiar, ordenar, importar e exportar grupos. Cópias e importações começam desativadas. A exportação omite IDs de contas e regras com condições de diretórios locais; confira os canais e o escopo de contas antes de ativar uma importação.
+
+As estratégias incluem ordem, rotação, inteligente, menor uso, ritmo de consumo, gratuito, velocidade, peso, manual e prioridade por provedor. Os membros podem usar contas selecionadas ou todas as contas de um canal, grupos aninhados e padrões de modelos. As regras aceitam contagem de tokens, imagens, esforço de raciocínio, cliente, intenção, compactação, fuso horário e diretórios. Intenção e esforço automático exigem um classificador e uma chamada adicional ao upstream; timeout ou resultado inválido retorna ao roteamento normal.
+
+A prévia recebe condições da requisição e mostra regras correspondentes, preferências e motivos de exclusão sem enviar chamadas ou avançar a rotação. O timeout do primeiro conteúdo só troca de upstream antes de emitir conteúdo; a afinidade estrita nunca troca de conta. Novos grupos podem configurar um orçamento de espera para erros temporários, preservando o comportamento dos grupos antigos. No celular, abra Mais → Roteamento. Grupos desativados ou sem contas elegíveis não aparecem nas listas de modelos do cliente e das Keys. As restrições de modelos e canais da Key sempre se aplicam.
 
 ## Sumário
 
@@ -220,6 +230,76 @@ Variáveis de ambiente (todas opcionais):
 
 Para compilar do código, clone este repositório e execute `docker compose up -d --build --pull never`. O Dockerfile instala dependências pelos lockfiles e recompila a interface. A imagem final contém o gateway e o painel, sem as toolchains Node ou Rust.
 
+### Migrar um contêiner upstream para este fork
+
+Espere o build **Docker package** deste fork terminar com sucesso e confirme que a imagem `sha-<SHA completo de 40 caracteres>` pode ser baixada. A presença do workflow no repositório não comprova a publicação da imagem. O exemplo considera Linux, um contêiner `agent2api` criado com `docker run`, porta `3065:3065`, `AGENT2API_PROXY_HOME=/data` e bind mount `/www/server/panel/data:/data`. Confira o mount real; o diretório atual não revela onde o antigo `./data` foi resolvido:
+
+```bash
+docker inspect --format '{{.Config.Image}}{{println}}{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}' agent2api
+```
+
+Preserve todo o diretório de dados, incluindo `agent2api.db`, eventuais arquivos `-wal` / `-shm`, `account.key`, `update-token.key`, `cloud-sync.key`, plugins e configurações antigas. Se o contêiner antigo define `AGENT2API_ACCOUNT_KEY`, mantenha exatamente o mesmo valor: uma chave válida no ambiente tem prioridade sobre `account.key`. Não gere uma chave substituta. Os comandos salvam somente essa variável em um arquivo protegido, sem mostrá-la no terminal. Preserve também outras variáveis personalizadas, portas, redes e mounts adicionais.
+
+O novo contêiner usa uma cópia em diretório separado; o original continua disponível para o antigo. `/www/server/panel/data` também pode pertencer ao painel do servidor, portanto não mova, sobrescreva nem esvazie esse diretório. A cópia e o arquivo de backup podem conter outros arquivos; proteja o diretório de migração e o arquivo de chave como backups sensíveis. Execute em um **Bash como root** no servidor e substitua o marcador da imagem. Primeiro faça o pull; depois pare o contêiner antigo, copie e arquive os dados. Qualquer falha interrompe a sequência. Reserve espaço para a cópia e o arquivo; a indisponibilidade inclui cópia, backup e inicialização.
+
+```bash
+set -euo pipefail
+umask 077
+NEW_IMAGE='ghcr.io/shifuf/agent2api:sha-<PUBLISHED_FULL_40_CHARACTER_SHA>'
+SOURCE_DATA='/www/server/panel/data'
+test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' agent2api)" = "$SOURCE_DATA"
+test -d "$SOURCE_DATA"
+docker pull "$NEW_IMAGE"
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+MIGRATION_DIR="/opt/agent2api/migrations/$STAMP"
+FORK_DATA="$MIGRATION_DIR/data"
+OLD_CONTAINER="agent2api-before-fork-$STAMP"
+test ! -e "$MIGRATION_DIR"
+mkdir -p "$FORK_DATA"
+chmod 700 "$MIGRATION_DIR"
+printf '%s\n' "$OLD_CONTAINER" > "$MIGRATION_DIR/old-container-name.txt"
+docker inspect --format 'container={{.Id}} image={{.Config.Image}} imageId={{.Image}}' agent2api > "$MIGRATION_DIR/container-image.txt"
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' agent2api |
+  sed -n '/^AGENT2API_ACCOUNT_KEY=/p' > "$MIGRATION_DIR/account-key.env"
+
+docker stop --time 60 agent2api
+cp -a -- "$SOURCE_DATA/." "$FORK_DATA/"
+tar --numeric-owner -cpf "$MIGRATION_DIR/data-before-fork.tar" -C "$FORK_DATA" .
+tar -tf "$MIGRATION_DIR/data-before-fork.tar" >/dev/null
+docker rename agent2api "$OLD_CONTAINER"
+docker run -d --name agent2api --restart unless-stopped \
+  -p 3065:3065 \
+  --env-file "$MIGRATION_DIR/account-key.env" \
+  -e AGENT2API_SELF_UPDATE=0 \
+  -e AGENT2API_CAPTCHA_ENABLED=1 \
+  -v "$FORK_DATA:/data" \
+  "$NEW_IMAGE"
+printf 'old_container=%s\nmigration_dir=%s\n' "$OLD_CONTAINER" "$MIGRATION_DIR"
+```
+
+Guarde o `migration_dir` exibido no final. Se a cópia ou o arquivamento falhar, o contêiner antigo ainda não foi renomeado: execute `docker start agent2api` para restaurar o serviço antes de investigar a falha. Não continue os comandos de substituição. Manter o contêiner antigo preserva sua camada gravável; se o painel o atualizou internamente, isso restaura o programa original com mais precisão do que baixar sua antiga tag.
+
+Após iniciar, confira `/health` e verifique contas, estado das credenciais, Gateway Keys, plugins e rotas no painel. Esta branch publica modelos manualmente: as contas e chaves existentes permanecem, mas os modelos upstream não são publicados automaticamente. Adicione modelos públicos, associe canais e habilite-os, mantendo os IDs anteriores dos clientes quando possível. Teste uma solicitação real com uma chave existente. Um health check bem-sucedido não comprova continuidade do serviço; configuração dos modelos e uma breve parada fazem parte da migração. Nas próximas atualizações, mantenha o mount de `data` dentro do diretório exibido e `AGENT2API_SELF_UPDATE=0`.
+
+Para voltar, substitua o marcador do diretório de migração pelo caminho registrado. Pare o novo contêiner e inicie o antigo preservado. Os dados originais não foram atualizados pelo fork, portanto nenhum banco precisa ser sobrescrito:
+
+```bash
+set -euo pipefail
+MIGRATION_DIR='/opt/agent2api/migrations/<MIGRATION_TIMESTAMP>'
+OLD_CONTAINER=$(cat "$MIGRATION_DIR/old-container-name.txt")
+docker container inspect "$OLD_CONTAINER" >/dev/null
+STAMP=$(date +%Y%m%d-%H%M%S)
+if docker container inspect agent2api >/dev/null 2>&1; then
+  docker stop --time 60 agent2api
+  docker rename agent2api "agent2api-fork-stopped-$STAMP"
+fi
+docker rename "$OLD_CONTAINER" agent2api
+docker start agent2api
+```
+
+Preserve o contêiner antigo, o diretório original, `data-before-fork.tar` e `account-key.env`. Não execute as duas instâncias ao mesmo tempo. Se optar por atualizar o diretório original diretamente, a reversão exige todos os dados anteriores e a chave original, além do programa antigo: por exemplo, o schema 22 de `3.3.0-beta.5/.6` sobe para o schema 24 em `3.4.2`, e programas antigos recusam bancos mais novos. No Compose, também pare o serviço, faça backup e copie os dados para um diretório separado; depois altere imagem, mount e `AGENT2API_SELF_UPDATE`, preservando a configuração original do Compose para reversão.
+
 ### Uso de memória
 
 O gateway da imagem (alvos Linux) já vem com o alocador jemalloc embutido. Em execuções longas e com vários encaminhamentos de contas em paralelo ele fragmenta bem menos que o alocador do sistema, e o RSS deixa de subir aos poucos — que é justamente onde máquinas com pouca memória costumam travar ou ser mortas por OOM.
@@ -376,7 +456,7 @@ Quando há uma nova versão, uma barra "Reiniciar e atualizar" surge na parte de
 | Adicionar, editar, excluir e ativar/desativar modelos públicos; selecionar canais e modelos upstream | Editar mapeamentos dos modelos de origem, níveis de raciocínio e flags de capacidade |
 | Copiar gateway keys, ativar/desativar keys | Criar keys, definir listas de provedores/modelos permitidos |
 | Gerenciar e testar proxies HTTP / SOCKS5 e nós de assinaturas; sincronizar endpoints do Clash Verge; baixar, importar e iniciar/parar o kernel | Adicionar, editar e atualizar assinaturas de proxy; importar arquivos de assinatura |
-| Ativar/desativar tarefas agendadas, alterar intervalos | Alterar porta, roteamento, retry, timeouts, retenção de dados |
+| Ativar/desativar tarefas agendadas, alterar intervalos; criar, editar, visualizar e gerenciar grupos de roteamento | Alterar porta, retries globais, timeouts globais, retenção de dados |
 | Consultas rápidas do assistente (saldos / modelos duplicados / uso de hoje / contas limitadas) | Conversa livre e chamada de ferramentas do assistente |
 | Ver status do takeover de Agent, restaurar | Reescrever configurações de clientes (um celular não lê arquivos locais) |
 

@@ -408,10 +408,11 @@ fn retry_log_line(reason: &str, delay_ms: u64, used: usize, total: usize) -> Str
 /// 成功转流式时移交给响应流。
 pub(super) async fn forward_with_providers(
     service: &UpstreamService,
-    ctx: ProviderContext<'_>,
+    mut ctx: ProviderContext<'_>,
     slot: &mut Option<InFlightGuard>,
     connections: &mut ConnectionGuard,
 ) -> Result<ForwardOutcome, GatewayError> {
+    super::route_rules_runtime::prepare(service, &mut ctx).await;
     let model = model_of(ctx.body);
     if ctx.routing.group.is_some() {
         ctx.telemetry.set_route_decision(json!({ "scope": ctx.routing.scope, "configSnapshot": ctx.routing.json(),
@@ -512,7 +513,84 @@ pub(super) async fn forward_with_providers(
             if with_mapping { "，含映射" } else { "" },
         ),
     );
-    attempt_queue(service, &ctx, &provider_ids, slot, connections).await
+    if ctx.routing.group.is_none() {
+        let started = std::time::Instant::now();
+        let outcome = attempt_queue(service, &ctx, &provider_ids, slot, connections).await?;
+        return super::route_content::deliver(outcome, ctx.telemetry.clone(), started, None, None, ctx.stream).await;
+    }
+    let client_stream = ctx.stream;
+    ctx.stream = true;
+    let held_slot = slot.take();
+    let patience = ctx.routing.group.as_ref().map(|group| group.patience_ms()).unwrap_or(0);
+    let mut patience_until = None;
+    let sticky_generation = service.route.sticky_generation();
+    let conv_key = ctx.routing.conversation_key(ctx.client_headers, ctx.body);
+    let mut rounds = 0usize;
+    loop {
+        rounds += 1;
+        let attempt_started = std::time::Instant::now();
+        let previous_attempts = ctx.telemetry.snapshot().attempts_detail.len();
+        let result = super::route_content::during_send(attempt_queue(service, &ctx, &provider_ids, slot, connections),
+            &ctx.routing, ctx.telemetry, patience_until).await;
+        let snapshot = ctx.telemetry.snapshot();
+        let candidate_elapsed = snapshot.attempts_detail.last().and_then(|attempt| attempt.started_at)
+            .map(|at| logging::now_ms().saturating_sub(at).max(0) as u64).unwrap_or(0);
+        let candidate_started = std::time::Instant::now().checked_sub(std::time::Duration::from_millis(candidate_elapsed)).unwrap_or(attempt_started);
+        let candidate_id = snapshot.attempts_detail.last().map(|attempt| attempt.candidate_id.clone()).unwrap_or_default();
+        let candidate = ctx.routing.group_projection.accounts.iter().find(|account| crate::server::core::routing_groups::attempt_key(account) == candidate_id);
+        let first_seconds = candidate.and_then(|account| account.get("routingFirstToken")).and_then(Value::as_u64).unwrap_or(0);
+        let patience = candidate.and_then(|account| account.get("routingPatience")).and_then(Value::as_i64)
+            .map(|seconds| match seconds { n if n < 0 => 0, 0 => 60_000, n => n.min(240) as u64 * 1000 }).unwrap_or(patience);
+        let has_alternative = super::route_content::has_alternative(ctx.telemetry, &ctx.routing.excluded);
+        let deadline = if has_alternative && ctx.routing.settings.sticky != config::StickyMode::Strict {
+            (first_seconds > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(first_seconds.saturating_mul(1000).saturating_sub(candidate_elapsed)))
+        } else { None };
+        let deadline = match (deadline, patience_until) { (Some(a), Some(b)) => Some(a.min(b)), (None, b) => b, (a, None) => a };
+        let result = match result {
+            Ok(ForwardOutcome::Stream { status, stream }) => super::route_content::hold(stream, deadline).await.map(|stream| ForwardOutcome::Stream { status, stream }),
+            other => other,
+        };
+        match result {
+            Ok(outcome) => {
+                if !snapshot.account_id.is_empty() {
+                    if ctx.routing.settings.breaker_enabled { service.route.breaker_success(&snapshot.account_id, ctx.routing.settings.breaker_success_threshold); }
+                    service.route.backoff_clear(&snapshot.account_id); service.route.sink_clear(&snapshot.account_id);
+                    service.route.sticky_bind(&conv_key, &model, &candidate_id,
+                        super::route_state::RouteState::conversation_source(ctx.client_headers, ctx.body), logging::now_ms(),
+                        ctx.routing.sticky_ttl(), sticky_generation);
+                    if let Some(candidate) = candidate {
+                        super::route_affinity::bind(service, &ctx.routing, &conv_key, candidate,
+                            super::route_state::RouteState::conversation_source(ctx.client_headers, ctx.body), sticky_generation);
+                    }
+                }
+                return super::route_content::deliver(outcome, ctx.telemetry.clone(), candidate_started,
+                    Some(candidate_started.elapsed().as_secs_f64() * 1000.0), held_slot, client_stream).await;
+            }
+            Err(error) => {
+                if ctx.telemetry.cancel_token().is_some_and(|token| token.is_cancelled()) { return Err(error); }
+                ctx.telemetry.finish_last_attempt(Some(error.status_code as i64), Some(&error.message));
+                if !super::route_content::transient(&error) || rounds >= 32 || ctx.routing.settings.sticky == config::StickyMode::Strict { return Err(error); }
+                for attempt in snapshot.attempts_detail.iter().skip(previous_attempts) {
+                    if !attempt.candidate_id.is_empty() && !ctx.routing.excluded.contains(&attempt.candidate_id) { ctx.routing.excluded.push(attempt.candidate_id.clone()); }
+                }
+                if !candidate_id.is_empty() && !ctx.routing.excluded.contains(&candidate_id) { ctx.routing.excluded.push(candidate_id); }
+                if super::route_content::has_alternative(ctx.telemetry, &ctx.routing.excluded) {
+                    ctx.telemetry.clear_uncommitted_error();
+                    continue;
+                }
+                let until = *patience_until.get_or_insert_with(|| std::time::Instant::now() + std::time::Duration::from_millis(patience));
+                if patience == 0 || std::time::Instant::now() >= until { return Err(error); }
+                let wait = super::route_content::retry_delay(&error, rounds, until.saturating_duration_since(std::time::Instant::now()));
+                ctx.telemetry.note_attempt_retry("路由成员暂时繁忙，等待后重试", Some(error.status_code as i64), wait.as_millis() as u64);
+                if let Some(cancel) = ctx.telemetry.cancel_token() {
+                    tokio::select! { _ = tokio::time::sleep(wait) => {}, _ = cancel.cancelled() => return Err(cancellation::cancelled_error()) }
+                } else { tokio::time::sleep(wait).await; }
+                if std::time::Instant::now() >= until { return Err(error); }
+                ctx.routing.excluded.clear();
+                ctx.telemetry.clear_uncommitted_error();
+            }
+        }
+    }
 }
 
 /// 按网关 Key 的**可用提供商**白名单过滤候选链（R9，照抄 OmniProxy 的
@@ -596,7 +674,7 @@ async fn attempt_queue(
     // 标识、也没有可用的会话特征（无 messages），粘性自动不生效。整个请求周期
     // 只用这一个键 —— 429 顺延的后续选路查的是同一个会话，粘住的账号失败后
     // 同样顺延（粘性不等于无条件）。
-    let conv_key = super::route_state::RouteState::conversation_key(ctx.client_headers, &ctx.body);
+    let conv_key = ctx.routing.conversation_key(ctx.client_headers, ctx.body);
     let sticky_generation = service.route.sticky_generation();
     let sticky_source = super::route_state::RouteState::conversation_source(ctx.client_headers, &ctx.body);
     if !conv_key.is_empty() {
@@ -614,7 +692,7 @@ async fn attempt_queue(
         ctx.telemetry.set_route_decision(decision);
     }
     let mut conversation_ids = None;
-    let mut tried_ids: Vec<String> = Vec::new();
+    let mut tried_ids: Vec<String> = ctx.routing.excluded.clone();
     // ── 两份独立的预算（见 config::RetrySettings）─────────────────────
     //   - `budget`：同一个账号上还能**原地重发**几次。整份请求共用一份，
     //     由 `send_with_retry` 逐次扣减 —— 于是它天然花在「第一个真正发出去的
@@ -703,6 +781,7 @@ async fn attempt_queue(
         let attempt_key = target.attempt_key().unwrap_or_default();
         let selected_model = target.account.as_ref().and_then(crate::server::core::routing_groups::candidate_model)
             .map(str::to_string).unwrap_or_else(|| model.clone());
+        let selected_sink = super::route_affinity::sink_enabled(target.account.as_ref(), ctx.routing.settings.sink);
         // ── 自定义提供商的分流（第二阶段；与下面的 is_stateful 同形状）──
         // 位置在 `kind_from_id` 之前：custom id **不进** `ProviderKind`
         // （「不认识就是不认识」的全仓口径，见 `custom_providers` 的模块头），
@@ -714,10 +793,10 @@ async fn attempt_queue(
             let custom_account_id = target.account_id.clone();
             match attempt_custom(service, ctx, target, slot, connections, degraded).await {
                 Ok(outcome) => {
-                    if let Some(account_id) = custom_account_id.as_deref() {
+                    if let Some(account_id) = custom_account_id.as_deref().filter(|_| ctx.routing.group.is_none()) {
                         service.route.sticky_bind(
                             &conv_key, &model, &attempt_key, sticky_source, logging::now_ms(),
-                            ctx.routing.settings.sticky.ttl_ms().unwrap_or(0), sticky_generation,
+                            ctx.routing.sticky_ttl(), sticky_generation,
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
@@ -764,7 +843,7 @@ async fn attempt_queue(
                                 );
                                 // 与内置家的动作 1 同款：还有额度时被 429 的
                                 // 垫底（见那边的说明）
-                                if ctx.routing.settings.sink && ctx.pinned_account.is_none() {
+                                if selected_sink && ctx.pinned_account.is_none() {
                                     service.route.sink_mark(&account_id, logging::now_ms());
                                 }
                             } else {
@@ -859,10 +938,10 @@ async fn attempt_queue(
             .await
             {
                 Ok(outcome) => {
-                    if let Some(account_id) = stateful_account_id.as_deref() {
+                    if let Some(account_id) = stateful_account_id.as_deref().filter(|_| ctx.routing.group.is_none()) {
                         service.route.sticky_bind(
                             &conv_key, &model, &attempt_key, sticky_source, logging::now_ms(),
-                            ctx.routing.settings.sticky.ttl_ms().unwrap_or(0), sticky_generation,
+                            ctx.routing.sticky_ttl(), sticky_generation,
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear(account_id);
@@ -1096,7 +1175,7 @@ async fn attempt_queue(
             // `send_body` 现在是 async（要问插件家「这个思考档位怎么翻译」），
             // 而 `or_insert_with` 的闭包不能 await。改成「先查、miss 时 await
             // 生成、再插入」—— 语义等价，代价是 miss 那次多一次哈希查找。
-            let cache_key = (provider_id, account_pool.clone(), selected_model.clone(), degraded);
+            let cache_key = (provider_id, account_pool.clone(), if ctx.routing.group.is_some() { attempt_key.clone() } else { selected_model.clone() }, degraded);
             if !send_cache.contains_key(&cache_key) {
                 let built = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
                 send_cache.insert(cache_key.clone(), built);
@@ -1304,7 +1383,7 @@ async fn attempt_queue(
                     // 绑定无条件覆盖：会话换到新账号（前一个失败顺延过来）
                     // 时，粘的必须是现在这个能干活的。
                     let route_settings = ctx.routing.settings;
-                    if let Some(account_id) = target.account_id.as_deref() {
+                    if let Some(account_id) = target.account_id.as_deref().filter(|_| ctx.routing.group.is_none()) {
                         if route_settings.breaker_enabled {
                             service
                                 .route
@@ -1331,14 +1410,14 @@ async fn attempt_queue(
                             );
                         }
                     }
-                    if let (Some(_ttl), true, Some(_)) = (
-                        route_settings.sticky.ttl_ms(),
+                    if let (true, true, Some(_)) = (
+                        ctx.routing.sticky_ttl() > 0 && ctx.routing.group.is_none(),
                         !conv_key.is_empty(),
                         target.account_id.as_deref(),
                     ) {
                         service.route.sticky_bind(
                             &conv_key, &model, &attempt_key, sticky_source,
-                            logging::now_ms(), route_settings.sticky.ttl_ms().unwrap_or(0),
+                            logging::now_ms(), ctx.routing.sticky_ttl(),
                             sticky_generation,
                         );
                     }
@@ -1388,7 +1467,9 @@ async fn attempt_queue(
                             Some(i64::from(failure.error.status_code)),
                             Some(&failure.error.message),
                         );
-                        return Err(failure.error);
+                        let mut error = failure.error;
+                        error.retry_forbidden = true;
+                        return Err(error);
                     }
                     // ── 指定错误码直接换号 ──────────────────────────────
                     // 用户点名的状态码（默认 402）不做「同一账号再看一眼」：
@@ -1593,7 +1674,7 @@ async fn attempt_queue(
                             // 正常冷却，不算），排到所有没被 429 过的后面 —— 负载
                             // 摊开，而不是每次都回到队列头再撞一遍。成功一次或
                             // 重启后放出（见 route_state.rs）。
-                            if ctx.routing.settings.sink && ctx.pinned_account.is_none() {
+                            if selected_sink && ctx.pinned_account.is_none() {
                                 service.route.sink_mark(&account_id, logging::now_ms());
                             }
                             // 日志文案与账号页的「限流」列同口径：以真名为主，
@@ -3098,10 +3179,11 @@ async fn send_with_retry(
                     .with_optional_code(detail.code)
             }
         };
-        let error = if uncertain_image {
+        let mut error = if uncertain_image {
             GatewayError::with_status(error.status_code, format!("{}；图片请求可能已消耗额度，未自动重试", error.message))
                 .with_optional_code(error.upstream_code)
         } else { error };
+        error.retry_forbidden = stop;
         return Err(OutboundFailure { class, error, stop, policy });
     }
 }

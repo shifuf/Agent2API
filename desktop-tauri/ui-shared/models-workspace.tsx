@@ -9,6 +9,7 @@ import { ModelBatch } from './models-batch'
 import { ModelError } from './models-error'
 import { modelTypeOptions, type ModelAction, type ModelCatalog, type ModelRequest, type Translate } from './models-types'
 import './models-workspace.css'
+import { ModelBrand } from './model-brand'
 
 export function ModelsWorkspace({ request, onSources, onChanged, t }: {
   request: ModelRequest; onSources: () => void; onChanged?: () => void; t: Translate
@@ -118,11 +119,11 @@ export function ModelsWorkspace({ request, onSources, onChanged, t }: {
           {[...groups].sort(([a], [b]) => a.localeCompare(b)).map(([id, models]) => <Fragment key={id}>
             <TableRow className='models-developer-row'><TableCell colSpan={7}><button className='models-group-toggle' type='button' aria-expanded={!collapsed.includes(id)}
               onClick={() => setCollapsed(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id])}>
-              <span aria-hidden='true'>{collapsed.includes(id) ? '▸' : '▾'}</span>{developers.get(id) || id}<Badge variant='secondary'>{models.length}</Badge>
+              <span aria-hidden='true'>{collapsed.includes(id) ? '▸' : '▾'}</span><ModelBrand id={id} name={developers.get(id)} size='small' />{developers.get(id) || id}<Badge variant='secondary'>{models.length}</Badge>
             </button></TableCell></TableRow>
             {!collapsed.includes(id) && models.map(model => <TableRow key={model.id} data-model-row={model.id}>
               <TableCell><Checkbox aria-label={`${t('选择')} ${model.id}`} disabled={busy} checked={selected.includes(model.id)} onCheckedChange={checked => setSelected(current => checked ? [...new Set([...current, model.id])] : current.filter(id => id !== model.id))} /></TableCell>
-              <TableCell><div className='models-name'><span className='models-avatar' title={model.icon || model.developer || 'custom'} aria-hidden='true'>{(model.developer || model.name || model.id).slice(0, 1).toUpperCase()}</span>
+              <TableCell><div className='models-name'><ModelBrand id={model.developer} name={developers.get(model.developer || 'custom')} icon={model.icon} />
                 <div className='min-w-0'><span className='block break-words font-medium'>{model.name || model.id}</span>{model.group && <span className='text-xs text-subtle'>{model.group}</span>}</div></div></TableCell>
               <TableCell className='models-id'>{model.id}</TableCell>
               <TableCell><Badge variant='secondary'>{typeLabels.find(option => option.id === model.type)?.label || t('对话')}</Badge>

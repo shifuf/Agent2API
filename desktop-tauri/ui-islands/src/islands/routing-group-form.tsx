@@ -28,6 +28,7 @@ export function routeGroupFieldsError(fields: RoutingGroupFields, reserved: stri
 
 export function createRouteMembers(choices: RouteModelChoice[], accounts: AccountRecord[]): RouteMember[] {
   return choices.map(choice => ({ id: newRouteId(), provider: choice.provider, model: choice.model, included: true,
+    accountScope: 'selected', weight: 1,
     accounts: accounts.filter(account => providerOf(account) === choice.provider && account.enabled !== false).map(account => account.id) }))
 }
 

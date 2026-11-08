@@ -11,12 +11,22 @@
 이 포크는 게이트웨이 전체에 수동 모델 카탈로그를 사용합니다. 기존 계정, 키 및 업스트림 목록은 유지되지만 업스트림 모델은 자동 공개되지 않습니다. 업그레이드 후 공개 모델을 추가하세요. 기존 라우팅 그룹은 유지됩니다.
 
 1. 계정 페이지에서 「사용자 지정 채널 추가」를 누르거나 계정 추가 → API 템플릿으로 들어가 API 제공자 또는 템플릿을 선택하고 API 주소와 이름 있는 Key 그룹을 설정합니다. 그룹마다 여러 키를 등록할 수 있으며 Key와 「지원 모델」은 별도 영역에서 관리합니다. 모델을 선택하지 않고 채널을 먼저 저장한 뒤 나중에 설정할 수 있습니다. 그룹별로 모델을 가져오거나 「모든 그룹의 모델 가져오기」를 실행한 후 모델을 선택하고 확인하세요. 목록을 가져와도 자동으로 선택되지 않으며, 모델이 없거나 비활성화된 그룹은 요청을 전달하지 않습니다.
-2. 모델 관리 → 모델 추가에서 모델을 독립적으로 생성합니다. 개발사나 제공자로 카탈로그 후보를 검색하면 공개 모델 ID, 이름 등의 정보가 자동 입력됩니다. 정보를 수정하거나 사용자 지정 ID를 사용할 수도 있습니다. 생성 시 채널을 선택할 필요가 없으며 새 모델은 기본적으로 비활성 상태입니다. 정보를 저장한 후 목록의 「채널 연결」을 열어 채널마다 업스트림 모델 하나를 선택하고 「연결 저장」을 누른 다음 모델을 활성화하세요. 공개 모델 하나에 여러 채널을 연결할 수 있으며 데스크톱과 모바일 모두 관리할 수 있습니다.
+2. 모델 관리 → 모델 추가에서 개발사나 제공자를 고른 뒤 공개 모델 ID를 검색해 선택합니다. 사용자 지정 ID와 메모도 직접 입력할 수 있습니다. 편집기에는 제공자, 모델 ID, 메모만 표시되며 모델 정보는 카탈로그에서 자동 입력됩니다. 생성 시 채널은 필요하지 않으며 새 모델은 기본적으로 비활성 상태입니다. 저장 후 「채널 연결」에서 계정이 있는 제공자를 드롭다운으로 고르고 해당 제공자의 업스트림 모델 하나를 선택하세요. 제공자를 바꿔도 기존 선택은 유지됩니다. 연결을 저장한 뒤 모델을 활성화합니다. 데스크톱과 모바일 모두 공개 모델 하나에 여러 채널을 연결할 수 있습니다.
 3. 게이트웨이 Key의 생성, 편집, 조회와 사용 범위 설정은 별도로 진행합니다. 목록의 「사용 가능 범위」에서 허용 채널과 공개 모델을 각각 선택하세요. 선택 패널은 검색, 선택 항목 미리보기 및 확인을 지원합니다. 두 항목을 모두 설정하면 두 제한이 동시에 적용됩니다. 채널 미선택은 모든 채널, 모델 미선택은 모든 공개 모델을 허용합니다. 채널을 삭제해도 기존 Key 제한은 유지됩니다.
 4. 프록시 페이지에서 구독을 관리하고 코어를 설치하거나 가져옵니다. 구독 노드는 계정 및 프록시 풀에서 사용할 수 있습니다. 코어를 중지하거나 노드를 비활성화해도 연결된 요청이 직접 연결로 전환되지 않습니다.
 
 채널 추가와 편집은 중앙 폼에서 진행하고 Key 편집과 모델 선택은 각각 별도의 옆 패널에서 진행합니다. 모델 선택은 확인 후 적용됩니다. PublicProviderConf의 `dist/all.json`에서 후보를 불러와 개발사별로 정리하고 ID 중복을 제거하여 한 시간 동안 캐시합니다. 계정의 업스트림 모델에서 사용자 지정 공개 ID를 만들거나 기존 사용자 지정 모델을 검색하고 편집할 수 있습니다. 비활성 상태이거나 보관되었거나 채널에 연결되지 않았거나 사용 가능한 업스트림이 없는 모델은 클라이언트의 호출 가능한 모델 목록과 게이트웨이 Key 후보에 표시되지 않습니다. 채널 후보에는 사용 가능한 계정이 있는 활성 채널만 표시됩니다. 사용할 수 없게 된 기존 Key 제한은 별도로 표시하고 유지하며 직접 제거할 수 있습니다. 「모델 카탈로그 새로고침」으로 즉시 갱신할 수 있고 네트워크 오류 시 캐시를 유지합니다. 카탈로그 후보를 선택하거나 모델 정보만 저장해도 자동으로 공개되지 않습니다.
 
+
+### 라우팅 그룹과 모델 직접 선택
+
+모델 추가 시 개발사를 선택한 후 공개 모델 ID 입력란에서 바로 검색하고 선택합니다. 사용자 지정 ID도 입력할 수 있습니다. 캐시된 개발사 카탈로그와 연결된 계정의 후보를 합치며 기존 모델과 중복 ID는 통합합니다.
+
+라우팅 화면은 개발사를 식별하고 여러 채널의 동일 모델을 그룹으로 제안합니다. 제안은 기본적으로 공개되지 않습니다. 자동 그룹을 명시적으로 켜거나 사용자 지정 그룹을 저장하고 활성화하세요. 숨기기, 복원, 복사, 정렬, 가져오기와 내보내기를 지원합니다. 복사와 가져오기로 만든 그룹은 기본적으로 비활성화됩니다. 내보내기에는 계정 ID와 로컬 디렉터리 조건이 있는 규칙이 포함되지 않습니다. 가져온 후 채널과 계정 범위를 확인하세요.
+
+순서, 순환, 스마트, 최소 사용량, 소비 속도, 무료, 속도, 가중치, 수동, 공급자 우선 전략을 지원합니다. 구성원은 선택한 계정이나 채널의 모든 계정을 사용하며 중첩 그룹과 모델 패턴도 지원합니다. 규칙에는 token 수, 이미지, 추론 수준, 클라이언트, 의도, 압축 요청, 시간대, 디렉터리를 지정합니다. 의도와 자동 추론 수준에는 분류기가 필요하며 추가 업스트림 호출이 발생합니다. 시간 초과나 잘못된 결과는 일반 라우팅으로 돌아갑니다.
+
+미리보기는 요청 조건, 일치한 규칙, 우선 후보와 제외 이유를 표시하며 요청을 보내거나 순환 상태를 바꾸지 않습니다. 첫 콘텐츠 시간 초과는 출력 전까지만 업스트림을 전환하며 엄격한 고정은 계정을 바꾸지 않습니다. 새 그룹은 일시적 오류 대기 시간을 설정할 수 있고 기존 그룹의 대기 동작은 유지됩니다. 모바일에서는 「더 보기 → 라우팅」을 엽니다. 비활성화되거나 사용 가능한 계정이 없는 그룹은 클라이언트와 Key 모델 목록에 표시되지 않으며 Key의 모델 및 채널 제한은 항상 적용됩니다.
 
 ## 목차
 
@@ -220,6 +230,76 @@ services:
 
 소스에서 빌드하려면 저장소를 clone하고 `docker compose up -d --build --pull never`를 실행하세요. Dockerfile은 lock 파일로 의존성을 설치하고 UI를 다시 빌드합니다. 최종 이미지는 게이트웨이와 패널만 포함하며 Node / Rust 도구 체인은 포함하지 않습니다.
 
+### 업스트림 컨테이너에서 이 fork로 이전
+
+이 fork의 **Docker package** 빌드가 성공하고 대상 `sha-<40자리 전체 커밋 SHA>` 이미지를 pull할 수 있는지 확인한 뒤 진행하세요. 저장소에 워크플로 파일이 있다고 이미지가 게시된 것은 아닙니다. 아래 예시는 Linux에서 `docker run`으로 만든 `agent2api`, 포트 `3065:3065`, `AGENT2API_PROXY_HOME=/data`, bind mount `/www/server/panel/data:/data`를 가정합니다. 실제 마운트를 먼저 확인하고, 현재 디렉터리로 이전 `./data` 경로를 추측하지 마세요:
+
+```bash
+docker inspect --format '{{.Config.Image}}{{println}}{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}' agent2api
+```
+
+`agent2api.db`, 존재하는 `-wal` / `-shm`, `account.key`, `update-token.key`, `cloud-sync.key`, 플러그인과 기존 설정을 포함해 데이터 디렉터리 전체를 보존하세요. 기존 컨테이너에 `AGENT2API_ACCOUNT_KEY`가 설정되어 있다면 정확히 같은 값을 유지해야 합니다. 유효한 환경 키가 `account.key`보다 우선하므로 새 키로 교체하지 마세요. 아래 명령은 이 변수만 보호된 파일에 저장하며 터미널에는 표시하지 않습니다. 다른 사용자 지정 환경 변수, 포트, 네트워크와 추가 마운트도 유지하세요.
+
+새 컨테이너는 별도 디렉터리의 사본을 사용하고 원본은 기존 컨테이너용으로 남깁니다. `/www/server/panel/data`가 서버 관리 패널의 데이터 디렉터리일 수도 있으므로 전체를 이동하거나 덮어쓰거나 비우지 마세요. 다른 파일도 사본과 백업에 포함될 수 있으니 이전 디렉터리와 키 파일을 민감한 백업으로 보호하세요. 서버의 **root Bash**에서 이미지 자리표시자를 바꾼 뒤 실행합니다. 이미지를 먼저 pull하고 기존 컨테이너를 중지한 다음 복사와 압축 없는 아카이브를 진행합니다. 어느 단계든 실패하면 중단합니다. 사본과 아카이브 공간이 필요하며, 중단 시간에는 복사, 백업 및 새 버전 시작 시간이 포함됩니다.
+
+```bash
+set -euo pipefail
+umask 077
+NEW_IMAGE='ghcr.io/shifuf/agent2api:sha-<PUBLISHED_FULL_40_CHARACTER_SHA>'
+SOURCE_DATA='/www/server/panel/data'
+test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' agent2api)" = "$SOURCE_DATA"
+test -d "$SOURCE_DATA"
+docker pull "$NEW_IMAGE"
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+MIGRATION_DIR="/opt/agent2api/migrations/$STAMP"
+FORK_DATA="$MIGRATION_DIR/data"
+OLD_CONTAINER="agent2api-before-fork-$STAMP"
+test ! -e "$MIGRATION_DIR"
+mkdir -p "$FORK_DATA"
+chmod 700 "$MIGRATION_DIR"
+printf '%s\n' "$OLD_CONTAINER" > "$MIGRATION_DIR/old-container-name.txt"
+docker inspect --format 'container={{.Id}} image={{.Config.Image}} imageId={{.Image}}' agent2api > "$MIGRATION_DIR/container-image.txt"
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' agent2api |
+  sed -n '/^AGENT2API_ACCOUNT_KEY=/p' > "$MIGRATION_DIR/account-key.env"
+
+docker stop --time 60 agent2api
+cp -a -- "$SOURCE_DATA/." "$FORK_DATA/"
+tar --numeric-owner -cpf "$MIGRATION_DIR/data-before-fork.tar" -C "$FORK_DATA" .
+tar -tf "$MIGRATION_DIR/data-before-fork.tar" >/dev/null
+docker rename agent2api "$OLD_CONTAINER"
+docker run -d --name agent2api --restart unless-stopped \
+  -p 3065:3065 \
+  --env-file "$MIGRATION_DIR/account-key.env" \
+  -e AGENT2API_SELF_UPDATE=0 \
+  -e AGENT2API_CAPTCHA_ENABLED=1 \
+  -v "$FORK_DATA:/data" \
+  "$NEW_IMAGE"
+printf 'old_container=%s\nmigration_dir=%s\n' "$OLD_CONTAINER" "$MIGRATION_DIR"
+```
+
+마지막에 출력되는 `migration_dir`를 기록하세요. 복사나 아카이브가 실패하면 기존 컨테이너 이름은 아직 바뀌지 않았으므로 `docker start agent2api`로 복구하고 원인을 확인하세요. 이후 교체 명령은 실행하지 마세요. 기존 컨테이너를 보존하면 쓰기 가능 레이어도 유지됩니다. 패널에서 내부 업데이트를 했다면 이전 이미지 태그를 다시 pull하는 것보다 원래 프로그램을 정확히 복원할 수 있습니다.
+
+시작 후 `/health`와 패널의 계정, 자격 증명 상태, 게이트웨이 Key, 플러그인, 라우팅을 확인하세요. 이 브랜치는 공개 모델을 수동으로 관리합니다. 계정과 Key는 유지되지만 업스트림 모델은 자동 공개되지 않습니다. 공개 모델을 추가하고 채널을 연결해 활성화하세요. 가능하면 클라이언트의 기존 모델 ID를 유지하고 기존 Key로 실제 요청을 검증하세요. 상태 확인 성공만으로 서비스 연속성을 보장할 수 없으며, 이전에는 모델 설정과 잠깐의 중단이 필요합니다. 이후 업데이트에서도 출력된 디렉터리의 `data`를 마운트하고 `AGENT2API_SELF_UPDATE=0`을 유지하세요.
+
+롤백할 때 이전 디렉터리 자리표시자를 기록한 경로로 바꾸세요. 새 컨테이너를 중지한 다음 보존한 기존 컨테이너를 시작합니다. 원본 데이터는 fork가 업그레이드하지 않았으므로 데이터베이스를 덮어쓸 필요가 없습니다:
+
+```bash
+set -euo pipefail
+MIGRATION_DIR='/opt/agent2api/migrations/<MIGRATION_TIMESTAMP>'
+OLD_CONTAINER=$(cat "$MIGRATION_DIR/old-container-name.txt")
+docker container inspect "$OLD_CONTAINER" >/dev/null
+STAMP=$(date +%Y%m%d-%H%M%S)
+if docker container inspect agent2api >/dev/null 2>&1; then
+  docker stop --time 60 agent2api
+  docker rename agent2api "agent2api-fork-stopped-$STAMP"
+fi
+docker rename "$OLD_CONTAINER" agent2api
+docker start agent2api
+```
+
+기존 컨테이너, 원본 데이터 디렉터리, `data-before-fork.tar`, `account-key.env`를 보존하고 두 인스턴스를 동시에 실행하지 마세요. 원본 디렉터리를 직접 업그레이드했다면 이전 이미지만 바꿔서는 안 되며, 업그레이드 전 전체 데이터와 원래 키를 함께 복원해야 합니다. 예를 들어 `3.3.0-beta.5/.6`의 schema 22는 `3.4.2`의 schema 24로 올라가며, 이전 프로그램은 더 높은 버전의 데이터베이스를 거부합니다. Compose에서도 서비스를 중지하고 데이터를 백업 및 별도 디렉터리로 복사한 다음 이미지, 데이터 마운트와 `AGENT2API_SELF_UPDATE`를 변경하세요. 롤백을 위해 원래 Compose 설정도 보관하세요.
+
 ### 메모리 사용량
 
 이미지 안의 게이트웨이(Linux 대상)에는 jemalloc 할당자가 내장되어 있습니다. 장시간 실행과 다계정 동시 포워딩에서 시스템 기본 할당자보다 메모리 단편화가 덜 생기고 RSS도 천천히 늘어나는 일이 줄어듭니다 —— 소형 메모리 머신이 가장 자주 눌리거나 OOM 으로 죽는 지점이 바로 여기입니다.
@@ -376,7 +456,7 @@ Release의 `Agent2API-<버전>.ipa`는 **기본이 미서명 패키지**입니�
 | 공개 모델 추가·편집·삭제·활성화/비활성화, 채널 및 업스트림 모델 선택 | 원본 모델 매핑, 추론 수준, 기능 플래그 편집 |
 | 게이트웨이 키 복사, 키 활성화/비활성화 | 키 생성, 제공자/모델 허용 목록 설정 |
 | HTTP / SOCKS5 프록시 및 구독 노드 관리·연결 테스트, Clash Verge 엔드포인트 동기화, 커널 다운로드·가져오기·시작/중지 | 프록시 구독 추가·편집·새로고침, 구독 파일 가져오기 |
-| 예약 작업 활성화/비활성화, 간격 변경 | 포트, 라우팅, 재시도, 타임아웃, 데이터 보존 변경 |
+| 예약 작업 활성화/비활성화, 간격 변경, 라우팅 그룹 생성·편집·미리보기·관리 | 포트, 전역 재시도·타임아웃, 데이터 보존 변경 |
 | 어시스턴트 빠른 조회 (잔액 / 중복 모델 / 오늘 사용량 / 속도 제한 계정) | 어시스턴트 자유 대화와 도구 호출 |
 | Agent 테이크오버 상태 확인, 복원 | 클라이언트 설정 변경 (휴대폰은 로컬 파일을 읽을 수 없음) |
 

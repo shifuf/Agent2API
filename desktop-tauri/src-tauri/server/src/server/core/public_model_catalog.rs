@@ -143,12 +143,14 @@ impl CatalogCache {
 /// are involved, and callers cannot choose a URL or redirect the request.
 pub async fn snapshot(force: bool) -> Result<CatalogSnapshot, String> {
     static CACHE: OnceLock<CatalogCache> = OnceLock::new();
-    CACHE
+    let result = CACHE
         .get_or_init(|| {
             CatalogCache::new(crate::paths::config_dir().join("public-model-catalog.json"))
         })
         .snapshot_with(force, fetch_catalog)
-        .await
+        .await;
+    if let Ok(snapshot) = &result { super::routing_metadata::update_public(snapshot); }
+    result
 }
 
 async fn fetch_catalog() -> Result<Vec<u8>, String> {

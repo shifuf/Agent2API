@@ -11,12 +11,22 @@ Every form is managed from the **browser panel** afterwards (accounts, gateway k
 This fork uses a manual model catalog across the gateway. Existing accounts, keys and upstream catalogs are retained, but upstream models are not published automatically. Add public models after upgrading; existing routing groups remain available.
 
 1. On Accounts, click Add custom channel (also available under Add account → API template), choose an API provider or template, and enter the API URL and named Key groups. Each group accepts multiple keys, with Keys and Supported models managed in separate sections. You can save a channel without selected models and configure them later. Fetch models for one group or choose Fetch models for all groups, then select and confirm the models. Fetching a list does not select models automatically; groups without selected models and disabled groups do not forward requests.
-2. Under Model management → Add model, create a model independently. Search catalog candidates by developer or provider to fill the public model ID, name and other details; edit those details or use a custom ID as needed. Channel selection is not required at creation, and new models are disabled by default. After saving the details, open Associate channels from the list, choose one upstream model per channel, select Save associations, and then enable the model. A public model can use multiple channels. Both desktop and mobile support management.
+2. Under Model management → Add model, choose a developer or provider, then search and select the public model ID, or enter a custom ID and remark. The editor contains only the provider, model ID and remark; metadata is filled from the catalog automatically. No channel is required at creation, and new models are disabled by default. After saving, open Associate channels, select a provider with accounts from the dropdown, and choose one of its upstream models. Switching providers preserves selected associations. Save associations and enable the model. A public model can use multiple channels on both desktop and mobile.
 3. Create, edit or view a gateway Key separately, then use Allowed scope in the list to choose allowed channels and public models independently. Selection panels support search, a selection preview and confirmation. Both restrictions apply together. An empty channel selection allows all channels; an empty model selection allows all published models. Deleting a channel preserves existing Key restrictions.
 4. Manage subscriptions and install or import the proxy kernel on the Proxies page. Subscription nodes can serve accounts and proxy pools. Stopping the kernel or disabling a node does not make bound requests fall back to a direct connection.
 
 Channel creation and editing use a centered form, with separate adjacent panels for Key editing and model selection. Model selections apply after confirmation. Candidates preload from PublicProviderConf `dist/all.json`, grouped by developer and deduplicated by ID, with a one-hour cache. You can also choose an account's upstream model and customize its public ID, or find and edit an existing custom model. Disabled, archived or unassociated models, and models without an available upstream, do not appear in callable client model lists or gateway Key choices. Channel choices include only enabled channels with usable accounts. Unavailable saved Key restrictions remain separately visible and can be explicitly removed. Refresh model catalog updates the directory; cached data survives network failures. Selecting a catalog candidate or saving model details alone does not publish the model.
 
+
+### Routing groups and direct model selection
+
+When adding a model, select its developer and search or choose the model directly in the public model ID field. Custom IDs are also accepted. Candidates combine cached developer catalogs and connected accounts, merging existing models and duplicate IDs.
+
+The Routing page identifies developers and suggests groups for the same model across channels. Suggestions are not published by default. Enable automatic groups explicitly, or save and enable a custom group. Groups support hide/restore, copy, ordering, import and export. Copies and imports start disabled. Exports omit account IDs and rules tied to local directories; review channel and account scopes before enabling an import.
+
+Strategies include order, rotate, smart, least-used, pace, free, fast, weight, manual and provider priority. Members can use selected accounts or all accounts of a channel, nested groups and model patterns. Rules support token counts, images, reasoning effort, client, intent, compact requests, time zones and directories. Intent and automatic effort require a classifier and make an additional upstream call; timeout or invalid output falls back to normal routing.
+
+Preview accepts request conditions and shows matching rules, preferred targets and skip reasons without sending requests or advancing rotation. First-content timeout switches upstreams only before any content is emitted; strict affinity never changes accounts. New groups can configure a transient-error wait budget, while old groups retain their waiting behavior. On mobile, open More → Routing. Disabled groups or groups without eligible accounts are absent from client and Key model lists. Key model and channel restrictions always apply.
 
 ## Contents
 
@@ -220,6 +230,76 @@ Environment variables (all optional):
 
 Build from source: clone this repository and run `docker compose up -d --build --pull never`. The Dockerfile installs dependencies from lockfiles and rebuilds the UI. The final image contains the gateway and panel, without the Node or Rust toolchains.
 
+### Migrating an upstream container to this fork
+
+Wait for this fork's **Docker package** build to succeed and verify that the target `sha-<full 40-character commit SHA>` image can be pulled. A workflow file in the repository does not prove that an image has been published. This example assumes Linux, a container named `agent2api` created with `docker run`, port mapping `3065:3065`, `AGENT2API_PROXY_HOME=/data`, and the bind mount `/www/server/panel/data:/data`. Check your actual mount first; the current directory does not tell you where the original `./data` resolved:
+
+```bash
+docker inspect --format '{{.Config.Image}}{{println}}{{range .Mounts}}{{println .Type .Source "->" .Destination}}{{end}}' agent2api
+```
+
+Preserve the whole data directory, including `agent2api.db`, any `-wal` / `-shm` files, `account.key`, `update-token.key`, `cloud-sync.key`, plugins and legacy configuration. If the old container sets `AGENT2API_ACCOUNT_KEY`, retain its exact value: a valid environment key takes precedence over `account.key`. Do not generate a replacement key. The commands save only this variable to a protected file without displaying it. Also retain any other custom environment variables, ports, networks and additional mounts.
+
+The new container uses a copy in a separate directory; the original stays available to the old container. `/www/server/panel/data` may also belong to a server control panel, so do not move, overwrite or empty that directory. The copy and archive may contain unrelated files; protect the migration directory and key file as sensitive backups. Run the commands in a **root Bash** shell on the server and replace the image placeholder. Pull first, then stop the old container, copy and archive the data. Any failure stops the sequence. Allow space for both the copy and archive; downtime includes copying, backup and startup.
+
+```bash
+set -euo pipefail
+umask 077
+NEW_IMAGE='ghcr.io/shifuf/agent2api:sha-<PUBLISHED_FULL_40_CHARACTER_SHA>'
+SOURCE_DATA='/www/server/panel/data'
+test "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' agent2api)" = "$SOURCE_DATA"
+test -d "$SOURCE_DATA"
+docker pull "$NEW_IMAGE"
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+MIGRATION_DIR="/opt/agent2api/migrations/$STAMP"
+FORK_DATA="$MIGRATION_DIR/data"
+OLD_CONTAINER="agent2api-before-fork-$STAMP"
+test ! -e "$MIGRATION_DIR"
+mkdir -p "$FORK_DATA"
+chmod 700 "$MIGRATION_DIR"
+printf '%s\n' "$OLD_CONTAINER" > "$MIGRATION_DIR/old-container-name.txt"
+docker inspect --format 'container={{.Id}} image={{.Config.Image}} imageId={{.Image}}' agent2api > "$MIGRATION_DIR/container-image.txt"
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' agent2api |
+  sed -n '/^AGENT2API_ACCOUNT_KEY=/p' > "$MIGRATION_DIR/account-key.env"
+
+docker stop --time 60 agent2api
+cp -a -- "$SOURCE_DATA/." "$FORK_DATA/"
+tar --numeric-owner -cpf "$MIGRATION_DIR/data-before-fork.tar" -C "$FORK_DATA" .
+tar -tf "$MIGRATION_DIR/data-before-fork.tar" >/dev/null
+docker rename agent2api "$OLD_CONTAINER"
+docker run -d --name agent2api --restart unless-stopped \
+  -p 3065:3065 \
+  --env-file "$MIGRATION_DIR/account-key.env" \
+  -e AGENT2API_SELF_UPDATE=0 \
+  -e AGENT2API_CAPTCHA_ENABLED=1 \
+  -v "$FORK_DATA:/data" \
+  "$NEW_IMAGE"
+printf 'old_container=%s\nmigration_dir=%s\n' "$OLD_CONTAINER" "$MIGRATION_DIR"
+```
+
+Keep the printed `migration_dir`. If copying or archiving fails, the old container has not yet been renamed: run `docker start agent2api` to restore service before investigating the backup failure. Do not continue with the replacement commands. Keeping the old container also preserves its writable layer; if the panel previously updated it in place, this restores the original program more accurately than pulling its old image tag.
+
+After startup, check `/health` and verify accounts, credential status, Gateway Keys, plugins and routes in the panel. This branch uses a manually published model catalog: existing accounts and keys remain, but upstream models are not published automatically. Add public models, associate channels and enable them, keeping the clients' existing model IDs where possible. Test an actual request with an existing key. A passing health check alone does not establish service continuity; model configuration and brief downtime are part of the migration. For later upgrades, keep mounting `data` inside the printed migration directory and retain `AGENT2API_SELF_UPDATE=0`.
+
+To roll back, replace the migration-directory placeholder with the recorded path. Stop the new container, then start the preserved old container. Its original data has not been upgraded by the fork, so no database needs to be overwritten:
+
+```bash
+set -euo pipefail
+MIGRATION_DIR='/opt/agent2api/migrations/<MIGRATION_TIMESTAMP>'
+OLD_CONTAINER=$(cat "$MIGRATION_DIR/old-container-name.txt")
+docker container inspect "$OLD_CONTAINER" >/dev/null
+STAMP=$(date +%Y%m%d-%H%M%S)
+if docker container inspect agent2api >/dev/null 2>&1; then
+  docker stop --time 60 agent2api
+  docker rename agent2api "agent2api-fork-stopped-$STAMP"
+fi
+docker rename "$OLD_CONTAINER" agent2api
+docker start agent2api
+```
+
+Keep the old container, original data directory, `data-before-fork.tar` and `account-key.env`. Do not run both instances together. If you instead upgrade the original directory in place, rollback requires the complete pre-upgrade data and original key, as well as the old program: schema 22 in `3.3.0-beta.5/.6`, for example, upgrades to schema 24 in `3.4.2`, and older programs reject newer databases. For Compose, likewise stop the service, back up and copy data to a separate directory, then update the image, data mount and `AGENT2API_SELF_UPDATE`; retain the original Compose configuration for rollback.
+
 ### Memory usage
 
 The gateway in the image (Linux targets) ships with the jemalloc allocator built in. Over long uptimes and under concurrent multi-account forwarding it fragments far less than the system allocator, so RSS no longer creeps upward — the single most common way a small machine gets dragged down or OOM-killed.
@@ -376,7 +456,7 @@ When a new version is available, a "Restart & update" bar floats at the bottom: 
 | Add, edit, delete and enable/disable public models; select channels and upstream models | Edit source-model mappings, reasoning levels and capability flags |
 | Copy gateway keys, enable/disable keys | Create keys, set provider/model allowlists |
 | Manage and test HTTP / SOCKS5 proxies and subscription nodes; sync Clash Verge endpoints; download, import and start/stop the kernel | Add, edit and refresh proxy subscriptions; import subscription files |
-| Enable/disable scheduled tasks, change intervals | Change port, routing, retry, timeouts, data retention |
+| Enable/disable scheduled tasks, change intervals; create, edit, preview and manage routing groups | Change port, global retries, global timeouts, data retention |
 | Assistant quick queries (balances / duplicate models / today's usage / rate-limited accounts) | Free-form assistant chat and tool calling |
 | View Agent takeover status, restore | Rewrite client configs (a phone cannot read local files) |
 

@@ -45,8 +45,10 @@ pub struct GatewayError {
     /// [`GatewayError::with_retry_after_seconds`]）：给不出时刻就不给头，
     /// 让客户端按自己的退避来 —— 编一个等待时长比不给更坏。
     pub retry_after_secs: Option<u64>,
-    /// 仅新增 scoped runtime 的内部分类凭证；不序列化，也不替换上游业务 code。
+    /// Internal adapter classification; not serialized or substituted for upstream codes.
     pub(crate) conversation_class: Option<crate::server::core::providers::adapter::UpstreamErrorClass>,
+    /// Explicit adapter/policy stop survives outer routing retries; never serialized.
+    pub(crate) retry_forbidden: bool,
 }
 
 impl GatewayError {
@@ -59,6 +61,7 @@ impl GatewayError {
             code: None,
             retry_after_secs: None,
             conversation_class: None,
+            retry_forbidden: false,
         }
     }
 
@@ -71,6 +74,7 @@ impl GatewayError {
             code: None,
             retry_after_secs: None,
             conversation_class: None,
+            retry_forbidden: false,
         }
     }
 

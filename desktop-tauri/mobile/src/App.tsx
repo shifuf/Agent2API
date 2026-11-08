@@ -10,6 +10,7 @@ import { AccountsPage } from './pages/AccountsPage'
 import { AssistantPage } from './pages/AssistantPage'
 import { MorePage } from './pages/MorePage'
 import { ModelsPage } from './pages/ModelsPage'
+import { RoutingPage } from './pages/RoutingPage'
 import { KeysPage } from './pages/KeysPage'
 import { ProxiesPage } from './pages/ProxiesPage'
 import { TasksPage } from './pages/TasksPage'
@@ -47,6 +48,7 @@ const SCREENS: Record<ScreenId, ScreenDef> = {
   assistant: { title: t('AI 助手'), component: AssistantPage, primary: true },
   more: { title: t('更多'), component: MorePage, primary: true },
   models: { title: t('模型管理'), component: ModelsPage },
+  routing: { title: t('路由'), component: RoutingPage },
   keys: { title: t('网关 Key'), component: KeysPage },
   proxies: { title: t('网络代理'), component: ProxiesPage },
   tasks: { title: t('定时任务'), component: TasksPage },

@@ -37,6 +37,7 @@
 pub mod agents;
 pub mod agent_resources;
 pub mod accounts;
+pub mod routing_actions;
 pub mod accounts_batch;
 mod accounts_export;
 mod accounts_sort;

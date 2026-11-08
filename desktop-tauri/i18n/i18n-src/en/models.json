@@ -180,6 +180,7 @@
   "只属于这一家": "exclusive to this provider",
   "可以关联多个渠道；每个渠道选择一个上游模型，同一渠道改选时会替换之前的选择。": "You can link multiple channels, with one upstream model per channel. Selecting another model for the same channel replaces the previous selection.",
   "可删除 {n} 个（手动登记 / 自定义家）；": "{n} can be deleted (manually registered / custom provider); ",
+  "可直接输入自定义模型 ID。": "You can enter a custom model ID directly.",
   "可见": "Visible",
   "可见性": "Visibility",
   "可配思考档位": "Configurable reasoning levels",
@@ -296,6 +297,7 @@
   "搜索厂商、渠道、模型名称或 ID…": "Search developer, channel, model name or ID…",
   "搜索对外模型": "Search published models",
   "搜索对外模型…": "Search published models…",
+  "搜索或输入模型 ID…": "Search or enter a model ID…",
   "搜索模型": "Search models",
   "搜索模型 ID / 名称 / 映射名…": "Search model ID / name / mapping name…",
   "搜索模型 ID / 提供商": "Search model ID / provider",
@@ -587,5 +589,9 @@
   "：": ": ",
   "：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。": ": the models here won't appear under other providers, and aliases take effect only within this provider. To change the name / protocol / Base URL, use the “Settings” → Provider section of this provider's account on the Accounts page; to remove the whole provider, hover over it in the left rail and click × to delete it (along with its accounts).",
   "；其中 {keys} 由 models.dev 补齐": "; {keys} filled in by models.dev",
-  "；首个失败：{error}": "; first failure: {error}"
+  "；首个失败：{error}": "; first failure: {error}",
+  "账号提供商": "Account provider",
+  "选择账号提供商": "Select an account provider",
+  "搜索上游模型": "Search upstream models",
+  "没有匹配的上游模型": "No matching upstream models"
 }

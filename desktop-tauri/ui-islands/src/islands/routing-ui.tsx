@@ -8,6 +8,8 @@ export function RouteIcon({ name, size = 16 }: { name: string; size?: number }) 
   if (html) return <span className='ico inline-flex shrink-0 items-center justify-center leading-none [&>svg]:block'
     style={{ width: size, height: size }} aria-hidden='true' dangerouslySetInnerHTML={{ __html: html }} />
   const paths: Record<string, string> = {
+    route: 'M4 12h5a4 4 0 0 0 4-4V5h7M17 2l3 3-3 3M9 12a4 4 0 0 1 4 4v3h7M17 16l3 3-3 3',
+    refresh: 'M20 12a8 8 0 1 1-2.6-5.9M20 4v4.5h-4.5',
     plus: 'M12 5v14M5 12h14',
     copy: 'M9 5V3h12v14h-3M3 7h12v14H3z',
     lock: 'M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4',
@@ -61,10 +63,12 @@ export function formatDuration(ms?: number | null): string {
 }
 export function timeText(ts: number): string { return new Date(ts).toLocaleString() }
 export function strategyLabel(strategy?: string): string {
+  const labels: Record<string, string> = { smart: t('智能选择'), 'least-used': t('最少使用'), pace: t('消耗节奏'), free: t('免费优先'), fast: t('低延迟优先'), weight: t('按权重分配'), manual: t('手动指定') }
+  if (strategy && labels[strategy]) return labels[strategy]
   return strategy === 'rotate' || strategy === 'usage' ? t('负载均衡')
     : strategy === 'provider' ? t('家内轮询') : t('顺序优先')
 }
 export function stickyLabel(sticky?: string): string {
-  return sticky === 'session' ? t('会话内') : sticky === 'off' ? t('关闭')
+  return sticky === 'strict' ? t('严格绑定') : sticky === 'session' ? t('会话内') : sticky === 'off' ? t('关闭')
     : sticky === 'turn' ? t('每轮') : t('自动')
 }

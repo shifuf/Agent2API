@@ -310,6 +310,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/routing/queue", get(api::routing_api::get_routing_queue))
         .route("/api/routing/workspace", get(api::routing_workspace::get_workspace))
         .route("/api/routing/groups", get(api::routing_groups::get_groups).put(api::routing_groups::put_group))
+        .route("/api/routing/groups/actions", post(api::routing_actions::post_action))
         .route("/api/routing/preview", post(api::routing_groups::preview))
         .route("/api/routing/profile", axum::routing::put(api::routing_workspace::put_profile))
         .route("/api/routing/sticky", get(api::routing_workspace::get_sticky))

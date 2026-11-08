@@ -543,6 +543,11 @@ fn clock_text(reset_at: i64, now: i64) -> String {
 fn base_order(candidates: &[Value], strategy: RouteStrategy, meta: &PlanMeta<'_>) -> Vec<Value> {
     let mut sorted: Vec<Value> = candidates.to_vec();
     sorted.sort_by(compare_by_priority);
+    if sorted.iter().any(|account| account.get("routingStrategyPath").is_some()) {
+        let seats = super::routing_observations::seats(&sorted, crate::server::logging::now_ms());
+        let facts: HashMap<_, _> = seats.into_iter().map(|seat| (seat.key.clone(), seat)).collect();
+        return nested_order(sorted, 0, strategy.as_str(), meta, &facts);
+    }
     match strategy {
         RouteStrategy::Order => sorted,
         RouteStrategy::Rotate => {
@@ -559,7 +564,117 @@ fn base_order(candidates: &[Value], strategy: RouteStrategy, meta: &PlanMeta<'_>
                 .collect()
         }
         RouteStrategy::Provider => provider_order(sorted, meta),
+        _ => {
+            let seats = super::routing_observations::seats(&sorted, crate::server::logging::now_ms());
+            super::routing_strategies::order(strategy.as_str(), &seats, meta.cursor).into_iter().map(|index| sorted[index].clone()).collect()
+        }
     }
+}
+
+/// Order the member tree, then flatten. A member's weight belongs to its branch,
+/// regardless of how many accounts (or grandchildren) that branch contains.
+fn nested_order(accounts: Vec<Value>, depth: usize, inherited: &str, meta: &PlanMeta<'_>, facts: &HashMap<String, super::routing_strategies::Seat>) -> Vec<Value> {
+    let layer = |account: &Value| account.get("routingStrategyPath").and_then(Value::as_array).and_then(|path| path.get(depth)).cloned();
+    let Some(policy) = accounts.first().and_then(layer) else {
+        let seats: Vec<_> = accounts.iter().map(|account| facts.get(&super::routing_groups::attempt_key(account)).cloned().unwrap_or_default()).collect();
+        let strategy = match inherited { "weight" | "manual" => "smart", "provider" => "rotate", other => other };
+        let cursor = accounts.first().and_then(|account| meta.provider_cursors
+            .and_then(|cursors| cursors.get(&rotation_leaf_pool(account)))).copied().or(meta.cursor);
+        let mut order = super::routing_strategies::order(strategy, &seats, cursor);
+        order.sort_by_key(|&index| accounts[index].get("routingStickyPath").and_then(Value::as_array)
+            .and_then(|path| path.last()).and_then(Value::as_bool) != Some(true));
+        return order.into_iter().map(|index| accounts[index].clone()).collect();
+    };
+    let strategy = policy.get("strategy").and_then(Value::as_str).unwrap_or(inherited);
+    let mut branches: Vec<(String, Vec<Value>, Value)> = Vec::new();
+    for account in accounts {
+        let policy = layer(&account).unwrap_or(Value::Null);
+        let member = policy.get("memberId").and_then(Value::as_str).unwrap_or("").to_string();
+        if let Some((_, branch, _)) = branches.iter_mut().find(|(id, _, _)| id == &member) { branch.push(account); }
+        else { branches.push((member, vec![account], policy)); }
+    }
+    for (_, branch, _) in &mut branches { *branch = nested_order(std::mem::take(branch), depth + 1, strategy, meta, facts); }
+    let representatives: Vec<_> = branches.iter().filter_map(|(_, branch, _)| branch.first().cloned()).collect();
+    let mut seats: Vec<_> = representatives.iter().map(|account| facts.get(&super::routing_groups::attempt_key(account)).cloned().unwrap_or_default()).collect();
+    for (seat, (id, _, policy)) in seats.iter_mut().zip(&branches) {
+        seat.key = id.clone(); seat.weight = policy.get("weight").and_then(Value::as_u64).unwrap_or(1) as usize;
+    }
+    let group_id = policy.get("groupId").and_then(Value::as_str).unwrap_or("");
+    let cursor = meta.provider_cursors.and_then(|cursors| cursors.get(group_id).copied()).or(meta.cursor);
+    let mut order = super::routing_strategies::order(strategy, &seats, cursor);
+    // Matched rule targets are a preference chain; other eligible branches remain
+    // available for failover. Pause rules were removed at the request boundary.
+    order.sort_by_key(|&index| !branches[index].1.iter().any(|account| account.get("routingStickyPath").and_then(Value::as_array)
+        .and_then(|path| path.get(depth)).and_then(Value::as_bool) == Some(true)));
+    order.sort_by_key(|&index| branches[index].1.first().and_then(|account| account.get("routingRulePath"))
+        .and_then(Value::as_array).and_then(|path| path.get(depth)).and_then(Value::as_u64).unwrap_or(u64::MAX));
+    order.into_iter().flat_map(|index| branches[index].1.clone()).collect()
+}
+
+pub(crate) fn rotation_pools(accounts: &[Value]) -> Vec<(String, usize)> {
+    let mut pools = if accounts.iter().any(|account| account.get("routingStrategyPath").is_some()) { Vec::new() } else { provider_sizes(accounts) };
+    for account in accounts {
+        let policies = account.get("routingStrategyPath").and_then(Value::as_array);
+        if policies.and_then(|path| path.last()).is_some_and(|policy|
+            matches!(policy.get("strategy").and_then(Value::as_str), Some("rotate" | "provider" | "fast"))) {
+            let leaf = rotation_leaf_pool(account);
+            if !pools.iter().any(|(id, _)| id == &leaf) { pools.push((leaf, 1)); }
+        }
+        for policy in policies.into_iter().flatten() {
+            if !matches!(policy.get("strategy").and_then(Value::as_str), Some("rotate" | "weight" | "provider" | "fast")) { continue; }
+            if let Some(group) = policy.get("groupId").and_then(Value::as_str) {
+                if !pools.iter().any(|(id, _)| id == group) { pools.push((group.into(), 1)); }
+            }
+        }
+    }
+    pools
+}
+
+fn rotation_leaf_pool(account: &Value) -> String {
+    let candidate = account.get("routingCandidateId").and_then(Value::as_str).unwrap_or("");
+    let member = super::routing_groups::member_key(candidate).unwrap_or_else(|| super::routing_groups::family_key(account));
+    format!("\0leaf:{member}")
+}
+
+fn same_member_branch(account: &Value, bound: &Value, depth: usize) -> bool {
+    let path = |value: &Value| value.get("routingStrategyPath").and_then(Value::as_array).cloned().unwrap_or_default();
+    let (left, right) = (path(account), path(bound));
+    left.len() > depth && right.len() > depth && (0..=depth).all(|index|
+        left[index].get("groupId") == right[index].get("groupId")
+            && left[index].get("memberId") == right[index].get("memberId"))
+}
+
+/// Parent affinity selects a member branch; a nested group owns its own leaf
+/// policy. A direct member still binds its concrete account as before.
+pub(crate) fn outer_affinity_matches(account: &Value, bound: &Value) -> bool {
+    if bound.get("routingStrategyPath").and_then(Value::as_array).is_some_and(|path| path.len() > 1) {
+        same_member_branch(account, bound, 0)
+    } else {
+        super::routing_groups::attempt_key(account) == super::routing_groups::attempt_key(bound)
+    }
+}
+
+pub(crate) fn entered_rotation_pools(account: &Value, accounts: &[Value], sticky: Option<&str>) -> Vec<String> {
+    let policies = account.get("routingStrategyPath").and_then(Value::as_array).cloned().unwrap_or_default();
+    let outer = sticky.and_then(|hit| accounts.iter().find(|candidate| super::routing_groups::attempt_key(candidate) == hit));
+    let mut entered = Vec::new();
+    for (depth, policy) in policies.iter().enumerate() {
+        if !matches!(policy.get("strategy").and_then(Value::as_str), Some("rotate" | "weight" | "provider" | "fast")) { continue; }
+        let bound = if depth == 0 { outer.is_some_and(|bound| outer_affinity_matches(account, bound)) }
+            else { accounts.iter().any(|candidate| same_member_branch(account, candidate, depth)
+                && candidate.get("routingStickyPath").and_then(Value::as_array).and_then(|path| path.get(depth)).and_then(Value::as_bool) == Some(true)) };
+        if !bound {
+            if let Some(group) = policy.get("groupId").and_then(Value::as_str) { entered.push(group.into()); }
+        }
+    }
+    let leaf_bound = account.get("routingStickyPath").and_then(Value::as_array)
+        .and_then(|path| path.last()).and_then(Value::as_bool) == Some(true)
+        || policies.len() == 1 && outer.is_some_and(|bound| outer_affinity_matches(account, bound));
+    if !leaf_bound && policies.last().is_some_and(|policy|
+        matches!(policy.get("strategy").and_then(Value::as_str), Some("rotate" | "provider" | "fast"))) {
+        entered.push(rotation_leaf_pool(account));
+    }
+    entered
 }
 
 /// 家内轮询的排序：候选先按**家**分段，段之间按「段内最优账号的优先级」升序
@@ -659,6 +774,7 @@ pub fn plan_route(
             reset_at: rate_limit_reset_at(account, keys, now),
         };
         let candidate_id = super::routing_groups::attempt_key(account);
+        let strict = account.get("routingStrict").and_then(Value::as_bool) == Some(true);
         if excluded.iter().any(|tried| tried == &candidate_id) {
             blocked.push(entry("tried", "本轮已试过，不再回试".to_string()));
             continue;
@@ -667,7 +783,7 @@ pub fn plan_route(
             blocked.push(entry("disabled", "已禁用，不参与转发".to_string()));
             continue;
         }
-        if meta.limiter_blocked.contains(&candidate_id) {
+        if !strict && meta.limiter_blocked.contains(&candidate_id) {
             blocked.push(entry(
                 "limiter",
                 "被限制器拦下（余额不足或 Token 周期用量到顶），自动恢复后回来".to_string(),
@@ -675,7 +791,7 @@ pub fn plan_route(
             continue;
         }
         let reset_at = rate_limit_reset_at(account, keys, now);
-        if reset_at > 0 {
+        if !strict && reset_at > 0 {
             blocked.push(entry(
                 "cooldown",
                 format!(
@@ -685,7 +801,7 @@ pub fn plan_route(
             ));
             continue;
         }
-        if at_concurrency_limit(account, &id, counts) {
+        if !strict && at_concurrency_limit(account, &id, counts) {
             blocked.push(entry(
                 "concurrency",
                 format!(
@@ -724,12 +840,15 @@ pub fn plan_route(
     // 可用（不可用的在收集阶段已进 `blocked`），两者不冲突。
     let mut sticky_hit = false;
     if let Some(hit) = meta.sticky_account {
+        let rule_rank = |account: &Value| account.get("routingRulePath").and_then(Value::as_array)
+            .and_then(|path| path.first()).and_then(Value::as_u64).unwrap_or(u64::MAX);
+        let best_rule = arranged.iter().map(rule_rank).min().unwrap_or(u64::MAX);
         if let Some(index) = arranged
             .iter()
-            .position(|account| super::routing_groups::attempt_key(account) == hit)
+            .position(|account| super::routing_groups::attempt_key(account) == hit && rule_rank(account) <= best_rule)
         {
-            let hit_account = arranged.remove(index);
-            arranged.insert(0, hit_account);
+            let hit_account = arranged[index].clone();
+            arranged.sort_by_key(|account| !outer_affinity_matches(account, &hit_account));
             sticky_hit = true;
         }
     }
@@ -740,7 +859,11 @@ pub fn plan_route(
             .map(|until| *until > 0)
             .unwrap_or(false)
     };
-    arranged.sort_by_key(|account| rank_of(account, meta.sunk));
+    arranged.sort_by_key(|account| {
+        let enabled = account.get("routingStrategyPath").and_then(Value::as_array)
+            .and_then(|path| path.iter().rev().find_map(|policy| policy.get("sink").and_then(Value::as_bool))).unwrap_or(true);
+        enabled && rank_of(account, meta.sunk)
+    });
     arranged.sort_by_key(|account| rank_of(account, meta.resting));
     // 熔断的账号放在队尾（所有策略一致）：只有全场都打不开时才轮到它试一次
     arranged.sort_by_key(|account| {
@@ -809,6 +932,7 @@ pub fn plan_route(
                             format!("排在第 {position} 位：等优先级更高的家轮完或失败才到它")
                         }
                     }
+                    strategy => format!("{} 策略第 {position} 位：按可用额度、成员配置与运行观测选择", strategy.as_str()),
                 }
             };
             if meta.sunk.contains_key(&id) {
@@ -843,7 +967,7 @@ pub fn plan_route(
 
 /// 粘性 TTL（毫秒）：转发选路与队列端点共用的换算（StickyMode → 时长）。
 pub fn sticky_ttl_ms(mode: StickyMode) -> i64 {
-    mode.ttl_ms().unwrap_or(0)
+    if mode == StickyMode::Turn { 6 * 60 * 60 * 1000 } else { mode.ttl_ms().unwrap_or(0) }
 }
 
 #[cfg(test)]
@@ -871,6 +995,66 @@ mod tests {
 
     fn account(id: &str, provider: &str, priority: i64) -> Value {
         json!({ "id": id, "provider": provider, "priority": priority })
+    }
+
+    #[test]
+    fn weighted_nested_members_are_not_weighted_again_by_account_count() {
+        let empty_numbers = HashMap::new();
+        let empty_ids = std::collections::HashSet::new();
+        let mut heads = Vec::new();
+        for round in 0..4 {
+            let cursors = HashMap::from([("root".to_string(), round)]);
+            let mut meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+            meta.strategy = RouteStrategy::Weight;
+            let accounts = [("a1", "a", 3), ("a2", "a", 3), ("a3", "a", 3), ("b1", "b", 1)].into_iter().map(|(id, member, weight)| {
+                json!({"id":id,"provider":"p","routingCandidateId":format!("{member}\0{id}"),
+                    "routingStrategyPath":[{"groupId":"root","memberId":member,"strategy":"weight","weight":weight}]})
+            }).collect::<Vec<_>>();
+            let ordered = base_order(&accounts, RouteStrategy::Weight, &meta);
+            heads.push(ordered[0]["routingStrategyPath"][0]["memberId"].as_str().unwrap().to_string());
+        }
+        assert_eq!(heads, ["a", "a", "b", "a"]);
+    }
+
+    #[test]
+    fn outer_affinity_keeps_the_member_branch_without_pinning_its_child_leaf() {
+        let empty_numbers = HashMap::new(); let empty_ids = std::collections::HashSet::new();
+        let cursors = HashMap::from([("child".into(), 1)]);
+        let mut meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+        meta.strategy = RouteStrategy::Rotate;
+        meta.sticky_account = Some("nested/a\0a");
+        let accounts = ["a", "b"].into_iter().map(|id| json!({"id":id,"provider":"p",
+            "routingCandidateId":format!("nested/{id}\0{id}"), "routingMemberId":"nested",
+            "routingStrategyPath":[{"groupId":"root","memberId":"nested","strategy":"rotate","sticky":"auto"},
+                {"groupId":"child","memberId":id,"strategy":"rotate","sticky":"off"}]})).collect::<Vec<_>>();
+        let plan = plan_route(&accounts, &CooldownKeys::new("model"), &HashMap::new(), &[], 0, &meta);
+        assert_eq!(plan.ordered.first().map(|entry| entry.id.as_str()), Some("b"));
+        assert!(plan.sticky_hit, "the outer member remains bound while the child rotates");
+    }
+
+    #[test]
+    fn new_turn_rule_preference_can_release_a_previous_auto_binding() {
+        let empty_numbers = HashMap::new(); let empty_ids = std::collections::HashSet::new(); let cursors = HashMap::new();
+        let mut meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+        meta.strategy = RouteStrategy::Order; meta.sticky_account = Some("a\0a1");
+        let accounts = vec![json!({"id":"a1","provider":"p","routingCandidateId":"a\0a1","routingRulePath":[18446744073709551615u64],
+            "routingStrategyPath":[{"groupId":"root","memberId":"a","strategy":"order"}]}),
+            json!({"id":"b1","provider":"p","routingCandidateId":"b\0b1","routingRulePath":[0],
+            "routingStrategyPath":[{"groupId":"root","memberId":"b","strategy":"order"}]})];
+        let plan = plan_route(&accounts, &CooldownKeys::new("model"), &HashMap::new(), &[], 0, &meta);
+        assert_eq!(plan.ordered.first().map(|entry| entry.id.as_str()), Some("b1"));
+        assert!(!plan.sticky_hit);
+    }
+
+    #[test]
+    fn strict_affinity_cannot_bypass_disabled_or_missing_credentials() {
+        let empty_numbers = HashMap::new(); let empty_ids = std::collections::HashSet::new(); let cursors = HashMap::new();
+        let meta = provider_meta(&cursors, &empty_numbers, &empty_ids);
+        let accounts = vec![json!({"id":"disabled","provider":"p","routingStrict":true,"enabled":false}),
+            json!({"id":"empty","provider":"p","routingStrict":true,"hasCredentials":false})];
+        let plan = plan_route(&accounts, &CooldownKeys::new("model"), &HashMap::new(), &[], 0, &meta);
+        assert!(plan.ordered.is_empty());
+        assert_eq!(plan.blocked.iter().map(|entry| entry.state).collect::<Vec<_>>(), ["disabled", "no-credentials"]);
     }
 
     fn ordered_ids(accounts: &[Value], meta: &PlanMeta<'_>) -> Vec<String> {

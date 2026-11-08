@@ -12,6 +12,7 @@ import { RoutingSettingsDialog } from './routing-settings'
 import { RoutingStickyDialog } from './routing-sticky'
 import { RoutingConfigPanel } from './routing-config-panel'
 import { RoutingGroupPanel } from './routing-group-panel'
+import { RoutingGroupsDashboard } from './routing-groups-dashboard'
 import { RoutingCreateDialog } from './routing-create-dialog'
 import { useRouteGroups } from './routing-group-state'
 import { useRoutingAccounts } from './routing-accounts'
@@ -29,6 +30,7 @@ let refreshWorkspace: (() => void) | undefined
 
 export function RoutingPage() {
   const [mode, setMode] = React.useState<'config' | 'replay'>('config')
+  const [groupOverview, setGroupOverview] = React.useState(true)
   const [selected, setSelected] = React.useState<ReplayRow | null>(null)
   const [refreshToken, setRefreshToken] = React.useState(0)
   const sortingState = React.useSyncExternalStore(subscribe, getStore)
@@ -48,10 +50,11 @@ export function RoutingPage() {
     | { kind: 'sticky' }
     | { kind: 'account' | 'sort'; id: string }
     | { kind: 'protection'; workspace: RoutingWorkspace }
-    | { kind: 'create' }
+    | { kind: 'create'; group?: boolean }
     | null
   >(null)
   const workspace = editor.draft?.workspace || replay.workspace
+  const creationWorkspace = replay.workspace && (!workspace || replay.workspace.updatedAt >= workspace.updatedAt) ? replay.workspace : workspace
   const sortSnapshot = replay.workspace?.sorting && (!workspace?.sorting || replay.workspace.sorting.updatedAt > workspace.sorting.updatedAt)
     ? replay.workspace.sorting : workspace?.sorting
   const sorting = sortingState.sorting && (!sortSnapshot || sortingState.sorting.updatedAt > sortSnapshot.updatedAt) ? sortingState.sorting : sortSnapshot
@@ -116,6 +119,7 @@ export function RoutingPage() {
     if (busyRef.current || groups.busy) return
     const group = Object.values(groups.drafts).find(draft => draft.group.model.toLowerCase() === model.toLowerCase())
     groups.select(group?.group.id || '')
+    setGroupOverview(false)
     if (!group) void editor.load(model)
   }
   const openConfig = (model: string) => { setMode('config'); openScope(model) }
@@ -131,21 +135,23 @@ export function RoutingPage() {
   const close = () => { setModal(null); refreshRouting() }
   const reloadConfig = async () => {
     replay.refresh()
+    if (groupOverview) { await groups.load(); return }
     if (groups.selected) { await groups.reload(); return }
+    void groups.load()
     if (editor.draft && draftDirty(editor.draft)
       && !await confirmDialog(t('重新读取会丢弃当前范围的未保存草稿，其他范围的草稿保留。'), { title: t('重新读取配置'), confirmText: t('重新读取') })) return
     void editor.load(editor.scope, true)
   }
   React.useEffect(() => {
     requestTrace = row => { if (row) setSelected({ ...row }); setMode('replay') }
-    refreshWorkspace = replay.refresh
+    refreshWorkspace = () => { replay.refresh(); void groups.load() }
     return () => { requestTrace = undefined; refreshWorkspace = undefined }
-  }, [replay.refresh])
+  }, [replay.refresh, groups.load])
 
   const groupModels = Object.values(groups.drafts).map(draft => draft.group.model)
-  const reserved = [...(workspace?.models || []), ...(workspace?.configuredModels || []), ...Object.keys(editor.drafts),
+  const reserved = [...(creationWorkspace?.models || []), ...(creationWorkspace?.configuredModels || []), ...Object.keys(editor.drafts),
     ...(groups.data?.catalog || []).map(choice => choice.model), ...groupModels]
-  const rail = <RoutingRail editor={pageEditor} groups={groups} workspace={workspace} onModel={openScope} onGroup={id => { if (!busyRef.current) groups.select(id) }}
+  const rail = <RoutingRail editor={pageEditor} groups={groups} workspace={workspace} onModel={openScope} onGroup={id => { if (!busyRef.current) { groups.select(id); setGroupOverview(false) } }}
     onAdd={() => setModal({ kind: 'create' })} />
   const accountSettings = (id: string) => {
     if (busyRef.current) return
@@ -158,20 +164,24 @@ export function RoutingPage() {
   }
 
   return <>
-    <div className='routing-page-bar'>
+    <div className='routing-page-bar routing-workbench-bar'>
       <SegmentedControl aria-label={t('路由模式')} value={mode} onValueChange={setMode} options={[
         { value: 'config', label: <><RouteIcon name='route' />{t('路由配置')}{dirtyCount ? <Badge variant='warning' shape='tag'>{dirtyCount}</Badge> : null}</> },
         { value: 'replay', label: <><RouteIcon name='requests' />{t('请求回放')}</> },
       ]} />
       <span className='routing-page-policy'>{mode === 'config'
-        ? workspace ? `${groups.draft && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy)} · ${t('粘滞 {mode}', { mode: stickyLabel(sticky) })}` : ''
+        ? workspace && !groupOverview ? `${groups.draft && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy)} · ${t('粘滞 {mode}', { mode: stickyLabel(sticky) })}` : ''
         : t('历史只读，不影响当前配置')}</span>
       <div className='routing-page-actions'>
+        {mode === 'config' ? <div className='routing-overview-tabs'><Button variant='ghost' size='sm' data-active={groupOverview ? '' : undefined} aria-pressed={groupOverview} onClick={() => { setGroupOverview(true); void groups.load() }}>{t('路由组概览')}</Button>
+          <Button variant='ghost' size='sm' data-active={!groupOverview ? '' : undefined} aria-pressed={!groupOverview} onClick={() => openScope('')}>{t('全局与模型规则')}</Button></div> : null}
         {mode === 'replay' ? <Button variant='ghost' size='sm' onClick={() => host().wbApp?.showPage('requests')}><RouteIcon name='requests' />{t('请求日志')}</Button> : null}
         <Button variant='ghost' size='sm' onClick={() => setModal({ kind: 'sticky' })}><RouteIcon name='lock' />{t('会话粘滞')}</Button>
         {mode === 'replay'
           ? <Button variant='ghost' size='sm' disabled={replay.loading} onClick={() => void refreshReplay()}><RouteIcon name='refresh' />{t('刷新')}</Button>
           : <Button variant='ghost' size='sm' disabled={editor.loading || pageEditor.busy || groups.loading || groups.busy} onClick={() => void reloadConfig()}><RouteIcon name='refresh' />{t('重新读取')}</Button>}
+        {mode === 'config' && groupOverview ? <Button size='sm' disabled={!workspace || !groups.data || pageEditor.busy || editor.loading || groups.busy || groups.loading}
+          onClick={() => setModal({ kind: 'create' })}><RouteIcon name='plus' size={14} />{t('新增路由配置')}</Button> : null}
       </div>
     </div>
 
@@ -185,7 +195,7 @@ export function RoutingPage() {
       </div> : null}
       {sortingError ? <div className='routing-page-error' role='alert'><RouteIcon name='info' /><span>{sortingError}</span>
         <Button variant='ghost' size='sm' disabled={sortingSyncBusy} onClick={() => void reloadSorting()}>{t('重试')}</Button></div> : null}
-      <div className='routing-config-shell'>
+      {groupOverview ? <RoutingGroupsDashboard editor={groups} onOpen={id => { groups.select(id); setGroupOverview(false) }} onCreate={() => setModal({ kind: 'create', group: true })} /> : <div className='routing-config-shell'>
         {rail}
         {groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
           reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
@@ -193,7 +203,7 @@ export function RoutingPage() {
           <RoutingConfigPanel key={editor.scope} editor={pageEditor} scope={editor.scope} now={replay.now} accountControl={accountControl} onScope={openScope}
             onAccount={accountSettings} onSort={groupSettings}
             onProtection={workspace => setModal({ kind: 'protection', workspace })} />}
-      </div>
+      </div>}
     </div> : <div className='routing-replay-layout'>
       <aside className='routing-request-rail'>
         <RoutingRequestList active query={replay.query} selectedKey={selected ? requestKey(selected) : ''} refreshToken={refreshToken}
@@ -206,11 +216,12 @@ export function RoutingPage() {
       </section>
     </div>}
 
-    {modal?.kind === 'create' && workspace && groups.data ? <RoutingCreateDialog workspace={workspace} choices={groups.data.catalog}
-      accounts={replay.workspace?.accounts || workspace.accounts} reserved={reserved} groupModels={groupModels}
+    {modal?.kind === 'create' && creationWorkspace && groups.data ? <RoutingCreateDialog workspace={creationWorkspace} choices={groups.data.catalog}
+      initialType={modal.group ? 'group' : 'model'}
+      accounts={creationWorkspace.accounts} reserved={reserved} groupModels={groupModels}
       disabled={pageEditor.busy || editor.loading || groups.busy || groups.loading} modelError={editor.error} onClose={() => setModal(null)}
-      onCreateModel={async model => { const created = await editor.create(model); if (created) groups.select(''); return created }}
-      onCreateGroup={groups.create} /> : null}
+      onCreateModel={async model => { const created = await editor.create(model); if (created) { groups.select(''); setGroupOverview(false) } return created }}
+      onCreateGroup={group => { const created = groups.create(group); if (created) setGroupOverview(false); return created }} /> : null}
     {modal?.kind === 'sticky' ? <RoutingStickyDialog model={mode === 'config' ? scopeModel : replay.model} onClose={close} /> : null}
     {modal?.kind === 'protection' ? <RoutingSettingsDialog protectionOnly workspace={modal.workspace} onClose={close} /> : null}
     {modal?.kind === 'sort' ? <GroupSettingsDialog key={modal.id} provider={modal.id} onClose={close}

@@ -180,6 +180,7 @@
   "只属于这一家": "exclusivo deste provedor",
   "可以关联多个渠道；每个渠道选择一个上游模型，同一渠道改选时会替换之前的选择。": "Você pode associar vários canais, com um modelo upstream por canal. Selecionar outro modelo para o mesmo canal substitui a seleção anterior.",
   "可删除 {n} 个（手动登记 / 自定义家）；": "{n} podem ser excluídos (registro manual / provedor personalizado);",
+  "可直接输入自定义模型 ID。": "Você pode inserir um ID de modelo personalizado diretamente.",
   "可见": "Visível",
   "可见性": "Visibilidade",
   "可配思考档位": "Níveis de raciocínio configuráveis",
@@ -296,6 +297,7 @@
   "搜索厂商、渠道、模型名称或 ID…": "Pesquisar desenvolvedor, canal, nome ou ID do modelo…",
   "搜索对外模型": "Buscar modelos publicados",
   "搜索对外模型…": "Buscar modelos publicados…",
+  "搜索或输入模型 ID…": "Busque ou insira um ID de modelo…",
   "搜索模型": "Buscar modelos",
   "搜索模型 ID / 名称 / 映射名…": "Buscar ID / nome / nome de mapeamento do modelo…",
   "搜索模型 ID / 提供商": "Buscar ID do modelo / provedor",
@@ -587,5 +589,9 @@
   "：": ":",
   "：这里的模型不会出现在其他家，别名也只在这一家内生效。改名称 / 协议 / Base URL 在账号页该家账号的「设置」→ 提供商一栏；整家不要了，鼠标移到左栏这家上点 × 删除（连同名下账号）。": ": os modelos daqui não aparecem em outros provedores e os aliases só valem dentro deste. Para alterar nome / protocolo / Base URL, use “Configurações” → campo do provedor nas contas desta família, na página de contas; se não quiser mais o provedor inteiro, passe o mouse sobre ele na barra lateral esquerda e clique em × para excluir (junto com as contas dele).",
   "；其中 {keys} 由 models.dev 补齐": "; {keys} preenchido(s) pelo models.dev",
-  "；首个失败：{error}": "; primeira falha: {error}"
+  "；首个失败：{error}": "; primeira falha: {error}",
+  "账号提供商": "Provedor da conta",
+  "选择账号提供商": "Selecionar provedor da conta",
+  "搜索上游模型": "Buscar modelos upstream",
+  "没有匹配的上游模型": "Nenhum modelo upstream correspondente"
 }

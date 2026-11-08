@@ -337,7 +337,12 @@ impl RouteState {
 
     pub(super) fn sticky_list(&self, model: Option<&str>, now: i64) -> Vec<serde_json::Value> {
         let (profiles, base) = crate::server::config::routing_snapshot();
-        self.sticky.list(model, now, |name| profiles.settings_for(name, base).sticky.ttl_ms().unwrap_or(0))
+        self.sticky.list(model, now, |name| {
+            let mode = name.split_once('\0').and_then(|(_, path)| path.rsplit('/').next())
+                .and_then(|id| profiles.groups.get(id)).map(|group| crate::server::config::StickyMode::from_id(&group.sticky))
+                .unwrap_or_else(|| profiles.settings_for(name, base).sticky);
+            crate::server::core::routing::sticky_ttl_ms(mode)
+        })
     }
 
     pub(super) fn sticky_clear(&self, id: Option<&str>, model: Option<&str>) -> usize {
@@ -421,6 +426,34 @@ impl RouteState {
             counters.insert(provider.clone(), counter);
         }
         counters
+    }
+
+    /// Plan against one atomic cursor snapshot, then advance only pools entered
+    /// by the selected path. Request-local reservations preserve retry order.
+    /// The callback must not access RouteState again while this lock is held.
+    pub(super) fn rotate_group<T>(
+        &self,
+        model_key: &str,
+        pools: &[(String, usize)],
+        request_cursors: &Mutex<HashMap<String, usize>>,
+        choose: impl FnOnce(&HashMap<String, usize>) -> (T, Vec<String>),
+    ) -> T {
+        let mut reserved = request_cursors.lock().unwrap_or_else(|error| error.into_inner());
+        let mut table = self.cursors.lock().unwrap_or_else(|error| error.into_inner());
+        let counters = pools.iter().filter(|(_, size)| *size > 0).map(|(pool, _)| {
+            let key = format!("{model_key}\u{1}{pool}");
+            (pool.clone(), reserved.get(&key).or_else(|| table.get(&key)).copied().unwrap_or(0))
+        }).collect::<HashMap<_, _>>();
+        let (result, entered) = choose(&counters);
+        for pool in entered {
+            let Some(&counter) = counters.get(&pool) else { continue; };
+            let key = format!("{model_key}\u{1}{pool}");
+            if let std::collections::hash_map::Entry::Vacant(slot) = reserved.entry(key.clone()) {
+                slot.insert(counter);
+                table.insert(key, counter.wrapping_add(1));
+            }
+        }
+        result
     }
 
     /// 记一笔失败退避（连续失败翻倍，上限 1 小时），返回休息截止时刻。
@@ -681,6 +714,66 @@ mod tests {
         assert_eq!(second.get("B"), Some(&1));
         // 换模型 → 另一套键
         assert_eq!(state.rotate_take_per_provider("m2", &sizes).get("A"), Some(&0));
+    }
+
+    fn nested_rotation_accounts() -> Vec<serde_json::Value> {
+        ["a", "b"].into_iter().flat_map(|branch| (0..2).map(move |leaf| {
+            let id = format!("{branch}{leaf}");
+            json!({"id":id,"provider":"p","routingCandidateId":format!("{branch}/{leaf}\0{id}"),
+                "routingMemberId":branch,"routingStrategyPath":[
+                    {"groupId":"root","memberId":branch,"strategy":"rotate","sticky":"off"},
+                    {"groupId":branch,"memberId":leaf.to_string(),"strategy":"rotate","sticky":"off"}]})
+        })).collect()
+    }
+
+    fn select_nested_rotation(state: &RouteState, request: &Mutex<HashMap<String, usize>>,
+        accounts: &[serde_json::Value], tried: &[String], sticky: Option<&str>, preview: bool) -> String {
+        use crate::server::{config::RouteStrategy, core::routing};
+        state.rotate_group("nested-test", &routing::rotation_pools(accounts), request, |cursors| {
+            let empty = HashMap::new(); let ids = std::collections::HashSet::new();
+            let plan = routing::plan_route(accounts, &routing::CooldownKeys::new("nested-test"), &empty,
+                tried, 0, &routing::PlanMeta {strategy: RouteStrategy::Rotate, sunk: &HashMap::new(),
+                    resting: &HashMap::new(), open: &ids, limiter_blocked: &ids, cursor: None,
+                    provider_cursors: Some(cursors), sticky_account: sticky});
+            let selected = &plan.ordered[0];
+            let entered = if preview { Vec::new() } else { routing::entered_rotation_pools(&selected.account, accounts, sticky) };
+            (selected.id.clone(), entered)
+        })
+    }
+
+    #[test]
+    fn nested_round_robin_advances_only_the_child_that_receives_a_request() {
+        let state = RouteState::new(); let accounts = nested_rotation_accounts();
+        let selected = (0..4).map(|_| select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts,
+            &[], None, false)).collect::<Vec<_>>();
+        assert_eq!(selected, ["a0", "b0", "a1", "b1"]);
+    }
+
+    #[test]
+    fn nested_fallback_enters_a_sibling_once_and_preview_consumes_nothing() {
+        let state = RouteState::new(); let accounts = nested_rotation_accounts();
+        for _ in 0..3 {
+            assert_eq!(select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts,
+                &[], None, true), "a0");
+        }
+        let request = Mutex::new(HashMap::new());
+        assert_eq!(select_nested_rotation(&state, &request, &accounts, &[], None, false), "a0");
+        let tried = vec!["a/0\0a0".into(), "a/1\0a1".into()];
+        assert_eq!(select_nested_rotation(&state, &request, &accounts, &tried, None, false), "b0");
+        assert_eq!(select_nested_rotation(&state, &request, &accounts, &tried, None, false), "b0");
+        assert_eq!(select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts, &[], None, false), "b1");
+        assert_eq!(select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts, &[], None, false), "a1");
+    }
+
+    #[test]
+    fn outer_sticky_binding_does_not_consume_or_freeze_the_childs_cursor() {
+        let state = RouteState::new(); let accounts = nested_rotation_accounts();
+        assert_eq!(select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts, &[], None, false), "a0");
+        assert_eq!(select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts,
+            &[], Some("a/0\0a0"), false), "a1");
+        assert_eq!(select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts,
+            &[], Some("a/1\0a1"), false), "a0");
+        assert_eq!(select_nested_rotation(&state, &Mutex::new(HashMap::new()), &accounts, &[], None, false), "b0");
     }
 
     /// 垫底必须**到点自动失效**。

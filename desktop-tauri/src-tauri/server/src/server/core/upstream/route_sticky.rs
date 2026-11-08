@@ -37,6 +37,13 @@ pub(super) fn entry_id(key: &str, model: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn effective_ttl(entry: &StickyEntry, configured: i64, now: i64) -> i64 {
+    if configured == 5 * 60 * 1000 && crate::server::core::routing_observations::cache_warm(
+        crate::server::core::routing_groups::account_key(&entry.account_id), &entry.model, now) {
+        60 * 60 * 1000
+    } else { configured }
+}
+
 impl StickySessions {
     pub(super) fn generation(&self) -> u64 {
         self.table.lock().map(|table| table.generation).unwrap_or(0)
@@ -46,9 +53,10 @@ impl StickySessions {
         if key.is_empty() || ttl_ms <= 0 { return None; }
         let id = entry_id(key, model);
         let mut table = self.table.lock().ok()?;
-        table.entries.retain(|_, entry| now.saturating_sub(entry.last_seen) <= entry.ttl_ms);
+        table.entries.retain(|_, entry| now.saturating_sub(entry.last_seen) <= effective_ttl(entry, entry.ttl_ms, now));
         let entry = table.entries.get_mut(&id)?;
-        if now.saturating_sub(entry.last_seen) > ttl_ms {
+        let actual_ttl = effective_ttl(entry, ttl_ms, now);
+        if now.saturating_sub(entry.last_seen) > actual_ttl {
             table.entries.remove(&id);
             return None;
         }
@@ -65,7 +73,7 @@ impl StickySessions {
         if key.is_empty() || account_id.is_empty() || ttl_ms <= 0 { return; }
         let Ok(mut table) = self.table.lock() else { return };
         if table.generation != generation { return; }
-        table.entries.retain(|_, entry| now.saturating_sub(entry.last_seen) <= entry.ttl_ms);
+        table.entries.retain(|_, entry| now.saturating_sub(entry.last_seen) <= effective_ttl(entry, entry.ttl_ms, now));
         let id = entry_id(key, model);
         if table.entries.len() >= 10_000 && !table.entries.contains_key(&id) {
             if let Some(oldest) = table.entries.iter().min_by_key(|(_, entry)| entry.last_seen)
@@ -86,11 +94,11 @@ impl StickySessions {
     pub(super) fn list(&self, model: Option<&str>, now: i64, ttl_for: impl Fn(&str) -> i64) -> Vec<Value> {
         let Ok(mut table) = self.table.lock() else { return Vec::new() };
         table.entries.retain(|_, entry| {
-            let ttl = ttl_for(&entry.model).min(entry.ttl_ms);
+            let ttl = effective_ttl(entry, ttl_for(&entry.model).min(entry.ttl_ms), now);
             ttl > 0 && now.saturating_sub(entry.last_seen) <= ttl
         });
         let mut entries: Vec<&StickyEntry> = table.entries.values()
-            .filter(|entry| model.map_or(true, |model| entry.model.eq_ignore_ascii_case(model)))
+            .filter(|entry| model.map_or(true, |model| entry.model.split('\0').next().unwrap_or(&entry.model).eq_ignore_ascii_case(model)))
             .collect();
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_seen));
         entries.into_iter().map(|entry| json!({
@@ -99,12 +107,12 @@ impl StickySessions {
             "accountId": crate::server::core::routing_groups::account_key(&entry.account_id),
             "candidateId": entry.account_id,
             "memberId": crate::server::core::routing_groups::member_key(&entry.account_id),
-            "model": entry.model,
+            "model": entry.model.split('\0').next().unwrap_or(&entry.model),
             "source": entry.source,
             "createdAt": entry.created_at,
             "lastSeen": entry.last_seen,
-            "expiresAt": entry.last_seen + ttl_for(&entry.model).min(entry.ttl_ms),
-            "remainingMs": (entry.last_seen + ttl_for(&entry.model).min(entry.ttl_ms) - now).max(0),
+            "expiresAt": entry.last_seen + effective_ttl(entry, ttl_for(&entry.model).min(entry.ttl_ms), now),
+            "remainingMs": (entry.last_seen + effective_ttl(entry, ttl_for(&entry.model).min(entry.ttl_ms), now) - now).max(0),
             "hits": entry.hits,
         })).collect()
     }
@@ -114,7 +122,7 @@ impl StickySessions {
         let before = table.entries.len();
         table.entries.retain(|key, entry| {
             !(id.map_or(true, |id| id == key)
-                && model.map_or(true, |model| entry.model.eq_ignore_ascii_case(model)))
+                && model.map_or(true, |model| entry.model.split('\0').next().unwrap_or(&entry.model).eq_ignore_ascii_case(model)))
         });
         table.generation = table.generation.wrapping_add(1);
         before - table.entries.len()

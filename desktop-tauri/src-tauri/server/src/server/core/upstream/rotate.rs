@@ -164,7 +164,8 @@ fn select_target_account_sync(
     conv_key: &str,
     request_routing: &super::route_context::RequestRouting,
 ) -> Result<RouteTarget, GatewayError> {
-    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
+    let mut accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
+    super::route_affinity::decorate(service, request_routing, conv_key, &mut accounts, tried_ids)?;
     if accounts.is_empty() && request_routing.group.is_some() {
         let reasons: Vec<_> = request_routing.group_projection.blocked.iter().take(3)
             .filter_map(|entry| entry.get("reason").and_then(Value::as_str)).collect();
@@ -203,6 +204,27 @@ fn select_target_account_sync(
         });
     }
 
+    // Strict keeps the bound route across soft quota, concurrency and breaker
+    // states, but the current scope, enabled flag and credentials still gate it.
+    if request_routing.settings.sticky == config::StickyMode::Strict {
+        let snap = service.route.snapshot_for_model(conv_key, keys.request_model(), logging::now_ms(), request_routing.sticky_ttl());
+        if let Some(bound) = snap.sticky_hit {
+            if tried_ids.contains(&bound) { return Err(GatewayError::with_status(503, "严格粘性绑定的候选本次已失败，未切换其他成员").with_code("route_strict_failed")); }
+            let account = accounts.iter().find(|account| crate::server::core::routing_groups::attempt_key(account) == bound)
+                .filter(|account| account.get("enabled").and_then(Value::as_bool) != Some(false) && account.get("hasCredentials").and_then(Value::as_bool) != Some(false));
+            if let Some(account) = account {
+                if let Some(id) = routing::account_id(account) {
+                    if let Some(session) = service.store.get_session_by_id(id) {
+                        return Ok(with_proxy_notice(account.clone(), session.proxy, session.proxy_error, id.into(), Some(json!({
+                            "strategy": request_routing.settings.strategy.as_str(), "sticky": "strict", "stickyHit":true,
+                            "configSnapshot":request_routing.json(), "reason":"严格粘性：继续已绑定的成员", "orderedTotal":1,
+                        }))));
+                    }
+                }
+            }
+            return Err(GatewayError::with_status(503, "严格粘性绑定的成员已停用、移除或不再允许访问").with_code("route_strict_unavailable"));
+        }
+    }
     // 限制器软跳过的候选先剔除（余额不足 / Token 限额，见 `filter_limiter_blocked`），
     // 三级选择共用
     let (candidates, balance_blocked_ids) = filter_limiter_blocked(&accounts, keys, pinned);
@@ -215,7 +237,7 @@ fn select_target_account_sync(
     // 粘性查找在这里顺手续了最近使用时刻 —— 「auto 档 5 分钟没往来就放手」
     // 的计时由它维持。
     let settings = request_routing.settings;
-    let ttl = routing::sticky_ttl_ms(settings.sticky);
+    let ttl = request_routing.sticky_ttl();
     let snap = service.route.snapshot_for_model(conv_key, keys.request_model(), now, ttl);
     // 轮转游标只在「本请求的第一次选路」前进：429 顺延的后续选路沿用同一
     // 起点往后走，否则一条请求会连跳好几位。
@@ -237,11 +259,13 @@ fn select_target_account_sync(
     // 消耗一格环位」对两种轮转是同一个口径；差别只在它取的是**每家各一个**
     // 起始位（见 `rotate_take_per_provider`）。
     let may_rotate = tried_ids.is_empty() && pinned.is_none();
-    let wants_rotation = may_rotate && settings.strategy != config::RouteStrategy::Order;
+    let nested_round = accounts.iter().any(|account| account.get("routingStrategyPath").and_then(Value::as_array)
+        .is_some_and(|path| path.iter().any(|policy| matches!(policy.get("strategy").and_then(Value::as_str), Some("rotate" | "weight" | "provider" | "fast")))));
+    let wants_rotation = request_routing.group.is_none() && may_rotate && (nested_round || matches!(settings.strategy, config::RouteStrategy::Rotate | config::RouteStrategy::Provider | config::RouteStrategy::Weight | config::RouteStrategy::Fast));
     let take_rotation = || match settings.strategy {
-        config::RouteStrategy::Rotate => (
+        config::RouteStrategy::Rotate | config::RouteStrategy::Weight | config::RouteStrategy::Fast => (
             Some(service.route.rotate_take(keys.request_model())),
-            None,
+            nested_round.then(|| service.route.rotate_take_per_provider(keys.request_model(), &routing::rotation_pools(&candidates))),
         ),
         // 游标只传「哪几家」用来定键名（`provider_sizes`），各家的**人数不参与
         // 取模** —— 取模发生在 `plan_route` 内部、用的是过滤（禁用 / 冷却 /
@@ -252,17 +276,29 @@ fn select_target_account_sync(
             None,
             Some(service.route.rotate_take_per_provider(
                 keys.request_model(),
-                &routing::provider_sizes(&candidates),
+                &routing::rotation_pools(&candidates),
             )),
         ),
-        config::RouteStrategy::Order => (None, None),
+        _ => (None, nested_round.then(|| service.route.rotate_take_per_provider(keys.request_model(), &routing::rotation_pools(&candidates)))),
     };
     let (mut cursor, mut provider_cursors) = if wants_rotation && snap.sticky_hit.is_none() {
         take_rotation()
     } else {
         (None, None)
     };
-    let mut plan = routing::plan_route(
+    let mut plan = if request_routing.group.is_some() && pinned.is_none() {
+        service.route.rotate_group(keys.request_model(), &routing::rotation_pools(&candidates),
+            &request_routing.rotation_cursors, |group_cursors| {
+                let plan = routing::plan_route(&accounts, keys, &counts, tried_ids, now,
+                    &routing::PlanMeta { strategy: settings.strategy, sunk: &snap.sunk,
+                        resting: &snap.resting, open: &snap.open, limiter_blocked: &balance_blocked_ids,
+                        cursor: None, provider_cursors: Some(group_cursors), sticky_account: snap.sticky_hit.as_deref() });
+                let entered = plan.ordered.iter().find(|entry| service.store.get_session_by_id(&entry.id).is_some())
+                    .map(|entry| routing::entered_rotation_pools(&entry.account, &accounts, snap.sticky_hit.as_deref()))
+                    .unwrap_or_default();
+                (plan, entered)
+            })
+    } else { routing::plan_route(
         &accounts, keys, &counts, tried_ids, now,
         &routing::PlanMeta {
             strategy: settings.strategy,
@@ -274,7 +310,7 @@ fn select_target_account_sync(
             provider_cursors: provider_cursors.as_ref(),
             sticky_account: snap.sticky_hit.as_deref(),
         },
-    );
+    ) };
     // 粘性命中项没有排到第 1 位：这一次请求用不上它，照常消耗一格环位重排。
     let sticky_first = snap
         .sticky_hit
@@ -320,6 +356,16 @@ fn select_target_account_sync(
         }
         excluded.push(entry.id.clone());
     }
+
+    // With no normally eligible account, the best-effort exits below still
+    // enter a concrete branch. Reserve that path only when it is selected.
+    let consume_fallback_rotation = |account: &Value| {
+        if request_routing.group.is_some() && pinned.is_none() {
+            service.route.rotate_group(keys.request_model(), &routing::rotation_pools(&candidates),
+                &request_routing.rotation_cursors, |_| ((),
+                    routing::entered_rotation_pools(account, &accounts, snap.sticky_hit.as_deref())));
+        }
+    };
 
     let enabled: Vec<Value> = candidates
         .iter()
@@ -390,6 +436,7 @@ fn select_target_account_sync(
         if let Some(account) = squeeze_by_headroom(&enabled, &counts, tried_ids, keys, now) {
             if let Some(id) = routing::account_id(&account).map(str::to_string) {
                 if let Some(entry) = service.store.get_session_by_id(&id) {
+                    consume_fallback_rotation(&account);
                     return Ok(with_proxy_notice(
                         account,
                         entry.proxy,
@@ -404,6 +451,7 @@ fn select_target_account_sync(
     if let Some(account) = best_effort {
         if let Some(id) = routing::account_id(&account).map(str::to_string) {
             if let Some(entry) = service.store.get_session_by_id(&id) {
+                consume_fallback_rotation(&account);
                 return Ok(with_proxy_notice(
                     account,
                     entry.proxy,
@@ -506,7 +554,7 @@ fn scoped_accounts(
         crate::server::core::account_store::custom_accounts::key_groups::allows_request(
             account, model, crate::server::core::routing_groups::candidate_model(account))
     }).filter(|account| {
-        pinned.is_some() || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
+        pinned.is_some() || request_routing.is_some_and(|routing| routing.settings.sticky == config::StickyMode::Strict) || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
             .is_some_and(|until| until > logging::now_ms())
     }).collect();
     let routable: Vec<Value> = accounts.iter()

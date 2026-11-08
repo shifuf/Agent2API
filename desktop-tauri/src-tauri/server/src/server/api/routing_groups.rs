@@ -8,8 +8,18 @@ use crate::server::core::{routing, routing_groups::{self, RequestNeeds}, routing
 
 pub fn groups_json(state: &ServerState) -> Value {
     let profiles = config::routing_profiles();
-    json!({ "groups": profiles.groups.values().map(|group| json!({ "group": group, "revision": config::routing_groups::revision(Some(group)) })).collect::<Vec<_>>(),
-        "newRevision": config::routing_groups::revision(None), "catalog": routing_groups::choices(&state.store()) })
+    let accounts = routing::accounts_of(&state.store().list_visible_accounts());
+    let mut groups: Vec<_> = profiles.groups.values().collect();
+    groups.sort_by_key(|group| profiles.group_order.iter().position(|id| id == &group.id).unwrap_or(usize::MAX));
+    let found = crate::server::core::routing_discovery::found_groups(&accounts).into_iter()
+        .filter(|group| !profiles.groups.contains_key(&group.id)).map(|mut group| {
+            group.hidden = profiles.hidden_auto_groups.contains(&group.id);
+            json!({"expandedMembers":routing_groups::expanded_members(&group, &accounts),"group":group,"revision":config::routing_groups::revision(None)})
+        }).collect::<Vec<_>>();
+    json!({ "groups": groups.into_iter().map(|group| json!({ "group": group, "expandedMembers":routing_groups::expanded_members(group, &accounts), "revision": config::routing_groups::revision(Some(group)) })).collect::<Vec<_>>(),
+        "newRevision": config::routing_groups::revision(None), "catalog": routing_groups::choices(&state.store()),
+        "foundGroups":found,"autoGroupsEnabled":profiles.auto_groups_enabled,
+        "collectionRevision":super::routing_actions::revision(&profiles),"metadata":crate::server::core::routing_metadata::status() })
 }
 
 pub async fn get_groups(State(state): State<ServerState>) -> Response {
@@ -23,7 +33,14 @@ pub async fn get_groups(State(state): State<ServerState>) -> Response {
 struct GroupSave { id: String, group: Option<config::RoutingGroup>, revision: String }
 
 pub async fn put_group(State(state): State<ServerState>, body: Bytes) -> Response {
-    let payload = match parse_body(&body).and_then(|value| serde_json::from_value::<GroupSave>(value).map_err(|error| errors::GatewayError::bad_request(error.to_string()))) {
+    let payload = match parse_body(&body).and_then(|mut value| {
+        let previous = config::routing_profiles();
+        let old = value.get("id").and_then(Value::as_str).and_then(|id| previous.groups.get(id));
+        if let (Some(old), Some(raw)) = (old, value.get_mut("group").filter(|raw| raw.is_object())) {
+            config::routing_groups::preserve_omitted_fields(raw, old);
+        }
+        serde_json::from_value::<GroupSave>(value).map_err(|error| errors::GatewayError::bad_request(error.to_string()))
+    }) {
         Ok(value) => value, Err(error) => return errors::management_error(400, error.message),
     };
     match tokio::task::spawn_blocking(move || {
@@ -34,7 +51,9 @@ pub async fn put_group(State(state): State<ServerState>, body: Bytes) -> Respons
             let accounts = routing::accounts_of(&state.store().list_visible_accounts());
             routing_groups::validate_members(group, old, &accounts)?;
         }
-        config::routing_groups::save(&payload.id, payload.group.clone(), &payload.revision)?;
+        let effective = crate::server::core::routing_discovery::snapshot(state.store());
+        config::routing_groups::save_with_groups(&payload.id, payload.group.clone(), &payload.revision, &effective.groups)?;
+        crate::server::core::providers::catalog::invalidate();
         if let Some(old) = old { state.upstream().clear_route_sticky(None, Some(&old.model)); }
         Ok::<_, String>(groups_json(&state))
     }).await {
@@ -53,6 +72,8 @@ struct Preview {
     #[serde(default)] global: bool,
     #[serde(default)] needs: RequestNeeds,
     #[serde(default)] fail_first: bool,
+    #[serde(default)] facts: crate::server::core::routing_rules::RequestFacts,
+    #[serde(default)] classification: Option<crate::server::core::routing_rules::Classification>,
 }
 
 pub async fn preview(State(state): State<ServerState>, body: Bytes) -> Response {
@@ -72,24 +93,43 @@ pub async fn preview(State(state): State<ServerState>, body: Bytes) -> Response 
 
 pub fn group_queue(state: &ServerState, group: config::RoutingGroup) -> Value {
     preview_json(state, Preview { model: group.model.clone(), group: Some(group), profile: None,
-        global: false, needs: Default::default(), fail_first: false })["queue"].clone()
+        global: false, needs: Default::default(), fail_first: false, facts: Default::default(), classification: None })["queue"].clone()
 }
 
 fn preview_json(state: &ServerState, payload: Preview) -> Value {
     let accounts = routing::accounts_of(&state.store().list_visible_accounts());
-    let (profiles, base) = config::routing_snapshot();
+    let (saved, base) = config::routing_snapshot();
+    let profiles = crate::server::core::routing_discovery::effective_profiles(&saved, &accounts);
     let settings;
     let mut member_blocked = Vec::new();
+    let mut rule_trace = Vec::new();
     let group = payload.group.or_else(|| profiles.group_for_model(&payload.model).cloned());
     let mut candidates = if let Some(group) = &group {
         settings = group.settings(base);
-        let projection = routing_groups::project(group, &accounts, &payload.needs, None);
+        let projection = routing_groups::project_with_groups(group, &profiles.groups, &accounts, &payload.needs, None);
         member_blocked = projection.blocked;
-        projection.accounts
+        let mut projected = projection.accounts;
+        let before_rules = projected.clone();
+        let mut facts = payload.facts;
+        if facts.at_ms == 0 { facts.at_ms = crate::server::logging::now_ms(); }
+        rule_trace = crate::server::core::routing_rules::preview_rules(group, &profiles, &mut projected, &facts, payload.classification.as_ref());
+        for rejected in before_rules.iter().filter(|account| !projected.iter().any(|candidate| routing_groups::attempt_key(candidate) == routing_groups::attempt_key(account))) {
+            member_blocked.push(json!({"id":routing::account_id(rejected),"candidateId":routing_groups::attempt_key(rejected),
+                "memberId":rejected.get("routingMemberId"),"provider":routing::provider_of(rejected),"state":"paused","reason":"请求命中暂停规则"}));
+        }
+        for candidate in &mut projected {
+            if let Some(model) = routing_groups::candidate_model(candidate).map(str::to_owned) {
+                if let Some(item) = routing_groups::catalog_model(routing::provider_of(candidate), &model) {
+                    if let Some(cost) = item.get("cost").filter(|cost| cost.is_object()) { candidate["routingCost"] = cost.clone(); }
+                    if let Some(free) = item.get("free").and_then(Value::as_bool) { candidate["routingFree"] = free.into(); }
+                }
+            }
+        }
+        projected
     } else {
         let providers = if payload.model.is_empty() { routing_scope::available_providers(&accounts) }
             else { crate::server::core::providers::catalog::forwarding_providers(&payload.model) };
-        let mut snapshot = (*profiles).clone();
+        let mut snapshot = profiles.clone();
         let global_draft = if payload.global && snapshot.model_profile(&payload.model).is_none() { payload.profile.clone() } else { None };
         if let Some(profile) = payload.profile {
             if payload.global { snapshot.global = Some(profile); } else { snapshot.models.insert(payload.model.to_ascii_lowercase(), profile); }
@@ -147,7 +187,8 @@ fn preview_json(state: &ServerState, payload: Preview) -> Value {
         "state": entry.state, "reason": if payload.fail_first && entry.state == "tried" { "模拟首选成员失败，未实际发送" } else { &entry.reason }, "resetAt": entry.reset_at });
     let mut blocked: Vec<_> = plan.blocked.iter().map(row).collect(); blocked.extend(member_blocked);
     json!({ "model": payload.model, "customized": group.is_some() || profiles.model_profile(&payload.model).is_some(),
-        "group": group, "preview": true, "settings": super::routing_api::routing_json(settings),
+        "expandedMembers":group.as_ref().map(|group|routing_groups::expanded_members(group,&accounts)),
+        "group": group, "preview": true, "rules":rule_trace, "settings": super::routing_api::routing_json(settings),
         "queue": { "strategy": settings.strategy.as_str(), "sticky": settings.sticky.as_str(),
             "pickedId": plan.ordered.first().map(|entry| &entry.id), "ordered": plan.ordered.iter().map(row).collect::<Vec<_>>(), "blocked": blocked } })
 }

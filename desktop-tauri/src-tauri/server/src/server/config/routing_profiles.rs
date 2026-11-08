@@ -56,6 +56,12 @@ pub struct RoutingProfiles {
     pub models: BTreeMap<String, RoutingProfile>,
     #[serde(default)]
     pub groups: BTreeMap<String, super::RoutingGroup>,
+    #[serde(default)]
+    pub auto_groups_enabled: bool,
+    #[serde(default)]
+    pub hidden_auto_groups: Vec<String>,
+    #[serde(default)]
+    pub group_order: Vec<String>,
 }
 
 impl RoutingProfiles {
@@ -104,7 +110,20 @@ pub(crate) fn from_raw(raw: &Map<String, Value>) -> Arc<RoutingProfiles> {
         }
     }
     profiles.groups = super::routing_groups::from_value(object.get("groups"));
+    profiles.auto_groups_enabled = object.get("autoGroupsEnabled").and_then(Value::as_bool).unwrap_or(false);
+    profiles.hidden_auto_groups = string_list(object.get("hiddenAutoGroups"));
+    profiles.group_order = string_list(object.get("groupOrder"));
     Arc::new(profiles)
+}
+
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    let mut result = Vec::new();
+    for value in value.and_then(Value::as_array).into_iter().flatten().take(MAX_ROUTING_MODELS) {
+        if let Some(id) = value.as_str().filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)) {
+            if !result.iter().any(|known| known == id) { result.push(id.to_string()); }
+        }
+    }
+    result
 }
 
 pub fn routing_profiles() -> Arc<RoutingProfiles> {
@@ -132,11 +151,11 @@ pub fn normalize_model(model: &str) -> Result<String, String> {
 }
 
 pub fn validate_shape(profile: &RoutingProfile) -> Result<(), String> {
-    if profile.strategy.as_deref().is_some_and(|value| !["order", "rotate", "provider"].contains(&value)) {
-        return Err("路由策略必须为 order、rotate 或 provider".to_string());
+    if profile.strategy.as_deref().is_some_and(|value| !super::routing_groups::PROFILE_STRATEGIES.contains(&value)) {
+        return Err("路由策略无效".to_string());
     }
-    if profile.sticky.as_deref().is_some_and(|value| !["auto", "session", "turn", "off"].contains(&value)) {
-        return Err("会话粘滞必须为 auto、session、turn 或 off".to_string());
+    if profile.sticky.as_deref().is_some_and(|value| !["auto", "session", "turn", "off", "strict"].contains(&value)) {
+        return Err("会话粘滞必须为 auto、session、turn、off 或 strict".to_string());
     }
     fn unique(values: &[String], max: usize, label: &str) -> Result<(), String> {
         if values.len() > max {

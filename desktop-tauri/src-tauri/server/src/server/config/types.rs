@@ -1097,16 +1097,17 @@ pub struct ImageCompressPatch {
 ///
 ///   - `Order`：队列位次（优先级数字）就是一切 —— 现状行为；
 ///   - `Rotate`：每条请求轮换到下一位（新会话的起点由位次决定），均摊用量；
-///   - `Usage`：用量占比最低的先用（没有读数的账号按位次排在有读数的后面）。
-///
-/// 智能按窗口重置、手动固定两档讨论后**不做**（用户拍板：只留三种）。
+///   - `Provider`：家之间按位次、家内逐请求轮换；
+///   - 智能、最少使用、节奏、免费、最快、权重、手动：由路由组策略解释。
+/// 历史 `usage` 仍映射到 Rotate；最少使用的新值为 `least-used`。
 pub const KEY_ROUTING_STRATEGY: &str = "routingStrategy";
 /// 会话粘性：同一会话尽量跟住答过它的账号（`routingSticky`）。
 ///
 ///   - `Auto`：跟住，直到上游缓存不值得续（约 5 分钟无往来）；
 ///   - `Session`：跟住更久（6 小时内同会话同账号）；
-///   - `Turn`：只在单条请求内不换号（与转发既有行为一致，跨请求不粘）；
-///   - `Off`：每条请求独立选。
+///   - `Turn`：同一用户轮次及其工具续传保持绑定；
+///   - `Off`：每条请求独立选；
+///   - `Strict`：已绑定的路径不可切换，权限与账号可用性照常检查。
 pub const KEY_ROUTING_STICKY: &str = "routingSticky";
 /// 失败退避：转发失败的账号休息一会儿再回来（`routingFailoverBackoff`，默认开）
 pub const KEY_ROUTING_FAILOVER_BACKOFF: &str = "routingFailoverBackoff";
@@ -1151,13 +1152,19 @@ pub const ROUTING_BREAKER_MAX_SUCCESS: i64 = 10;
 
 /// 路由策略（`RouteStrategy` 的 Rust 形态；配置里存 `as_str`）
 ///
-/// 三档：顺序优先（队列第 1 位接走所有请求）、负载均衡（逐请求轮换）、
-/// 家内轮询（家之间按优先级、同一家内部轮流用各账号）。
+/// 保留顺序、负载均衡与家内轮询；路由组还可按额度、用量、延迟、权重等信号选择。
 /// 「余额优先（usage）」已下线（2026-10，按用户要求移除）—— 见 `from_id` 的兜底说明。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteStrategy {
+    Smart,
     Order,
     Rotate,
+    LeastUsed,
+    Pace,
+    Free,
+    Fast,
+    Weight,
+    Manual,
     /// 家内轮询（本仓新增，上游没有）：轮转的边界收在「家」里面
     Provider,
 }
@@ -1165,8 +1172,15 @@ pub enum RouteStrategy {
 impl RouteStrategy {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Smart => "smart",
             Self::Order => ROUTING_STRATEGY_ORDER,
             Self::Rotate => ROUTING_STRATEGY_ROTATE,
+            Self::LeastUsed => "least-used",
+            Self::Pace => "pace",
+            Self::Free => "free",
+            Self::Fast => "fast",
+            Self::Weight => "weight",
+            Self::Manual => "manual",
             Self::Provider => ROUTING_STRATEGY_PROVIDER,
         }
     }
@@ -1178,6 +1192,13 @@ impl RouteStrategy {
     /// 静默退回「排第 1 的接走所有请求」会与他的本意相反。
     pub fn from_id(value: &str) -> Self {
         match value {
+            "smart" => Self::Smart,
+            "least-used" => Self::LeastUsed,
+            "pace" => Self::Pace,
+            "free" => Self::Free,
+            "fast" => Self::Fast,
+            "weight" => Self::Weight,
+            "manual" => Self::Manual,
             ROUTING_STRATEGY_PROVIDER => Self::Provider,
             ROUTING_STRATEGY_ROTATE | "usage" => Self::Rotate,
             _ => Self::Order,
@@ -1192,6 +1213,7 @@ pub enum StickyMode {
     Turn,
     Session,
     Auto,
+    Strict,
 }
 
 impl StickyMode {
@@ -1201,6 +1223,7 @@ impl StickyMode {
             Self::Turn => STICKY_TURN,
             Self::Session => STICKY_SESSION,
             Self::Auto => STICKY_AUTO,
+            Self::Strict => "strict",
         }
     }
 
@@ -1209,6 +1232,7 @@ impl StickyMode {
             STICKY_SESSION => Self::Session,
             STICKY_TURN => Self::Turn,
             STICKY_OFF => Self::Off,
+            "strict" => Self::Strict,
             _ => Self::Auto,
         }
     }
@@ -1217,7 +1241,7 @@ impl StickyMode {
     pub fn ttl_ms(&self) -> Option<i64> {
         match self {
             Self::Auto => Some(5 * 60 * 1000),
-            Self::Session => Some(6 * 60 * 60 * 1000),
+            Self::Session | Self::Strict => Some(6 * 60 * 60 * 1000),
             Self::Off | Self::Turn => None,
         }
     }
