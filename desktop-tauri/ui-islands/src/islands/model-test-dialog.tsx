@@ -55,7 +55,7 @@ import * as customSource from './models-custom-source'
 import type { ManageModel } from './models-custom-source'
 import { levels as reasoningLevels } from './models-reasoning'
 import {
-  bindingsOf, errorMessage, getSnapshot, levelOf, modelRowOf, providerLabelOf, toast,
+  errorMessage, getSnapshot, modelRowOf, providerLabelOf, toast,
 } from './models-panel-state'
 import { t } from '../i18n'
 import { ModelApiKeyField } from '../../../ui-shared/model-api-key-field'
@@ -258,7 +258,9 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
   })
   const { value: apiKeyId, ready: keySelectionReady, select: setApiKeyId } = useRememberedModelApiKey('model-test', gatewayBase)
   const selectedKey = keyState.keys.find(key => key.id === apiKeyId)
-  const keyAllowed = Boolean(selectedKey && modelApiKeyAllows(selectedKey, target.id, provider))
+  // This target is an upstream ID. Public-ID permissions are resolved against
+  // routing-group bindings by /api/models/test, which also checks each account.
+  const keyAllowed = Boolean(selectedKey && modelApiKeyAllows({ ...selectedKey, allowedModels: [] }, target.id, provider))
   const selectedKeyRef = React.useRef(selectedKey)
   selectedKeyRef.current = selectedKey
   /**
@@ -410,38 +412,10 @@ export function ModelTestDialog({ target, onClose }: { target: ModelTestTarget; 
     )
   }
 
-  // 本名直发时生效的思考等级只认「名字不变的那条按家映射」（见 model_rules::reasoning 第 4 条），
-  // 而那正是这一行的默认绑定 —— 与表格里默认 chip 上显示的是同一个值。
-  // 该行未启用时映射整体不生效（生产路由也放不过去），等级自然不参与本次。
-  const defaultClosed = bindingsOf(model).find(binding => binding.isDefault)?.enabled === false
-  const boundLevel = levelOf(model.id, model.id, provider)
-  const aliases = bindingsOf(model)
-    .filter(binding => !binding.isDefault)
-    .map(binding => binding.alias)
-  // 「关闭思考」两档（off / none）不给：它们在**映射**上的含义是「不注入」，而写进**请求体**
-  // 就是一个上游不认识的档位 —— CatPaw 的 resolve_effort 对表外值当场 400。要「不注入」，
-  // 选「跟随映射」这一项（映射上没绑等级时它本来就不注入）
-  //
-  // 候选按**这一个模型**自己认识的档位取（见 `models-reasoning.levels` 的三级回落）：
-  // 测试弹窗是「这一家 × 这一个模型」的探针，给它列一堆该模型不认的档位，
-  // 测出来的 400 是档位选错了、不是链路问题 —— 那正是这颗按钮最没用的用法。
   const levelOptions = reasoningLevels(getSnapshot().data, model)
     .filter(level => level !== 'off' && level !== 'none')
-  const followLabel = defaultClosed
-    ? t('跟随映射（该行未启用，本次不注入）')
-    : boundLevel ? t('跟随映射（当前 {level}）', { level: boundLevel }) : t('跟随映射（未绑定等级）')
-  /** 目标行 ⓘ 的口径：多数行没有别名 / 未绑等级，一句「以本名直发」就够 —— 说明悬停才见 */
-  const targetTip = [
-    t('以模型本名直发'),
-    aliases.length
-      ? t('另有 {n} 条别名映射（{aliases}），别名不参与本次', { n: aliases.length, aliases: aliases.join(t('、')) })
-      : '',
-    defaultClosed
-      ? t('该行当前未启用：测试照常按本名直发（「先测通、再决定要不要启用」正是这颗按钮的用法），但本行的思考等级绑定不参与本次，生产路由也要等绑定打开后才会放行')
-      : boundLevel
-        ? t('映射上绑定的思考等级是 {level}，「跟随映射」按它注入', { level: boundLevel })
-        : t('映射上未绑定思考等级，「跟随映射」等于这次不注入'),
-  ].filter(Boolean).join(t('；')) + t('。')
+  const followLabel = t('跟随上游默认')
+  const targetTip = t('以这个上游模型发一次最小请求，走真实转发链路')
 
   const protocols = bridge().wbProviders?.PROTOCOL_OPTIONS || FALLBACK_PROTOCOLS
   const protocolLabel = protocols.find(item => item.value === protocol)?.label || protocol

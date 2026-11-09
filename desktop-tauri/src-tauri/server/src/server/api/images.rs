@@ -202,9 +202,7 @@ fn resolve_model(
                         return false;
                     }
                     let model = crate::server::core::models::model_id(item);
-                    image_models::operation_providers(&model, operation)
-                        .iter()
-                        .any(|provider| key_scope::allows_provider(scope, provider))
+                    image_models::operation_available(state.store(), &model, scope, operation)
                 })
             })
             .and_then(|item| item.get("id"))
@@ -233,11 +231,7 @@ fn resolve_model(
         )
         .with_code("model_not_found"));
     }
-    let candidates = image_models::operation_providers(&requested, operation);
-    if !candidates
-        .iter()
-        .any(|provider| key_scope::allows_provider(scope, provider))
-    {
+    if !image_models::operation_available(state.store(), &requested, scope, operation) {
         return Err(GatewayError::bad_request(format!(
             "模型 '{requested}' 没有获准使用的{}通道，请从 GET /v1/models 选择对应能力的模型并更新插件", operation.label()
         )).with_code(if operation == image_models::ImageOperation::Edit {

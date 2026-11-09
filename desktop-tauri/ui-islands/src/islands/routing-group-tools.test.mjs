@@ -40,15 +40,24 @@ test('group search follows nested model manufacturer and connected provider meta
 test('templates use connected sources and stay unpublished until a draft is saved', () => {
   const choices = [
     { provider: 'ghost', model: 'ghost', accountCount: 0 },
+    { provider: 'image-only', model: 'image-model', accountCount: 1, kind: 'image' },
     { provider: 'a', model: 'model-a', accountCount: 2 },
     { provider: 'b', model: 'model-b', accountCount: 1 },
   ]
   const draft = tools.routingTemplate('balanced', choices, 'new-id')
   assert.equal(draft.enabled, false)
+  assert.equal(draft.kind, 'chat')
   assert.equal(draft.strategy, 'rotate')
   assert.deepEqual(draft.members.map(member => member.provider), ['a', 'b'])
   assert(draft.members.every(member => member.accountScope === 'all' && member.accounts.length === 0))
   assert.equal(group.members[0].accounts[0], 'secret-local-id')
+})
+
+test('sharing and importing preserves image routing and public ID case', () => {
+  const image = { ...group, kind: 'image', model: 'Public/Image' }
+  const [imported] = tools.parseRoutingImport(tools.exportRoutingGroups([image]))
+  assert.equal(imported.kind, 'image')
+  assert.equal(imported.model, 'Public/Image')
 })
 
 test('sharing a nested route includes its dependency and drops rules that only match local folders', () => {

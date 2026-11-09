@@ -3,7 +3,7 @@ import { Badge, Button, Checkbox, Input } from '@ui'
 import { ModelBrand } from '../../../ui-shared/model-brand'
 import { t } from '../i18n'
 import { routeModelKey, ROUTING_MEMBER_LIMIT } from './routing-group-form'
-import { RoutingChoiceBrand, RoutingSourceSelect, type RoutingSource } from './routing-model-source'
+import { RoutingChoiceBrand, RoutingModelRate, RoutingSourceSelect, type RoutingSource } from './routing-model-source'
 import { RouteIcon } from './routing-ui'
 import type { RouteModelChoice } from './routing-types'
 import './routing-magpie.css'
@@ -54,7 +54,8 @@ export function RoutingModelPicker({ choices, selected, onChange, disabled = fal
               {choice.capabilities.supportsReasoning === true ? <span>{t('深度思考')}</span> : null}
             </span>
           </div>
-          <span className='routing-choice-accounts'>{t('{n} 个账号', { n: choice.accountCount })}</span>
+          <span className='routing-choice-stats'><RoutingModelRate credits={choice.credits} />
+            <span className='routing-choice-accounts'>{t('{n} 个账号', { n: choice.accountCount })}</span></span>
         </label>
       })}
       {!models.length ? <div className='routing-picker-empty'><RouteIcon name='search' size={22} />

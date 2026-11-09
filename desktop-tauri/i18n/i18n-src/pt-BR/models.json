@@ -1,4 +1,5 @@
 {
+  "模型目录已刷新，可在路由组中选择。": "Catálogo atualizado. Os modelos estão disponíveis nos grupos de roteamento.",
   " · 思考等级 ": " · Nível de raciocínio ",
   " · 思考等级 {level}": " · Nível de raciocínio {level}",
   " · 有映射 ": " · Com mapeamento: ",
@@ -593,5 +594,17 @@
   "账号提供商": "Provedor da conta",
   "选择账号提供商": "Selecionar provedor da conta",
   "搜索上游模型": "Buscar modelos upstream",
-  "没有匹配的上游模型": "Nenhum modelo upstream correspondente"
+  "没有匹配的上游模型": "Nenhum modelo upstream correspondente",
+  "管理路由组": "Gerenciar grupos de roteamento",
+  "上游启用": "Upstream ativado",
+  "启用上游模型 {model}": "Ativar modelo upstream {model}",
+  "搜索模型 ID / 名称…": "Buscar ID / nome do modelo…",
+  "这里只维护上游来源；对外模型 ID 统一在路由组中配置。": "Gerencie fontes upstream aqui; configure IDs públicos nos grupos de roteamento.",
+  "先在左栏选择提供商，再获取模型并在 Key 分组中确认选择。": "Selecione um provedor à esquerda, busque modelos e confirme a seleção nos grupos de Key.",
+  "这家还没有模型：点「获取模型」，在 Key 分组中填写或获取上游模型。": "Ainda não há modelos. Clique em Buscar modelos e informe ou busque modelos upstream nos grupos de Key.",
+  "上游能列出这个模型，但官方客户端不展示它。": "O upstream lista este modelo, mas o cliente oficial não o exibe.",
+  "上游未声明思考档位": "O upstream não informou níveis de raciocínio",
+  "上游模型测试与能力设置可在桌面端「模型管理」中操作。": "Teste modelos upstream e configure recursos no Gerenciamento de modelos do desktop.",
+  "跟随上游默认": "Usar padrão do upstream",
+  "上游模型已停用": "Modelo upstream desativado"
 }

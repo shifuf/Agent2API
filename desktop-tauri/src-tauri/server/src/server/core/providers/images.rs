@@ -126,3 +126,27 @@ pub fn provider_model_supports_editing(provider: &str, model: &Value) -> bool {
             .is_some_and(|adapter| adapter.supports_image_editing())
         && model.get("supports_image_editing").and_then(Value::as_bool) != Some(false)
 }
+
+/// Group candidates carry an already selected raw model. Do not resolve the
+/// public alias again: another member may use a different model on this provider.
+pub fn candidate_supports_operation(account: &Value, operation: ImageOperation) -> bool {
+    let provider = super::super::routing::provider_of(account);
+    super::super::routing_groups::candidate_model(account)
+        .and_then(|model| super::super::routing_groups::catalog_model(provider, model))
+        .is_some_and(|item| match operation {
+            ImageOperation::Generate => provider_model_supports_generation(provider, &item),
+            ImageOperation::Edit => provider_model_supports_editing(provider, &item),
+        })
+}
+
+pub fn operation_available(store: &super::super::account_store::AccountStore, model: &str,
+    scope: Option<&super::super::key_scope::KeyScope>, operation: ImageOperation) -> bool {
+    let profiles = super::super::routing_discovery::snapshot(store);
+    if let Some(group) = profiles.group_for_model(model) {
+        if !group.kind.is_image() { return false; }
+        let accounts: Vec<_> = store.routing_snapshot().accounts.iter().map(|account| account.as_ref().clone()).collect();
+        return super::super::routing_groups::project_with_groups(group, &profiles.groups, &accounts, &Default::default(), scope)
+            .accounts.iter().any(|account| candidate_supports_operation(account, operation));
+    }
+    operation_providers(model, operation).iter().any(|provider| super::super::key_scope::allows_provider(scope, provider))
+}

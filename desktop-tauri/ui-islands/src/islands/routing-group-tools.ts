@@ -5,7 +5,7 @@ export const routingEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhig
 
 // Expansion depends on model identities. Editing weight, accounts or an unfinished
 // rule must retain the resolved choices even while the full draft cannot preview.
-export const routingMemberExpansionKey = (group?: RouteGroup) => JSON.stringify(group ? [group.id, group.match || [],
+export const routingMemberExpansionKey = (group?: RouteGroup) => JSON.stringify(group ? [group.id, group.kind || 'chat', group.match || [],
   group.members.map(member => [member.id, member.provider, member.model, member.group || '']).sort((left, right) => left[0].localeCompare(right[0]))] : null)
 
 export function routingSelectableMembers(group: RouteGroup, expandedMembers: RouteMember[] = []): RouteMember[] {
@@ -49,7 +49,7 @@ export function exportRoutingGroups(groups: RouteGroup[], available = groups): s
     const result: RouteGroup = { id: group.id, name: group.name, model: group.model, description: group.description, strategy: group.strategy, sticky: group.sticky,
       members: group.members.map(member => ({ id: member.id, provider: member.provider, model: member.model, included: member.included, accounts: [],
         group: member.group, accountScope: 'all', weight: member.weight, effort: member.effort, levels: member.levels, fast: member.fast })) }
-    for (const key of ['enabled', 'match', 'pick', 'sink', 'firstToken', 'patience', 'classifier', 'classifierTimeout', 'effort', 'context', 'levels', 'family', 'unlists'] as const) {
+    for (const key of ['kind', 'enabled', 'match', 'pick', 'sink', 'firstToken', 'patience', 'classifier', 'classifierTimeout', 'effort', 'context', 'levels', 'family', 'unlists'] as const) {
       if (group[key] !== undefined) Object.assign(result, { [key]: group[key] })
     }
     result.rules = group.rules?.filter(rule => !rule.folders?.length && !rule.exceptFolders?.length).map(rule => {
@@ -78,9 +78,9 @@ export function parseRoutingImport(text: string): RouteGroup[] {
 }
 
 export function routingTemplate(kind: string, choices: RouteModelChoice[], id: string): RouteGroup {
-  const connected = choices.filter(choice => choice.accountCount > 0)
+  const connected = choices.filter(choice => choice.accountCount > 0 && (choice.kind || 'chat') === 'chat')
   const title = kind === 'balanced' ? '均衡分担' : kind === 'fast' ? '低延迟优先' : kind === 'budget' ? '免费优先' : '顺序回退'
-  return { id, name: title, model: `group-${id.slice(0, 8)}`, description: '', strategy: kind === 'balanced' ? 'rotate' : kind === 'fast' ? 'fast' : kind === 'budget' ? 'free' : 'order',
+  return { id, kind: 'chat', name: title, model: `group-${id.slice(0, 8)}`, description: '', strategy: kind === 'balanced' ? 'rotate' : kind === 'fast' ? 'fast' : kind === 'budget' ? 'free' : 'order',
     sticky: 'auto', enabled: false, patience: 0, firstToken: kind === 'fast' ? 15 : 0, rules: [], match: [],
     members: connected.slice(0, 8).map((choice, index) => ({ id: `${id}-${index}`, provider: choice.provider, model: choice.model, included: true, accounts: [], accountScope: 'all', weight: 1 })) }
 }

@@ -1,4 +1,4 @@
-//! 自定义对话路由组。组是独立入口，成员直指提供商的模型，不借用模型映射。
+//! 对话与图片路由组。组是独立入口，成员直指提供商的模型，不借用模型映射。
 
 use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use super::{RoutingProfile, RoutingSettings};
 
-pub const MAX_GROUPS: usize = 500;
+pub const MAX_GROUPS: usize = 3000;
 pub const MAX_MEMBERS: usize = 256;
 pub const MAX_NESTING: usize = 8;
 pub const STRATEGIES: &[&str] = &["smart", "order", "rotate", "least-used", "pace", "free", "fast", "weight", "manual", "provider"];
@@ -21,6 +21,14 @@ fn classifier_timeout_default() -> u64 { 8 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RoutingAccountScope { #[default] Selected, All }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingGroupKind { #[default] Chat, Image }
+
+impl RoutingGroupKind {
+    pub fn is_image(self) -> bool { self == Self::Image }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,6 +55,7 @@ pub struct RoutingGroup {
     pub id: String,
     pub name: String,
     pub model: String,
+    #[serde(default)] pub kind: RoutingGroupKind,
     #[serde(default)]
     pub description: String,
     pub strategy: String,
@@ -108,7 +117,7 @@ pub fn revision(group: Option<&RoutingGroup>) -> String {
 pub fn preserve_omitted_fields(raw: &mut Value, old: &RoutingGroup) {
     let Ok(previous) = serde_json::to_value(old) else { return; };
     let Some(object) = raw.as_object_mut() else { return; };
-    for key in ["enabled", "auto", "hidden", "match", "pick", "sink", "firstToken", "patience", "rules", "classifier",
+    for key in ["kind", "enabled", "auto", "hidden", "match", "pick", "sink", "firstToken", "patience", "rules", "classifier",
         "classifierTimeout", "effort", "context", "levels", "family", "unlists"] {
         if !object.contains_key(key) { object.insert(key.into(), previous[key].clone()); }
     }
@@ -121,14 +130,10 @@ pub fn preserve_omitted_fields(raw: &mut Value, old: &RoutingGroup) {
     }
 }
 
-/// Public names cannot shadow source models or any existing alias. Collection
-/// validators add their own sibling group and model-profile checks.
-pub fn public_model_occupied(model: &str) -> bool {
-    crate::server::core::managed_models::list().iter().any(|known| known.id.eq_ignore_ascii_case(model))
-        || !crate::server::core::providers::catalog::providers_for_model(model).is_empty()
-        || crate::server::core::model_rules::shared().mappings.iter().any(|mapping| mapping.alias.eq_ignore_ascii_case(model))
-        || crate::server::core::custom_providers::list().iter().any(|provider| provider.get("mappings").and_then(Value::as_array)
-            .is_some_and(|items| items.iter().any(|item| item.get("alias").and_then(Value::as_str).is_some_and(|alias| alias.eq_ignore_ascii_case(model)))))
+/// Only published or draft groups reserve public IDs. Raw upstream model names
+/// live in a separate namespace and may equal the group's public ID.
+pub fn public_model_occupied(model: &str, groups: &BTreeMap<String, RoutingGroup>, except: Option<&str>) -> bool {
+    groups.values().any(|known| Some(known.id.as_str()) != except && known.model.eq_ignore_ascii_case(model))
 }
 
 fn remove_saved_group(profiles: &mut super::RoutingProfiles, id: &str) {
@@ -149,9 +154,10 @@ pub fn validate(group: &RoutingGroup) -> Result<(), String> {
         || group.description.chars().count() > 500 {
         return Err("组名不能为空或超过 64 个字符，说明不能超过 500 个字符".into());
     }
-    if group.model.is_empty() || super::normalize_routing_model(&group.model)? != group.model {
-        return Err("对外模型 ID 不能为空，请去掉首尾空格并使用小写英文字母".into());
+    if group.model.is_empty() || group.model.trim() != group.model {
+        return Err("对外模型 ID 不能为空或包含首尾空格".into());
     }
+    super::normalize_routing_model(&group.model)?;
     if !STRATEGIES.contains(&group.strategy.as_str()) { return Err("路由策略无效".into()); }
     let mut profile = group.profile();
     profile.strategy = None;
@@ -230,7 +236,7 @@ pub fn pattern_matches(pattern: &str, model_ref: &str) -> bool {
 
 pub fn referenced_group<'a>(reference: &str, groups: &'a BTreeMap<String, RoutingGroup>) -> Option<&'a RoutingGroup> {
     let id = reference.strip_prefix("group/").unwrap_or(reference);
-    groups.get(id).or_else(|| groups.values().find(|group| group.model == reference))
+    groups.get(id).or_else(|| groups.values().find(|group| group.model.eq_ignore_ascii_case(reference)))
 }
 
 /// Membership and classifier edges share the same cycle guard.
@@ -244,11 +250,13 @@ pub fn validate_graph(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGro
             if member.group.is_empty() { continue; }
             let child = groups.get(&member.group)
                 .ok_or_else(|| format!("找不到嵌套路由组 {}", member.group))?;
+            if child.kind != current.kind { return Err("嵌套路由组必须使用相同的模型类型".into()); }
             depth = depth.max(1 + walk(child, groups, stack, depths)?);
         }
         if !current.classifier.is_empty() {
             let classifier = referenced_group(&current.classifier, groups);
             if let Some(child) = classifier {
+                if child.kind.is_image() { return Err("分类器必须使用对话路由组".into()); }
                 if current.enabled && !current.hidden && (!child.enabled || child.hidden) { return Err("分类器路由组已停用".into()); }
                 depth = depth.max(1 + walk(child, groups, stack, depths)?);
             } else if current.classifier.starts_with("group/") || !current.classifier.contains('/') {
@@ -297,10 +305,8 @@ pub fn save_with_groups(id: &str, group: Option<RoutingGroup>, expected: &str, e
         if revision(old) != expected { return Err("路由配置已在其他位置修改，请刷新后重试；草稿未丢失".to_string()); }
         if let Some(group) = &group {
             if old.is_none() && profiles.groups.len() >= MAX_GROUPS { return Err("自定义路由组数量已达上限".into()); }
-            if profiles.groups.values().any(|known| known.id != id && known.model.eq_ignore_ascii_case(&group.model))
-                || profiles.models.contains_key(&group.model)
-                || public_model_occupied(&group.model) {
-                return Err("对外模型 ID 已被模型、映射或其他路由占用，请换一个名称".into());
+            if public_model_occupied(&group.model, &profiles.groups, Some(id)) {
+                return Err("对外模型 ID 已被其他路由组占用，请换一个名称".into());
             }
             validate_graph(group, &graph)?;
             let mut saved = group.clone();
@@ -325,6 +331,28 @@ mod contract_tests {
     fn legacy() -> Value {
         json!({"id":"chat","name":"Chat","model":"chat-route","strategy":"order","sticky":"auto",
             "members":[{"id":"a","provider":"openai","model":"gpt-4o","included":true,"accounts":[]}]})
+    }
+
+    #[test]
+    fn group_only_image_kind_and_case_preserving_ids_round_trip() {
+        let mut raw = legacy();
+        raw["kind"] = "image".into();
+        raw["model"] = "Public/Image-V1".into();
+        let group: RoutingGroup = serde_json::from_value(raw).unwrap();
+        assert!(validate(&group).is_ok());
+        assert_eq!(serde_json::to_value(&group).unwrap()["kind"], "image");
+        assert_eq!(group.model, "Public/Image-V1");
+        assert_eq!(serde_json::to_value(serde_json::from_value::<RoutingGroup>(legacy()).unwrap()).unwrap()["kind"], "chat");
+    }
+
+    #[test]
+    fn group_only_nested_groups_cannot_mix_kinds() {
+        let mut raw = legacy();
+        raw["id"] = "image".into(); raw["model"] = "image-route".into(); raw["kind"] = "image".into();
+        let child: RoutingGroup = serde_json::from_value(raw).unwrap();
+        let mut parent: RoutingGroup = serde_json::from_value(legacy()).unwrap();
+        parent.members = vec![serde_json::from_value(json!({"id":"child","group":"image","included":true})).unwrap()];
+        assert!(validate_graph(&parent, &BTreeMap::from([("image".into(), child)])).is_err());
     }
 
     #[test]

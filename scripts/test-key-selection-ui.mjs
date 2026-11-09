@@ -82,9 +82,12 @@ try {
     keyGroups: [{ id: 'test-group', name: 'Test', enabled: true, apiKeys: ['synthetic-upstream-key'], accountIds: [], models: ['upstream-a', 'upstream-b'] }] });
   const live = (await createChannel('Selectable channel')).provider.id;
   const retired = (await createChannel('Retired channel')).provider.id;
+  const workspace = await api('/api/routing/workspace');
   for (const [id, enabled] of [['public-a', true], ['public-b', true], ['disabled-model', false]]) {
-    const catalog = await api('/api/models/catalog');
-    await api('/api/models/catalog', { previousId: '', revision: catalog.revision, model: { id, name: id, enabled, bindings: [{ provider: live, model: 'upstream-a' }] } });
+    const groups = await api('/api/routing/groups');
+    await api('/api/routing/groups', { id, revision: groups.newRevision, group: { id, name: id, model: id, kind: 'chat', enabled,
+      description: '', strategy: 'order', sticky: 'auto', members: [{ id: `${id}-member`, provider: live, model: 'upstream-a', included: true,
+        accounts: workspace.accounts.filter(account => account.provider === live).map(account => account.id) }] } }, 'PUT');
   }
   const retained = (await api('/api/keys', { name: 'Retained key', allowedProviders: [retired], allowedModels: ['obsolete-model'] })).created;
   await api('/api/custom-providers/remove', { id: retired });

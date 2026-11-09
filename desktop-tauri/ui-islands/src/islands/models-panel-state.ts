@@ -19,6 +19,8 @@
  */
 
 import { activeModelBindings } from '../../../ui-shared/models-bindings'
+import { setCustomSourceEnabled } from '../../../ui-shared/custom-source-state'
+import { accountRequest } from './add-account-bridge'
 import { buildIndex as buildReasoningIndex } from './models-reasoning'
 import * as customSource from './models-custom-source'
 import { ALL_CUSTOM } from './models-custom-source'
@@ -77,6 +79,7 @@ export type Binding = {
 export type SharedWindow = {
   workbuddyDesktop?: {
     getModelManage(): Promise<ManageView | null | undefined>
+    setModelState(payload: { provider: string; id: string; enabled: boolean }): Promise<ManageView | null | undefined>
     addModelMapping(
       alias: string, target: string, provider: string, reasoning?: string, enabled?: boolean, create?: boolean,
     ): Promise<ManageView | null | undefined>
@@ -89,6 +92,7 @@ export type SharedWindow = {
     ): Promise<ManageView | null | undefined>
   }
   wbApp?: {
+    showPage?: (page: string) => void
     toast?: (message: string, kind?: 'err' | 'ok') => void
     /** HTML 转义（app.js 里的全局单份实现，只给确认框的正文用） */
     esc?: (value: unknown) => string
@@ -124,7 +128,7 @@ export type SharedWindow = {
   wbAccountAddForms?: { openNewCustomForm?: () => void }
   wbModelsFetchModal?: {
     open(options: {
-      providerId: string; custom?: boolean; name?: string
+      providerId: string; providers?: string[]; custom?: boolean; name?: string
       onDone?: () => void; onRefreshed?: () => void
     }): void
   }
@@ -173,7 +177,7 @@ export const GROUP_LIMIT = 8
 /** 筛选的落盘键（走 wbFilterMemory：provider / state / search 三个维度各存各的） */
 const FILTERS_KEY = 'workbuddy-desktop-models-filters'
 
-const MODEL_STATES: readonly string[] = ['all', 'enabled', 'disabled', 'mapped']
+const MODEL_STATES: readonly string[] = ['all', 'enabled', 'disabled']
 /** 状态分段控件上的标签（键与 MODEL_STATES 一一对应，顺序也照它；只有展示串走 t()，value 是匹配/落盘用的枚举值） */
 const MODEL_STATE_LABEL: Record<string, string> = {
   all: t('全部'), enabled: t('已启用'), disabled: t('已禁用'), mapped: t('有映射'),
@@ -244,7 +248,6 @@ export function visibilityOf(model: ManageModel): 'visible' | 'hidden' | 'undecl
 const COLUMNS: ColumnDecl[] = [
   // 「选择」列：整行的批量操作入口（照账号页勾选列的口径 —— 列设置里要有名字，
   // 表格里那格是「全选」复选框，没有表头文案）
-  { key: 'check', label: t('选择'), align: 'center' },
   { key: 'model', label: t('上游模型') },
   { key: 'rate', label: t('倍率') },
   // 「可见性」紧挨「来源」：两者回答的是同一类问题（这条记录哪来的 / 上游
@@ -257,7 +260,7 @@ const COLUMNS: ColumnDecl[] = [
   // 复合控件最宽的「模型映射」列挤到不可用（列数取舍见交付说明）
   { key: 'budget', label: t('上下文 / 输出') },
   { key: 'caps', label: t('能力') },
-  { key: 'alias', label: t('模型映射') },
+  { key: 'state', label: t('上游启用') },
   { key: 'act', label: t('操作'), align: 'right' },
 ]
 
@@ -864,7 +867,19 @@ export async function runRowAction(key: string, run: () => Promise<unknown>, don
  * 「已启用 / 已禁用」筛选与组内排序共用这一份口径，避免两处各判各的。
  */
 export function rowEnabled(model: ManageModel): boolean {
-  return bindingsOf(model).some(binding => binding.enabled !== false)
+  return model.enabled !== false
+}
+
+/** Upstream availability is separate from public routing-group publication. */
+export async function writeSourceState(provider: string, id: string, enabled: boolean): Promise<unknown> {
+  if (customSource.isCustom(provider)) return enqueueWrite(async () => {
+    await setCustomSourceEnabled(accountRequest, provider, id, enabled)
+    await refreshAll()
+    return null
+  })
+  const api = shared().workbuddyDesktop
+  if (!api) throw new Error(t('后端桥不可用'))
+  return enqueueWrite(() => api.setModelState({ provider, id, enabled }))
 }
 
 /**
@@ -1060,11 +1075,12 @@ export function refreshModels(): void {
   const custom = customSource.isCustom(provider)
   const name = custom
     ? (customSource.record(provider)?.name || provider)
-    : t('内置提供商')
+    : provider !== 'all' ? providerLabelOf(provider) : t('内置提供商')
   shared().wbModelsFetchModal?.open({
     // 「自定义 · 全部」聚合视图没有单一的上游可拉（各家 Base URL 都不同），
     // 把 providerId 置空，弹窗按内置家的「多家范围」模式组装刷新名单
     providerId: provider === ALL_CUSTOM ? '' : provider,
+    providers: !custom && provider !== 'all' && provider !== ALL_CUSTOM ? [provider] : undefined,
     custom,
     name,
     // 自定义家：导入成功 → 目录缓存已刷新，重绘即可（数据源是本地缓存）

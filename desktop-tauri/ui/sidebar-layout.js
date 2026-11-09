@@ -80,8 +80,8 @@
     // /旅行这类专属面板，都由插件申报）。没装插件时页面显示空态并指路，比一个
     // 凭空消失的菜单项清楚得多。
     { key: 'checkin', label: wbI18n.t('签到中心'), icon: 'checkin' },
-    { key: 'routing', label: wbI18n.t('路由'), icon: 'route' },
     { key: 'gateway', label: wbI18n.t('模型管理'), icon: 'gateway' },
+    { key: 'routing', label: wbI18n.t('路由'), icon: 'route' },
     { key: 'agent', label: wbI18n.t('Agent 配置'), icon: 'agent' },
     // 工具服务：给客户端装上的可选能力（网络搜索 / 视觉分析），排在客户端
     // 配置之后、出网代理之前 —— 前者是「接哪些客户端」，这一项是「接了能用什么」。
@@ -231,7 +231,7 @@
         { id: 'g-overview', label: '概览', custom: false, hidden: false,
           items: ['assistant', 'overview', 'accounts', 'checkin'] },
         { id: 'g-forward', label: '转发链路', custom: false, hidden: false,
-          items: ['routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs'] },
+          items: ['gateway', 'routing', 'agent', 'tools', 'proxies', 'keys', 'docs'] },
         { id: 'g-diag', label: '诊断', custom: false, hidden: false,
           items: ['requests', 'logs', 'tasks'] },
         { id: 'g-system', label: '系统', custom: false, hidden: false,

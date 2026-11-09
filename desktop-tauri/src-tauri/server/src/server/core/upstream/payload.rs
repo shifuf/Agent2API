@@ -197,9 +197,11 @@ pub(super) async fn send_body<'a>(
 ) -> SendBody<'a> {
     if ctx.images.is_some() {
         let requested = ctx.body.get("model").and_then(Value::as_str).unwrap_or("");
-        let wire = crate::server::core::providers::catalog::wire_target_for_provider(
-            requested, provider_id, account,
-        );
+        let wire = if let Some(model) = account.and_then(crate::server::core::routing_groups::candidate_model) {
+            crate::server::core::providers::catalog::WireTarget { model: model.to_string(), reasoning: None }
+        } else if ctx.ignore_model_gate {
+            crate::server::core::providers::catalog::source_wire_target_for_provider(requested, provider_id)
+        } else { crate::server::core::providers::catalog::wire_target_for_provider(requested, provider_id, account) };
         let mut body = Cow::Borrowed(ctx.body);
         rewrite_model(&mut body, requested, &wire.model, provider_id);
         ctx.telemetry.note_upstream_model(&wire.model);

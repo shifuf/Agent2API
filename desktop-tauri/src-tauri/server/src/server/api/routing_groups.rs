@@ -23,6 +23,9 @@ pub fn groups_json(state: &ServerState) -> Value {
 }
 
 pub async fn get_groups(State(state): State<ServerState>) -> Response {
+    if let Some(error) = crate::server::core::group_migration::last_error() {
+        return errors::management_error(500, format!("旧配置迁入路由组失败，原数据已保留，请检查启动日志：{error}"));
+    }
     match tokio::task::spawn_blocking(move || groups_json(&state)).await {
         Ok(value) => ok_json(value), Err(error) => errors::management_error(500, error.to_string()),
     }

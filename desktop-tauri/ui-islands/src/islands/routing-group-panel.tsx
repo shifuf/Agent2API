@@ -17,7 +17,7 @@ import { RoutingPreviewPanel } from './routing-preview-panel'
 import { useRoutingPreviewMembers } from './routing-preview-members'
 
 export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting, now, onAccount, onSort }: {
-  editor: RouteGroupEditor; accounts: AccountRecord[]; reserved: string[]; baseUrl: string; sorting?: AccountSorting | null; now: number
+  editor: RouteGroupEditor; accounts: AccountRecord[]; reserved: RouteGroup[]; baseUrl: string; sorting?: AccountSorting | null; now: number
   onAccount(id: string): void; onSort(provider: string): void
 }) {
   const [dialog, setDialog] = React.useState<'edit' | 'add' | 'example' | null>(null)
@@ -70,14 +70,16 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
     try { await navigator.clipboard.writeText(value); notify(t('已复制')) }
     catch { notify(t('复制失败，请手动选择并复制'), 'error') }
   }
-  const request = JSON.stringify({ model: group.model, messages: [{ role: 'user', content: 'Hello' }], stream: true }, null, 2)
-  const snippet = `POST ${baseUrl.replace(/\/$/, '')}/v1/chat/completions\nAuthorization: Bearer <YOUR_GATEWAY_KEY>\nContent-Type: application/json\n\n${request}`
+  const image = group.kind === 'image'
+  const request = JSON.stringify(image ? { model: group.model, prompt: 'A mountain at sunrise', size: '1024x1024' } : { model: group.model, messages: [{ role: 'user', content: 'Hello' }], stream: true }, null, 2)
+  const snippet = `POST ${baseUrl.replace(/\/$/, '')}/v1/${image ? 'images/generations' : 'chat/completions'}\nAuthorization: Bearer <YOUR_GATEWAY_KEY>\nContent-Type: application/json\n\n${request}`
   const matches = (member: RouteMember) => !query || `${name(member)} ${label(member.provider)} ${member.model}`.toLowerCase().includes(query)
     || accounts.some(account => account.provider === member.provider && displayNameOf(account).toLowerCase().includes(query))
   const visible = sections.active.filter(matches)
   const expandable = [...sections.active, ...routingCollapsedSections.flatMap(({ key }) => sectionOpen[key] ? sections[key] : [])].filter(matches)
   const allOpen = expandable.length > 0 && expandable.every(member => isOpen(member.id))
-  const renderMember = (member: RouteMember) => <RoutingMemberCard key={member.id} member={member} accounts={accounts} name={name(member)} label={member.group ? t('嵌套路由组') : label(member.provider)}
+  const renderMember = (member: RouteMember) => <RoutingMemberCard key={member.id} member={member} kind={group.kind} accounts={accounts} name={name(member)} label={member.group ? t('嵌套路由组') : label(member.provider)}
+    credits={editor.data?.catalog.find(choice => choice.provider === member.provider && choice.model.toLowerCase() === member.model.toLowerCase())?.credits}
     index={active.indexOf(member)} first={orderingPeers(member.id)[0]?.id === member.id} last={orderingPeers(member.id).at(-1)?.id === member.id}
     open={isOpen(member.id)} locked={locked} query={query} drag={drag}
     onOpen={open => setOpened(current => ({ ...current, [member.id]: open }))} onJoin={on => editMember(member.id, next => { next.included = on })}
@@ -140,8 +142,8 @@ export function RoutingGroupPanel({ editor, accounts, reserved, baseUrl, sorting
     </RoutingCanvasLayout>
     <RoutingDragOverlay state={drag.state} />
     {dialog === 'edit' ? <RoutingGroupDialog group={group} reserved={reserved} onSave={group => update(next => Object.assign(next, group))} onClose={() => setDialog(null)} /> : null}
-    {dialog === 'add' ? <RoutingMemberDialog choices={(editor.data?.catalog || []).filter(choice => choice.model.toLowerCase() !== group.model.toLowerCase()
-      && !Object.values(editor.drafts).some(draft => draft.group.model.toLowerCase() === choice.model.toLowerCase()))} members={group.members} accounts={accounts} groups={Object.values(editor.drafts).filter(draft => draft.baseline).map(draft => draft.group)} currentId={group.id}
+    {dialog === 'add' ? <RoutingMemberDialog choices={editor.data?.catalog || []} members={group.members} accounts={accounts}
+      groups={Object.values(editor.drafts).filter(draft => draft.baseline).map(draft => draft.group)} currentId={group.id} routeKind={group.kind || 'chat'}
       onAdd={members => update(next => { next.members.push(...members) })} onClose={() => setDialog(null)} /> : null}
     {selectedAccountMember ? <RoutingMemberAccounts member={selectedAccountMember} accounts={accounts} onSave={ids => editMember(selectedAccountMember.id, member => { member.accounts = ids })} onClose={() => setAccountMember(null)} /> : null}
     {dialog === 'example' ? <Dialog open onOpenChange={open => { if (!open) setDialog(null) }}><DialogContent>

@@ -68,8 +68,7 @@ pub fn found_groups(accounts: &[Value]) -> Vec<RoutingGroup> { derive(&source_mo
 pub fn effective_profiles(profiles: &RoutingProfiles, accounts: &[Value]) -> RoutingProfiles {
     let mut result = profiles.clone();
     if !profiles.auto_groups_enabled { return result; }
-    let reserved: HashSet<_> = super::managed_models::list().into_iter().map(|model| model.id.to_lowercase()).collect();
-    merge_found(&mut result, found_groups(accounts), &reserved);
+    merge_found(&mut result, found_groups(accounts), &HashSet::new());
     result
 }
 

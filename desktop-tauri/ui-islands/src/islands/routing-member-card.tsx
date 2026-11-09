@@ -4,15 +4,16 @@ import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
 import type { AccountRecord, AccountSorting } from './accounts-shared'
 import { RoutingConsumptionOrder } from './routing-account-order'
-import type { RouteMember } from './routing-types'
+import type { RouteKind, RouteMember } from './routing-types'
 import type { useRoutingDrag } from './routing-drag'
 import { RoutingAccountRow, RoutingActions, RoutingProviderMark, routingOrderKey } from './routing-canvas-controls'
 import { RouteIcon } from './routing-ui'
 import { RoutingMemberOptions } from './routing-group-options'
+import { RoutingModelRate } from './routing-model-source'
 
-export function RoutingMemberCard({ member, accounts, label, name, index, first, last, open, locked, query, drag, sorting, now,
+export function RoutingMemberCard({ member, kind = 'chat', accounts, label, name, credits, index, first, last, open, locked, query, drag, sorting, now,
   onOpen, onJoin, onMove, onAccounts, onToggleAccount, onMoveAccount, onAccount, onSort, onChange }: {
-  member: RouteMember; accounts: AccountRecord[]; label: string; name: string; index: number; first: boolean; last: boolean; open: boolean; locked: boolean; query: string
+  member: RouteMember; kind?: RouteKind; accounts: AccountRecord[]; label: string; name: string; credits?: string | null; index: number; first: boolean; last: boolean; open: boolean; locked: boolean; query: string
   drag: ReturnType<typeof useRoutingDrag>; onOpen(open: boolean): void; onJoin(on: boolean): void; onMove(direction: number): void
   onAccounts(): void; onToggleAccount(id: string): void; onMoveAccount(id: string, direction: number): void; onAccount(id: string): void
   sorting?: AccountSorting | null; now: number; onSort(): void
@@ -34,6 +35,7 @@ export function RoutingMemberCard({ member, accounts, label, name, index, first,
       <RoutingProviderMark id={member.provider} label={label} />
       <CollapsibleTrigger className='routing-provider-toggle'><span className='routing-provider-name'><b title={name}>{name}</b>
         <small title={`${label} · ${member.model}`}>{label} · {member.model}</small></span><RouteIcon name='chevronDown' size={13} /></CollapsibleTrigger>
+      {!member.group ? <RoutingModelRate credits={credits} /> : null}
       <Switch checked={member.included} disabled={locked} onCheckedChange={onJoin} aria-label={t('{model} 参与本路由', { model: name })}
         title={member.included ? t('移出本路由') : t('加入路由')} />
       <Button variant='ghost' size='icon-sm' className='routing-settings-button' disabled={locked || Boolean(member.group)}
@@ -46,7 +48,7 @@ export function RoutingMemberCard({ member, accounts, label, name, index, first,
     </header>
     {!member.group ? <RoutingConsumptionOrder provider={member.provider} sorting={sorting} independent disabled={locked} onSettings={onSort} /> : null}
     <CollapsibleContent className='routing-config-accounts'>
-      <RoutingMemberOptions member={member} disabled={locked} onChange={onChange} />
+      <RoutingMemberOptions kind={kind} member={member} disabled={locked} onChange={onChange} />
       {!member.group ? <>
       <div className='routing-member-summary'><span>{t('{selected} / {total} 个账号参与', { selected: member.accounts.length, total: available.length })}</span>
         <Button variant='link' size='sm' disabled={locked || member.accountScope === 'all'} onClick={onAccounts}>{t('选择账号')}</Button></div>

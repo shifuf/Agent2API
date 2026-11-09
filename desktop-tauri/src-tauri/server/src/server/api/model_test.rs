@@ -477,11 +477,6 @@ fn source_test_allowed(store: &crate::server::core::account_store::AccountStore,
     } else {
         catalog::source_wire_target_for_provider(requested, provider).model
     };
-    if crate::server::core::managed_models::list().iter().any(|model| {
-        model.enabled && scope.allows_model(&model.id) && model.bindings.iter().any(|binding| {
-            binding.provider.eq_ignore_ascii_case(provider) && binding.model.eq_ignore_ascii_case(&target)
-        })
-    }) { return true; }
     let accounts: Vec<_> = store.routing_snapshot().accounts.iter().map(|account|account.as_ref().clone()).collect();
     let profiles = crate::server::core::routing_discovery::effective_profiles(&crate::server::config::routing_profiles(), &accounts);
     !account_id.is_empty() && profiles.groups.values().filter(|group|group.enabled && !group.hidden && scope.allows_model(&group.model)).any(|group| {

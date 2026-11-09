@@ -71,7 +71,7 @@ pub(crate) mod compact_routes;
 pub(crate) mod client_identification;
 mod github_access;
 mod mutations;
-pub(crate) use mutations::try_update_raw_field;
+pub(crate) use mutations::{try_update_raw_field, try_update_raw};
 pub(crate) mod parse;
 pub(crate) mod routing_groups;
 pub(crate) mod routing_rules;

@@ -41,7 +41,7 @@ export function RoutingGroupsDashboard({ editor, onOpen, onCreate }: { editor: R
           <Switch aria-label={t('启用路由组 {name}', { name: group.name })} checked={group.enabled !== false} disabled={locked || dirty}
             onCheckedChange={enabled => void editor.toggle(group.id, enabled)} /></div>}
       </header>
-      <div className='routing-magpie-tags'><Badge variant='secondary' shape='tag'>{strategyLabel(group.strategy)}</Badge><span>{t('粘滞 {mode}', { mode: stickyLabel(group.sticky) })}</span>
+      <div className='routing-magpie-tags'><Badge variant='secondary' shape='tag'>{group.kind === 'image' ? t('图像') : t('对话')}</Badge><Badge variant='secondary' shape='tag'>{strategyLabel(group.strategy)}</Badge><span>{t('粘滞 {mode}', { mode: stickyLabel(group.sticky) })}</span>
         {group.rules?.length ? <span>{t('{n} 条规则', { n: group.rules.length })}</span> : null}
         {dirty ? <Badge variant='warning' shape='tag'>{t('有未保存的修改')}</Badge> : null}</div>
       {group.description ? <p className='routing-magpie-description'>{group.description}</p> : null}
@@ -94,7 +94,7 @@ export function RoutingGroupsDashboard({ editor, onOpen, onCreate }: { editor: R
     <Dialog open={Boolean(dialog)} onOpenChange={value => { if (!value && !editor.busy) setDialog(null) }}><DialogContent className='w-[min(720px,calc(100vw-32px))]'>
       <DialogHeader><DialogTitle>{dialog === 'templates' ? t('路由模板') : dialog === 'export' ? t('导出路由组') : t('导入路由组')}</DialogTitle></DialogHeader>
       <DialogBody>{dialog === 'templates' ? <div className='routing-magpie-template-list'>{[['fallback', '顺序回退'], ['balanced', '均衡分担'], ['fast', '低延迟优先'], ['budget', '免费优先']].map(([kind, label]) =>
-        <Button key={kind} variant='outline' disabled={!editor.data?.catalog.some(choice => choice.accountCount > 0)} onClick={() => {
+        <Button key={kind} variant='outline' disabled={!editor.data?.catalog.some(choice => choice.accountCount > 0 && (choice.kind || 'chat') === 'chat')} onClick={() => {
           const draft = routingTemplate(kind, editor.data?.catalog || [], newRouteId()); draft.name = t(label)
           if (editor.create(draft)) { setDialog(null); onOpen(draft.id) }
         }}>{t(label)}</Button>)}<p>{t('模板使用已连接的模型生成停用草稿，确认后保存。')}</p></div> : <>

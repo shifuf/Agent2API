@@ -19,10 +19,12 @@ export type RoutingRule = { use: string; more?: string[]; useEffort?: string; to
   folders?: string[]; exceptFolders?: string[]; pause?: boolean }
 export type RouteMember = { id: string; provider: string; model: string; included: boolean; accounts: string[];
   group?: string; accountScope?: RouteProviderScope; weight?: number; effort?: string; levels?: string[]; fast?: boolean }
-export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; members: RouteMember[];
+export type RouteKind = 'chat' | 'image'
+export type RouteGroup = { id: string; name: string; model: string; kind?: RouteKind; description: string; strategy: string; sticky: string; members: RouteMember[];
   enabled?: boolean; auto?: boolean; hidden?: boolean; match?: string[]; pick?: string; sink?: boolean | null; firstToken?: number; patience?: number;
   rules?: RoutingRule[]; classifier?: string; classifierTimeout?: number; effort?: string; context?: number; levels?: string[]; family?: string; unlists?: boolean }
-export type RouteModelChoice = { provider: string; providerLabel: string; model: string; name: string; accountCount: number;
+export type RouteModelChoice = { provider: string; providerLabel: string; model: string; name: string; kind?: RouteKind; accountCount: number;
+  credits?: string | null;
   developer?: string; developerName?: string; family?: string; canonicalModel?: string; displayName?: string;
   capabilities: { supportsToolCall?: boolean | null; supportsImages?: boolean | null; supportsVideo?: boolean | null; supportsReasoning?: boolean | null; maxInputTokens?: number | null; maxOutputTokens?: number | null } }
 export type RouteGroups = { groups: Array<{ group: RouteGroup; revision: string; expandedMembers?: RouteMember[] }>; newRevision: string; catalog: RouteModelChoice[];

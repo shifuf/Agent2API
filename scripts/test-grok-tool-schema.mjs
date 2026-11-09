@@ -57,8 +57,8 @@ const exited = once(child, 'exit')
 let logs = ''
 for (const pipe of [child.stdout, child.stderr]) pipe.on('data', chunk => { logs = (logs + chunk).slice(-16000) })
 const base = `http://127.0.0.1:${port}`
-async function api(endpoint, body) {
-  const response = await fetch(base + endpoint, { method: body ? 'POST' : 'GET', headers: {
+async function api(endpoint, body, method = body ? 'POST' : 'GET') {
+  const response = await fetch(base + endpoint, { method, headers: {
     Authorization: `Bearer ${key}`, 'Content-Type': 'application/json',
   }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) })
   const result = await response.json()
@@ -81,10 +81,10 @@ try {
     })
     for (const wire of ['grok-4.7', 'other-model']) {
       const model = `${protocol}-${wire === 'grok-4.7' ? 'public-alias' : 'control'}`
-      const catalog = await api('/api/models/catalog')
-      await api('/api/models/catalog', { revision: catalog.revision, model: { id: model, enabled: true,
-        bindings: [{ provider: channel.provider.id, model: wire }],
-      } })
+      const catalog = await api('/api/routing/groups')
+      await api('/api/routing/groups', { revision: catalog.newRevision, id: model, group: { id: model, model, name: model, enabled: true,
+        strategy: 'order', sticky: 'off', members: [{ id: 'source', provider: channel.provider.id, model: wire, included: true, accountScope: 'all', accounts: [] }],
+      } }, 'PUT')
       for (const variant of ['absent', 'null', 'array']) {
         const schema = { type: 'object', properties: { name: { type: 'string' }, nested: { type: 'object', properties: {} },
           required: { type: 'string', default: 'literal property name' }, list: { type: 'array', items: { type: 'object', required: null } } },

@@ -405,7 +405,7 @@ impl UpstreamService {
         let route_scope = request.allowed_providers.clone();
         let ignore_route = request.ignore_model_gate;
         let routing = crate::server::core::blocking::run(move || {
-            route_context::RequestRouting::capture_request(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route)
+            route_context::RequestRouting::capture_request(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route, images)
         }).await??;
         let mut slot = self.begin_slot(&request.dedupe_key, cancel.as_ref()).await;
         // 账号级活跃连接计数：**本请求**的凭证，随选路改绑到实际使用的账号。

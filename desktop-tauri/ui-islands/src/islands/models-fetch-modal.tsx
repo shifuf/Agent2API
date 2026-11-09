@@ -22,7 +22,7 @@ import { ModelsFetchError } from './models-fetch-error'
 import { ModelsFetchTable, type RefreshItem, type Row } from './models-fetch-table'
 
 /**
- * Agent2API · 「获取模型」弹窗（模型管理页那颗按钮的本体）。
+ * Agent2API · 「获取模型」弹窗（账号页的提供商目录刷新入口）。
  *
  * 替换 ui/models-fetch-modal.js（innerHTML 拼 .modal-mask / .models-table 那套老类名）；
  * 对外接口与原实现**完全一致**：
@@ -70,6 +70,7 @@ type Account = {
   id?: unknown; provider?: string; name?: string; nickname?: string; email?: string
   nameCustom?: boolean
   available?: boolean; enabled?: boolean
+  hasCredentials?: boolean; needsRelogin?: boolean
 }
 
 /** 内置家注册表里的一项（`wbProviders.all()`）；自定义家目录里的一项（`customList()`） */
@@ -81,6 +82,8 @@ type RefreshResponse = { results?: RefreshItem[]; refreshed?: unknown }
 /** open() 的入参（与旧实现逐字一致） */
 type OpenOptions = {
   providerId: string
+  /** 显式限制内置目录刷新范围；账号分组入口只刷新这一家。 */
+  providers?: string[]
   /** 由调用方判好：true = 自定义家 */
   custom?: boolean
   /** 展示名（标题用）；缺省回落 providerId */
@@ -205,36 +208,28 @@ function sourceAccounts(providerId: string): Account[] {
   if (ACCOUNTLESS_REFRESH.has(providerId)) return []
   const order = shared().wbAccountsModel?.byPriorityOrder
   const list = accounts().filter(account => (account?.provider || 'workbuddy') === providerId
-    && account?.available !== false && account?.enabled !== false)
+    && account?.available !== false && account?.enabled !== false && account?.hasCredentials !== false && account?.needsRelogin !== true)
   return order ? list.sort(order) : list
 }
 
 /**
- * 本次刷新的范围：**模型管理页左栏实有清单的家 ∪ 有启用账号的家**。
- *
- * 与「模型来源」下拉同一哲学（见 sourceAccounts）：用户在界面上都看不到的家（没有启用账号、清单
- * 也为空）不该参加刷新 —— 刷它只会得到一行「缺少登录态」，而用户既没有账号可选、列表里也根本
- * 没有这家，无从理解。名单随请求带给后端（见 api/models.rs 的 providers）：名单外的家不打网络、
- * 也不进结果。
- *
- * 「有启用账号的家」并进来，是为「刚加完账号、清单还是空的」这一档：它暂时不在左栏，但用户马上
- * 就该看到它 —— 刷一次清单就有了。左栏数据缺席（页面数据未加载）时不降级成全量：宁缺毋滥，自动
- * 刷新任务会兜底。
+ * 仅刷新有启用凭证账号的提供商。刚加账号、目录为空时也能刷新；
+ * 不依赖已移除的模型管理页状态，不把无账号的静态目录纳入请求。
  */
 function scopeProviders(): string[] {
-  const ids = new Set(shared().wbModelsPanel?.builtinProviders?.() || [])
+  const ids = new Set<string>()
   for (const account of accounts()) {
-    if (account?.available === false || account?.enabled === false) continue
+    if (account?.available === false || account?.enabled === false || account?.hasCredentials === false || account?.needsRelogin === true) continue
     ids.add(account?.provider || 'workbuddy')
   }
   return [...ids]
 }
 
-/** 待获取那一屏要列的家：按注册表顺序（与模型管理页左栏同一序）列 scoped 名单 —— `all()` 只有
- *  内置家，自定义家的 id 即使进了 scopeProviders 也不会出现在这里。 */
-function pendingProviders(): ProviderMeta[] {
+/** 内置提供商按注册表顺序列出；自定义渠道由账号页的 Key 分组编辑器处理。 */
+function pendingProviders(providers?: string[]): ProviderMeta[] {
   const scoped = new Set(scopeProviders())
-  return (shared().wbProviders?.all?.() || []).filter(item => scoped.has(item?.id ?? ''))
+  return (shared().wbProviders?.all?.() || []).filter(item => scoped.has(item?.id ?? '')
+    && !item.id?.startsWith('custom-') && (!providers || providers.includes(item.id || '')))
 }
 
 /**
@@ -310,7 +305,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
   const [savedSource, setSavedSource] = React.useState<Record<string, string>>(loadSavedSource)
 
   /** 内置家：本次范围里的家（与 scopeProviders 同源，也就是真正会进请求的名单） */
-  const pending = custom ? [] : pendingProviders()
+  const pending = custom ? [] : pendingProviders(options.providers)
   /** 内置家的表体行（待获取的家 + 已有结果的家，见 buildRows）；自定义家没有这条模型 */
   const rows = custom ? [] : buildRows()
 
@@ -651,7 +646,7 @@ function ModelsFetchModal({ options, onClose }: { options: OpenOptions; onClose:
                     <Button variant='ghost' size='sm' onClick={() => setPicked(new Set())}>{t('清空')}</Button>
                   </>
                 )}
-                <Button variant='outline' size='sm' title={t('刷新全部家（逐家打上游）')} disabled={busy}
+                <Button variant='outline' size='sm' title={pending.length === 1 ? t('只刷新这一家的模型清单') : t('刷新全部家（逐家打上游）')} disabled={busy || (!custom && !pending.length)}
                   onClick={() => { void load() }}>
                   {busyKind === 'load' ? t('获取中…') : fetched ? t('重新获取') : t('获取模型')}
                 </Button>

@@ -249,6 +249,14 @@
 .models-table .c-caps { width: 11.5%; }
 .models-table .c-alias { width: 33%; }
 .models-table .c-act { width: 11%; }
+.page[data-page="gateway"] .models-table .c-model { width: 27%; }
+.page[data-page="gateway"] .models-table .c-rate { width: 6%; }
+.page[data-page="gateway"] .models-table .c-visibility { width: 8%; }
+.page[data-page="gateway"] .models-table .c-source { width: 8%; }
+.page[data-page="gateway"] .models-table .c-budget { width: 15%; }
+.page[data-page="gateway"] .models-table .c-caps { width: 14%; }
+.page[data-page="gateway"] .models-table .c-state { width: 14%; }
+.page[data-page="gateway"] .models-table .c-act { width: 8%; }
 .keys-table .k-name { width: 22%; }
 .keys-table .k-key { width: 44%; }
 .keys-table .k-time { width: 16%; }

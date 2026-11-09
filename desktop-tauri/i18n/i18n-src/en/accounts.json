@@ -1,4 +1,5 @@
 {
+  "获取上游模型": "Fetch upstream models",
   " · 今日 {used} / {quota}": " · Today {used} / {quota}",
   " · 当前 {n}": " · Currently {n}",
   " · 本周期 {used} / {quota}": " · This period {used} / {quota}",
@@ -973,5 +974,16 @@
   "，只对 OpenCode Zen 这类上游有意义，别的家请关掉。": ", so it only matters for upstreams like OpenCode Zen — turn it off for other providers.",
   "，已达到上限": ", limit reached",
   "：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。": ": on the Network proxy page, open \"Manage subscriptions\" and click \"Sync Clash Verge\" to import exits into the pool and then select them — that centralizes testing and lets several accounts share them.",
-  "；": "; "
+  "；": "; ",
+  "已保存的密钥": "Saved credentials",
+  "查看密钥详情": "View credential details",
+  "隐藏密钥详情": "Hide credential details",
+  "点击后读取当前已保存的凭证；隐藏或关闭窗口后清除。": "Read saved credentials on demand; hiding or closing this view clears them.",
+  "正在读取密钥详情…": "Reading credential details…",
+  "读取密钥详情失败，请重试": "Could not read credential details. Please try again.",
+  "提供商凭证（JSON）": "Provider credentials (JSON)",
+  "此账号无需鉴权，没有已保存的密钥。": "This account requires no authentication and has no saved key.",
+  "此账号使用客户端实时登录态，没有已保存的密钥。": "This account uses the client’s live session and has no saved key.",
+  "此账号没有可查看的已保存凭证。": "This account has no saved credentials to display.",
+  "可在「已保存的密钥」中查看原密钥；更换密钥不会改变账号 ID。": "View the current key under Saved credentials. Replacing it does not change the account ID."
 }

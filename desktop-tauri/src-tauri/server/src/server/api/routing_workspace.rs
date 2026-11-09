@@ -129,6 +129,9 @@ pub async fn put_profile(State(state): State<ServerState>, body: Bytes) -> Respo
         Ok(model) => model,
         Err(error) => return errors::management_error(400, error),
     };
+    if !model.is_empty() {
+        return errors::management_error(410, "模型独立路由已合并到路由组，请在路由页面修改路由组");
+    }
     if config::routing_profiles().group_for_model(&model).is_some() {
         return errors::management_error(400, "此入口是自定义路由组，请在路由组中修改，不能覆盖为模型独立配置");
     }

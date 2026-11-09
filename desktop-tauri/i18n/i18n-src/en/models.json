@@ -1,4 +1,5 @@
 {
+  "模型目录已刷新，可在路由组中选择。": "Model catalog refreshed. Models are now available in routing groups.",
   " · 思考等级 ": " · Reasoning level ",
   " · 思考等级 {level}": " · Reasoning level {level}",
   " · 有映射 ": " · mapped ",
@@ -593,5 +594,17 @@
   "账号提供商": "Account provider",
   "选择账号提供商": "Select an account provider",
   "搜索上游模型": "Search upstream models",
-  "没有匹配的上游模型": "No matching upstream models"
+  "没有匹配的上游模型": "No matching upstream models",
+  "管理路由组": "Manage routing groups",
+  "上游启用": "Upstream enabled",
+  "启用上游模型 {model}": "Enable upstream model {model}",
+  "搜索模型 ID / 名称…": "Search model ID / name…",
+  "这里只维护上游来源；对外模型 ID 统一在路由组中配置。": "Manage upstream sources here; configure public model IDs in routing groups.",
+  "先在左栏选择提供商，再获取模型并在 Key 分组中确认选择。": "Choose a provider on the left, fetch models, then confirm selections in Key groups.",
+  "这家还没有模型：点「获取模型」，在 Key 分组中填写或获取上游模型。": "No models yet. Click Fetch models, then enter or fetch upstream models in Key groups.",
+  "上游能列出这个模型，但官方客户端不展示它。": "The upstream lists this model, but its official client hides it.",
+  "上游未声明思考档位": "Upstream has not specified reasoning levels",
+  "上游模型测试与能力设置可在桌面端「模型管理」中操作。": "Use desktop Model management to test upstream models and configure capabilities.",
+  "跟随上游默认": "Use upstream default",
+  "上游模型已停用": "Upstream model is disabled"
 }

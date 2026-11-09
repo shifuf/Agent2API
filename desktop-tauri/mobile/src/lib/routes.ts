@@ -8,6 +8,7 @@ export type Route = { screen: ScreenId; params?: Record<string, string> }
 
 /** 旧插件签到地址只作路由兼容，不再加载插件提供的 HTML。 */
 export function normalizeRoute(screen: string, params?: Record<string, string>): Route {
+  if (screen === 'gateway') return { screen: 'models', params }
   if (screen === 'checkin-records') return { screen: 'checkin', params: { ...params, tab: 'records' } }
   if (screen.startsWith('plugin:')) {
     return { screen: screen.endsWith(':checkin') ? 'checkin' : 'plugins', params }

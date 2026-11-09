@@ -152,7 +152,7 @@ fn resolve_model_for(
             crate::server::core::models::model_id(item).eq_ignore_ascii_case(&default))
             .or_else(|| compatible.first()).map(|item| crate::server::core::models::model_id(item));
         let Some(fallback) = fallback else {
-            return Err(GatewayError::with_status(404, "没有可用的对外模型，请先在模型管理中添加模型并配置网关 Key 范围")
+            return Err(GatewayError::with_status(404, "没有可用的对外模型，请先在路由页创建路由组并配置网关 Key 范围")
                 .with_code("model_not_found"));
         };
         payload["model"] = Value::String(fallback);
@@ -166,7 +166,11 @@ fn resolve_model_for(
         if !key_scope::allows_model(scope, &requested_model) {
             return Err(GatewayError::with_status(404, "此路由组不在网关 Key 的可用模型列表里").with_code("model_not_found"));
         }
-        if image_generation { return Err(GatewayError::bad_request("对话路由组不能用于图片生成")); }
+        if group.kind.is_image() != image_generation {
+            return Err(GatewayError::bad_request(if image_generation { "对话路由组不能用于图片生成或编辑" }
+                else { "图片路由组不能用于对话，请使用 /v1/images/generations 或 /v1/images/edits" })
+                .with_code(if image_generation { "image_generation_not_supported" } else { "image_generation_required" }));
+        }
         if let Some(object) = payload.as_object_mut() {
             object.insert("model".into(), group.model.clone().into());
             object.insert("_wb_route_group_id".into(), group.id.clone().into());

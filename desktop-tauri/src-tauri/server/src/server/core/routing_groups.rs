@@ -39,10 +39,8 @@ impl RequestNeeds {
     pub fn reason(&self, item: &Value) -> Option<String> {
         for (required, key, label) in [(self.tools, "supportsToolCall", "工具调用"),
             (self.images, "supportsImages", "图片输入"), (self.video, "supportsVideo", "视频输入")] {
-            if required && item.get(key).and_then(Value::as_bool) != Some(true) {
-                return Some(if item.get(key).and_then(Value::as_bool) == Some(false) {
-                    format!("该模型不支持{label}，已跳过")
-                } else { format!("该模型的{label}能力未声明，请先在模型管理中确认") });
+            if required && item.get(key).and_then(Value::as_bool) == Some(false) {
+                return Some(format!("该模型不支持{label}，已跳过"));
             }
         }
         None
@@ -57,7 +55,15 @@ fn manifest(provider: &str) -> Vec<Value> {
             capability::apply_overrides(&mut item, &overrides);
             item
         }).collect()
-    } else { providers::catalog::manifest_for_provider(provider) }
+    } else {
+        let rules = super::model_rules::shared();
+        providers::catalog::manifest_for_provider(provider).into_iter().map(|mut item| {
+            let enabled = item.get("enabled") != Some(&Value::Bool(false))
+                && rules.default_enabled(provider, &model_id(&item));
+            item["enabled"] = enabled.into();
+            item
+        }).collect()
+    }
 }
 
 pub fn catalog_model(provider: &str, model: &str) -> Option<Value> {
@@ -77,8 +83,8 @@ pub fn choices(store: &AccountStore) -> Vec<Value> {
         let mut seen = HashSet::new();
         for item in models {
             let model = model_id(&item);
-            if model.is_empty() || !seen.insert(model.to_ascii_lowercase()) { continue; }
-            if providers::images::model_is_image(&item) { continue; }
+            if model.is_empty() || item.get("enabled") == Some(&Value::Bool(false))
+                || !seen.insert(model.to_ascii_lowercase()) { continue; }
             // New choices use the same account and Key-group eligibility as forwarding.
             // Saved group members are projected separately so unavailable entries remain editable.
             let account_count = provider_accounts.iter()
@@ -86,7 +92,9 @@ pub fn choices(store: &AccountStore) -> Vec<Value> {
             if account_count == 0 { continue; }
             let identity = super::routing_metadata::describe(&model);
             result.push(json!({ "provider": provider, "providerLabel": providers::label_of(&provider), "model": model,
+                "kind": if providers::images::model_is_image(&item) { "image" } else { "chat" },
                 "name": item.get("name").and_then(Value::as_str).unwrap_or(&model), "capabilities": capability::effective(&item),
+                "credits": item.get("credits").and_then(Value::as_str),
                 "canonicalModel": identity.canonical_model, "developer": identity.developer,
                 "developerName": identity.developer_name, "family": identity.family,
                 "accountCount": account_count }));
@@ -155,7 +163,7 @@ fn members_from_catalog(group: &RoutingGroup, catalog: &BTreeMap<String, Vec<Val
     for (provider, models) in catalog {
         for item in models {
             let model = model_id(item);
-            if model.is_empty() || providers::images::model_is_image(item) || named.contains(&(provider.to_lowercase(), model.to_lowercase())) { continue; }
+            if model.is_empty() || providers::images::model_is_image(item) != group.kind.is_image() || named.contains(&(provider.to_lowercase(), model.to_lowercase())) { continue; }
             if !patterns.iter().any(|pattern| pattern.is_match(&format!("{provider}/{model}"))) { continue; }
             named.insert((provider.to_lowercase(), model.to_lowercase()));
             result.push(RoutingMember {id:dynamic_member_id(provider, &model), provider:provider.clone(), model,
@@ -212,7 +220,11 @@ fn resolve_members(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>
                     "sticky":group.sticky,"sink":group.sink}));
                 if !member.group.is_empty() {
                     if let Some(child) = self.groups.get(&member.group) {
-                        self.walk(child, &group_path, &member_path, &policy_path, first_token, patience);
+                        if child.kind == group.kind {
+                            self.walk(child, &group_path, &member_path, &policy_path, first_token, patience);
+                        } else {
+                            self.blocked.push(json!({"id":member.id,"memberId":member_path[0],"memberPath":member_path,"state":"unavailable","reason":"嵌套路由组的模型类型不匹配"}));
+                        }
                     } else {
                         self.blocked.push(json!({"id":member.id,"memberId":member_path[0],"memberPath":member_path,"state":"unavailable","reason":"嵌套路由组不存在"}));
                     }
@@ -235,6 +247,8 @@ fn project_catalog(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>
         return result;
     }
     let by_id: HashMap<_, _> = accounts.iter().filter_map(|account| routing::account_id(account).map(|id| (id, account))).collect();
+    let sorting = super::account_order::sorting(accounts, crate::server::logging::now_ms());
+    let ordered_accounts = super::account_order::ordered_accounts(accounts, &sorting);
     for resolved in resolve_members(group, groups, manifests, &mut result.blocked) {
         let member = &resolved.member;
         let outer = &resolved.path[0];
@@ -242,8 +256,9 @@ fn project_catalog(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>
         let reason = if !key_scope::allows_provider(scope, &member.provider) { Some("网关 Key 不允许此提供商".to_string()) }
             else if !active.contains(&member.provider) { Some("提供商当前不可用".to_string()) }
             else if let Some(item) = &item {
-                if providers::images::model_is_image(item) { Some("生图模型不能用于对话路由".to_string()) }
-                else { needs.reason(item) }
+                if item.get("enabled") == Some(&Value::Bool(false)) { Some("上游模型已停用".to_string()) }
+                else if providers::images::model_is_image(item) != group.kind.is_image() { Some("成员模型与路由组的类型不匹配".to_string()) }
+                else if group.kind.is_image() { None } else { needs.reason(item) }
             } else { Some("模型已不在提供商目录中，配置保留但不参与转发".to_string()) };
         let actual = item.as_ref().map(model_id).unwrap_or_else(|| member.model.clone());
         if let Some(reason) = reason {
@@ -252,7 +267,7 @@ fn project_catalog(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>
             continue;
         }
         let selected: Vec<&str> = if member.account_scope == config::RoutingAccountScope::All {
-            accounts.iter().filter(|account| routing::provider_of(account) == member.provider).filter_map(routing::account_id).collect()
+            ordered_accounts.iter().filter(|account| routing::provider_of(account) == member.provider).filter_map(routing::account_id).collect()
         } else { member.accounts.iter().map(String::as_str).collect() };
         if selected.is_empty() {
             result.blocked.push(json!({ "id": member.id, "memberId": outer, "memberPath": resolved.path, "provider": member.provider, "model": actual,
@@ -294,7 +309,7 @@ pub fn validate_members(group: &RoutingGroup, old: Option<&RoutingGroup>, accoun
         if !member.group.is_empty() { continue; }
         let previous = old.and_then(|group| group.members.iter().find(|item| item.id == member.id && item.provider == member.provider && item.model == member.model));
         match catalog_model(&member.provider, &member.model) {
-            Some(item) if providers::images::model_is_image(&item) => return Err("对话路由组不能加入生图模型".into()),
+            Some(item) if providers::images::model_is_image(&item) != group.kind.is_image() => return Err("成员模型与路由组的类型不匹配".into()),
             None if previous.is_none() => return Err(format!("提供商中找不到模型 {}，请刷新后重试", member.model)),
             _ => {},
         }
@@ -316,7 +331,7 @@ pub fn available_member_model(member: &RoutingMember, accounts: &[std::sync::Arc
             && member_account_unavailable(account, &member.model).is_none()) {
         return None;
     }
-    catalog_model(&member.provider, &member.model).filter(|item| !providers::images::model_is_image(item))
+    catalog_model(&member.provider, &member.model).filter(|item| item.get("enabled") != Some(&Value::Bool(false)))
 }
 
 pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut Vec<Value>) {
@@ -337,17 +352,27 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
         }).collect();
         if members.is_empty() { continue; }
         if group.unlists {
-            hide.extend(projection.accounts.iter().filter_map(candidate_model).map(|model| model.to_ascii_lowercase()));
+            // Raw source IDs are not public entries. Hiding by their spelling
+            // would hide this group (or an unrelated group) with the same ID.
             for member in &group.members {
                 if let Some(child) = profiles.groups.get(&member.group) { hide.insert(child.model.to_ascii_lowercase()); }
             }
         }
         if data.iter().any(|item| model_id(item).eq_ignore_ascii_case(&group.model)) { continue; }
-        let mut item = json!({ "id": group.model, "name": group.name, "object": "model", "owned_by": "routing-group", "kind": "chat", "routing_group": true });
+        let mut item = json!({ "id": group.model, "name": group.name, "object": "model", "owned_by": "routing-group", "kind": group.kind, "routing_group": true });
+        if group.kind.is_image() {
+            for (operation, field) in [(providers::images::ImageOperation::Generate, "supports_image_generation"),
+                (providers::images::ImageOperation::Edit, "supports_image_editing")] {
+                item[field] = projection.accounts.iter().any(|account| providers::images::candidate_supports_operation(account, operation)).into();
+            }
+            if item["supports_image_generation"] != true && item["supports_image_editing"] != true { continue; }
+            item["output_modalities"] = json!(["image"]);
+        }
         for (key, public) in [("supportsToolCall", "supports_tool_call"), ("supportsImages", "supports_images"),
             ("supportsVideo", "supports_video"), ("supportsReasoning", "supports_reasoning")] {
             item[public] = members.iter().all(|item| item.get(key).and_then(Value::as_bool) == Some(true)).into();
         }
+        if group.kind.is_image() { item["supports_images"] = item["supports_image_editing"].clone(); }
         for (key, public) in [("maxInputTokens", "max_input_tokens"), ("maxOutputTokens", "max_output_tokens")] {
             if members.iter().all(|item| item.get(key).and_then(Value::as_u64).is_some()) {
                 item[public] = members.iter().filter_map(|item| item.get(key).and_then(Value::as_u64)).min().map(Value::from).unwrap_or(Value::Null);
@@ -375,6 +400,19 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
 #[cfg(test)]
 mod key_group_tests {
     use super::*;
+
+    #[test]
+    fn unknown_capabilities_preserve_forwarding_but_explicit_denials_skip_members() {
+        let needs = RequestNeeds { tools: true, images: true, video: true };
+        assert_eq!(needs.reason(&json!({"id":"custom-unknown"})), None);
+        for field in ["supportsToolCall", "supportsImages", "supportsVideo"] {
+            let mut model = json!({"id":"explicit-denial"});
+            model[field] = false.into();
+            assert!(needs.reason(&model).is_some());
+            model[field] = true.into();
+            assert_eq!(needs.reason(&model), None);
+        }
+    }
 
     #[test]
     fn group_candidates_require_credentials_and_the_selected_upstream_model() {
@@ -412,6 +450,47 @@ mod key_group_tests {
     }
 
     #[test]
+    fn group_only_image_projection_keeps_exact_upstream_and_account_scope() {
+        let (mut accounts, mut catalog, active) = fixture();
+        catalog.insert("relay".into(), vec![json!({"id":"Wire-Image","kind":"image"}),json!({"id":"chat"})]);
+        accounts[1]["keyGroup"]["models"] = json!(["Wire-Image"]);
+        let mut raw = serde_json::to_value(group("Public-Image", json!([
+            {"id":"leaf","provider":"relay","model":"wire-image","included":true,"accounts":["b"]}
+        ]))).unwrap();
+        raw["kind"] = "image".into();
+        let g: RoutingGroup = serde_json::from_value(raw).unwrap();
+        let result = project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active);
+        assert_eq!(result.accounts.len(), 1);
+        assert_eq!(result.accounts[0]["id"], "b");
+        assert_eq!(result.accounts[0]["routingModel"], "Wire-Image");
+        accounts[1]["keyGroup"]["enabled"] = false.into();
+        assert!(project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active).accounts.is_empty());
+        let mut dynamic = g.clone(); dynamic.members.clear(); dynamic.match_patterns = vec!["relay/*".into()];
+        let expanded = members_from_catalog(&dynamic, &catalog);
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].model, "Wire-Image");
+    }
+
+    #[test]
+    fn disabled_sources_block_chat_and_image_members_without_removing_saved_members() {
+        for kind in ["chat", "image"] {
+            let (accounts, mut catalog, active) = fixture();
+            catalog.insert("relay".into(), vec![json!({"id":"chat","kind":kind,"enabled":false})]);
+            let mut raw = serde_json::to_value(group("public", json!([
+                {"id":"leaf","provider":"relay","model":"chat","included":true,"accounts":["a"]}
+            ]))).unwrap();
+            raw["kind"] = kind.into();
+            let g: RoutingGroup = serde_json::from_value(raw).unwrap();
+            let result = project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active);
+            assert!(result.accounts.is_empty(), "disabled {kind} source must not enter forwarding");
+            assert_eq!(result.blocked[0]["reason"], "上游模型已停用");
+            assert_eq!(g.members.len(), 1, "source availability must preserve saved membership");
+            catalog.get_mut("relay").unwrap()[0]["enabled"] = true.into();
+            assert_eq!(project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active).accounts.len(), 1);
+        }
+    }
+
+    #[test]
     fn explicit_empty_accounts_stay_empty_while_all_scope_respects_credentials() {
         let (accounts, catalog, active) = fixture();
         let mut g = group("outer", json!([{"id":"leaf","provider":"relay","model":"chat","included":true,"accounts":[]}]));
@@ -421,6 +500,17 @@ mod key_group_tests {
         let result = project(&g);
         assert_eq!(result.accounts.len(), 1);
         assert_eq!(result.accounts[0]["id"], "a");
+    }
+
+    #[test]
+    fn all_account_members_use_effective_priority_instead_of_insertion_order() {
+        let (mut accounts, catalog, active) = fixture();
+        accounts[0]["priority"] = 2.into();
+        accounts[1]["priority"] = 1.into();
+        accounts[1]["keyGroup"]["models"] = json!(["chat"]);
+        let g = group("ordered", json!([{"id":"leaf","provider":"relay","model":"chat","included":true,"accountScope":"all"}]));
+        let result = project_catalog(&g, &BTreeMap::new(), &accounts, &RequestNeeds::default(), None, &catalog, &active);
+        assert_eq!(result.accounts.iter().map(|account| account["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["b", "a"]);
     }
 
     #[test]

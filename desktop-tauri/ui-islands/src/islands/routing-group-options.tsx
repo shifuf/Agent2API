@@ -4,7 +4,7 @@ import { t } from '../i18n'
 import { routingEfforts, routingSelectableMembers, routingStrategies } from './routing-group-tools'
 import { strategyLabel, stickyLabel } from './routing-ui'
 import { RoutingRulesEditor } from './routing-rules-editor'
-import type { RouteGroup, RouteMember, RouteModelChoice } from './routing-types'
+import type { RouteGroup, RouteKind, RouteMember, RouteModelChoice } from './routing-types'
 
 export function RoutingOption({ label, children, full = false }: { label: string; children: React.ReactNode; full?: boolean }) {
   return <label className={`routing-magpie-field${full ? ' routing-magpie-full' : ''}`}><span>{label}</span>{children}</label>
@@ -25,6 +25,7 @@ export function RoutingGroupOptions({ group, choices, groups, expandedMembers, d
   const selectableMembers = routingSelectableMembers(group, expandedMembers)
   const labelMember = (member: RouteMember) => member.group ? groups.find(item => item.id === member.group)?.name || member.group : `${member.provider} / ${member.model}`
   return <fieldset disabled={disabled} className='min-w-0' data-routing-group-options>
+    <p className='routing-config-note'>{t('请求接口')} · {group.kind === 'image' ? t('图像') : t('对话')}</p>
     <div className='routing-magpie-fields'>
       <RoutingOption label={t('路由策略')}><select aria-label={t('路由策略')} value={group.strategy} onChange={event => change({ strategy: event.currentTarget.value })}>
         {routingStrategies.map(strategy => <option key={strategy} value={strategy}>{strategyLabel(strategy)}</option>)}
@@ -46,31 +47,31 @@ export function RoutingGroupOptions({ group, choices, groups, expandedMembers, d
       <RoutingOption label={t('匹配表达式（每行一条）')}><Textarea rows={3} value={(group.match || []).join('\n')} placeholder='provider/model-*' onChange={event => change({ match: event.currentTarget.value.split('\n') })} /></RoutingOption>
       <p>{t('使用 * 通配符或 re:正则表达式匹配提供商/模型；新增匹配模型自动参与，仍受账号与 Key 限制。')}</p>
     </details>
-    <details className='routing-magpie-details'><summary>{t('推理与模型信息')}</summary><div className='routing-magpie-fields'>
+    {group.kind !== 'image' ? <details className='routing-magpie-details'><summary>{t('推理与模型信息')}</summary><div className='routing-magpie-fields'>
       <RoutingOption label={t('默认推理等级')}><RoutingEffortSelect automatic value={group.effort} label={t('默认推理等级')} onChange={effort => change({ effort })} /></RoutingOption>
       <RoutingOption label={t('上下文窗口')}><Input type='number' min={-1} max={100000000} value={group.context || 0} onChange={event => change({ context: Number(event.currentTarget.value) })} /></RoutingOption>
       <RoutingOption label={t('模型系列')}><Input value={group.family || ''} maxLength={256} onChange={event => change({ family: event.currentTarget.value })} /></RoutingOption>
       <RoutingOption label={t('说明')}><Input value={group.description || ''} onChange={event => change({ description: event.currentTarget.value })} /></RoutingOption>
       <div className='routing-magpie-field routing-magpie-full'><span>{t('允许的推理等级')}</span><RoutingLevels value={group.levels} onChange={levels => change({ levels })} /></div>
-    </div></details>
-    <details className='routing-magpie-details'><summary>{t('条件规则与意图分类')}</summary><div className='routing-magpie-fields'>
+    </div></details> : null}
+    {group.kind !== 'image' ? <details className='routing-magpie-details'><summary>{t('条件规则与意图分类')}</summary><div className='routing-magpie-fields'>
       <RoutingOption label={t('意图分类模型')} full><select aria-label={t('意图分类模型')} value={group.classifier || ''} onChange={event => change({ classifier: event.currentTarget.value })}>
-        <option value=''>{t('不使用分类器')}</option>{choices.filter(choice => choice.accountCount > 0).map(choice => <option key={`${choice.provider}/${choice.model}`} value={`${choice.provider}/${choice.model}`}>{choice.providerLabel} / {choice.name || choice.model}</option>)}
-        {groups.filter(item => item.id !== group.id).map(item => <option key={item.id} value={item.id}>{t('路由组')} / {item.name}</option>)}</select></RoutingOption>
+        <option value=''>{t('不使用分类器')}</option>{choices.filter(choice => choice.accountCount > 0 && (choice.kind || 'chat') === 'chat').map(choice => <option key={`${choice.provider}/${choice.model}`} value={`${choice.provider}/${choice.model}`}>{choice.providerLabel} / {choice.name || choice.model}</option>)}
+        {groups.filter(item => item.id !== group.id && (item.kind || 'chat') === 'chat').map(item => <option key={item.id} value={item.id}>{t('路由组')} / {item.name}</option>)}</select></RoutingOption>
       <RoutingOption label={t('分类超时（秒）')}><Input type='number' min={1} max={60} value={group.classifierTimeout || 8} onChange={event => change({ classifierTimeout: Number(event.currentTarget.value) })} /></RoutingOption>
     </div><p>{t('分类失败或超时后按正常策略选路；预演不会调用分类器。')}</p>
       <RoutingRulesEditor group={group} members={selectableMembers} onChange={rules => change({ rules })} />
-    </details>
+    </details> : null}
   </fieldset>
 }
 
-export function RoutingMemberOptions({ member, onChange, disabled }: { member: RouteMember; onChange(patch: Partial<RouteMember>): void; disabled: boolean }) {
+export function RoutingMemberOptions({ member, onChange, disabled, kind = 'chat' }: { member: RouteMember; onChange(patch: Partial<RouteMember>): void; disabled: boolean; kind?: RouteKind }) {
   return <fieldset disabled={disabled} className='routing-magpie-member-settings'><div className='routing-magpie-fields'>
     <RoutingOption label={t('成员权重')}><Input type='number' min={1} max={1000} value={member.weight ?? 1} onChange={event => onChange({ weight: Number(event.currentTarget.value) })} /></RoutingOption>
     {!member.group ? <><RoutingOption label={t('账号范围')}><select aria-label={t('账号范围')} value={member.accountScope || 'selected'} onChange={event => onChange({ accountScope: event.currentTarget.value as 'selected' | 'all' })}>
       <option value='selected'>{t('仅选定账号')}</option><option value='all'>{t('全部可用账号（含新增）')}</option></select></RoutingOption>
-      <RoutingOption label={t('成员推理等级')}><RoutingEffortSelect value={member.effort} label={t('成员推理等级')} onChange={effort => onChange({ effort })} /></RoutingOption>
+      {kind === 'chat' ? <><RoutingOption label={t('成员推理等级')}><RoutingEffortSelect value={member.effort} label={t('成员推理等级')} onChange={effort => onChange({ effort })} /></RoutingOption>
       <label className='routing-magpie-inline'><Checkbox checked={Boolean(member.fast)} onCheckedChange={value => onChange({ fast: value === true })} />{t('快速模式')}</label>
-      <div className='routing-magpie-field routing-magpie-full'><span>{t('成员推理等级范围')}</span><RoutingLevels value={member.levels} onChange={levels => onChange({ levels })} /></div></> : <p>{t('嵌套路由组保留自己的策略与推理设置。')}</p>}
+      <div className='routing-magpie-field routing-magpie-full'><span>{t('成员推理等级范围')}</span><RoutingLevels value={member.levels} onChange={levels => onChange({ levels })} /></div></> : null}</> : <p>{t('嵌套路由组保留自己的策略与推理设置。')}</p>}
   </div></fieldset>
 }

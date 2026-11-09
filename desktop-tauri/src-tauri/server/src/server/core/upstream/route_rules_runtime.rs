@@ -114,8 +114,7 @@ fn cache_key(ctx: &ProviderContext<'_>, group: &RoutingGroup) -> String {
         .filter(|provider| key_scope::allows_provider(ctx.key_scope, provider)).collect();
     permitted.sort_unstable(); permitted.dedup();
     hash.update(serde_json::to_vec(&permitted).unwrap_or_default());
-    let mut models: Vec<_> = ctx.routing.profiles.groups.values().map(|group| group.model.clone())
-        .chain(crate::server::core::managed_models::list().into_iter().map(|model| model.id)).collect();
+    let mut models: Vec<_> = ctx.routing.profiles.groups.values().map(|group| group.model.clone()).collect();
     models.sort(); models.dedup();
     for model in models { hash.update(model.as_bytes()); hash.update([key_scope::allows_model(ctx.key_scope, &model) as u8]); }
     // Empty histories have no stable turn: cache only an identical request.
@@ -153,6 +152,7 @@ fn classifier_route(ctx: &ProviderContext<'_>, group: &RoutingGroup) -> Result<R
     route.classifier_stack.push(group.id.clone());
     route.rule_trace.clear(); route.excluded.clear();
     if let Some(target) = config::routing_groups::referenced_group(&group.classifier, &route.profiles.groups).cloned() {
+        if target.kind.is_image() { return Err("classifier-requires-chat".into()); }
         if route.classifier_stack.contains(&target.id) { return Err("classifier-cycle".into()); }
         if !key_scope::allows_model(ctx.key_scope, &target.model) { return Err("classifier-model-scope".into()); }
         route.group_projection = routing_groups::project_with_groups(&target, &route.profiles.groups, &route.account_snapshot,
@@ -164,10 +164,17 @@ fn classifier_route(ctx: &ProviderContext<'_>, group: &RoutingGroup) -> Result<R
         if !key_scope::allows_provider(ctx.key_scope, provider) { return Err("classifier-provider-scope".into()); }
         let own_member = ctx.routing.group_projection.accounts.iter().any(|account| routing::provider_of(account) == provider
             && routing_groups::candidate_model(account).is_some_and(|known| known.eq_ignore_ascii_case(model)));
-        let public = crate::server::core::managed_models::list().into_iter().find(|item| item.enabled && item.archived != Some(true)
-            && key_scope::allows_model(ctx.key_scope, &item.id) && item.bindings.iter().any(|binding| binding.provider == provider && binding.model.eq_ignore_ascii_case(model)));
+        let public = route.profiles.groups.values().filter(|target| !target.kind.is_image() && target.enabled && !target.hidden
+            && key_scope::allows_model(ctx.key_scope, &target.model)).find_map(|target| {
+                let selected: Vec<_> = routing_groups::project_with_groups(target, &route.profiles.groups, &route.account_snapshot,
+                    &Default::default(), ctx.key_scope).accounts.into_iter().filter(|account| routing::provider_of(account) == provider
+                        && routing_groups::candidate_model(account).is_some_and(|known| known.eq_ignore_ascii_case(model)))
+                    .filter_map(|account| routing::account_id(&account).map(str::to_string)).collect();
+                (!selected.is_empty()).then(|| (target.model.clone(), selected))
+            });
+        if !own_member && public.is_none() { return Err("classifier-model-scope".into()); }
         let outer = ctx.routing.group.as_ref().map(|group| group.model.as_str()).unwrap_or(&group.model);
-        let public_model = classifier_public_model(ctx.key_scope, outer, model, own_member, public.as_ref().map(|item| item.id.as_str()))
+        let public_model = classifier_public_model(ctx.key_scope, outer, model, own_member, public.as_ref().map(|(id, _)| id.as_str()))
             .ok_or_else(|| "classifier-model-scope".to_string())?;
         let mut target = group.clone();
         target.id = format!("classifier-{}", group.id);
@@ -177,7 +184,7 @@ fn classifier_route(ctx: &ProviderContext<'_>, group: &RoutingGroup) -> Result<R
         target.enabled = true; target.hidden = false; target.pick.clear();
         let selected: Vec<_> = if own_member { ctx.routing.group_projection.accounts.iter().filter(|account| routing::provider_of(account) == provider
             && routing_groups::candidate_model(account).is_some_and(|known| known.eq_ignore_ascii_case(model))).filter_map(routing::account_id).map(str::to_string).collect() }
-            else { route.account_snapshot.iter().filter(|account| routing::provider_of(account) == provider).filter_map(routing::account_id).map(str::to_string).collect() };
+            else { public.map(|(_, selected)| selected).unwrap_or_default() };
         target.members = vec![serde_json::from_value(json!({"id":"source","provider":provider,"model":model,"included":true,"accounts":selected}))
             .map_err(|_| "classifier-invalid-member".to_string())?];
         route.group_projection = routing_groups::project_with_groups(&target, &route.profiles.groups, &route.account_snapshot,

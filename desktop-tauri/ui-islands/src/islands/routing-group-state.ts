@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { confirmDialog } from '@ui'
 import { t } from '../i18n'
+import { routeGroupFieldsError } from './routing-group-form'
 import { bridge, errorMessage, host, notify, type RouteGroup, type RouteGroups, type RoutingGroupsAction, type RoutingGroupsBridge } from './routing-types'
 
 type GroupDraft = { group: RouteGroup; baseline: RouteGroup | null; revision: string }
@@ -72,6 +73,8 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void, api?:
   const save = async () => {
     const draft = refs.current.drafts[refs.current.selected]
     if (!draft || refs.current.busy || refs.current.loading || !groupDirty(draft)) return
+    const validation = routeGroupFieldsError(draft.group, Object.values(refs.current.drafts).map(item => item.group), draft.group.id)
+    if (validation) { setError(validation); return }
     if (!draft.group.match?.some(pattern => pattern.trim()) && !draft.group.members.some(member => member.included && (member.group || member.accountScope === 'all' || member.accounts.length))
       && !await confirmDialog(t('此入口没有参与路由的账号。保存后请求将明确失败，不会回退全局或自动恢复参与名单。'), {
         title: t('保存空路由'), confirmText: t('仍然保存'), destructive: true,
@@ -79,7 +82,7 @@ export function useRouteGroups(onSaved: () => void, onRemoved: () => void, api?:
     refs.current.busy = true; setBusy(true); setError('')
     try {
       const cleanList = (values?: string[]) => values ? [...new Set(values.map(value => value.trim()).filter(Boolean))] : undefined
-      const group = { ...draft.group, match: cleanList(draft.group.match), rules: draft.group.rules?.map(rule => ({ ...rule,
+      const group = { ...draft.group, name: draft.group.name.trim(), model: draft.group.model.trim(), match: cleanList(draft.group.match), rules: draft.group.rules?.map(rule => ({ ...rule,
         agents: cleanList(rule.agents), folders: cleanList(rule.folders), exceptFolders: cleanList(rule.exceptFolders), intent: rule.intent?.trim() })) }
       apply(await (api || bridge()).saveRoutingGroup({ id: group.id, group, revision: draft.revision }), group.id)
       notify(t('路由配置已保存，仅影响后续选路')); void host().wbApp?.refresh?.(); onSaved()

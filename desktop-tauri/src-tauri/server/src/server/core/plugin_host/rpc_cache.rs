@@ -145,6 +145,12 @@ pub fn models_for(provider: &str) -> Option<Vec<Value>> {
     snapshot(provider).map(|list| list.models)
 }
 
+/// Migration also needs the last known model kind when a plugin is disabled or
+/// has not registered its adapter yet. This does not publish an offline catalog.
+pub(crate) fn migration_models(provider: &str) -> Option<Vec<Value>> {
+    snapshot(provider).or_else(|| restore(provider)).map(|list| list.models)
+}
+
 pub fn meta(provider: &str) -> proto::CatalogMeta {
     let Ok(map) = table().lock() else { return proto::CatalogMeta::default() };
     map.get(provider).and_then(|entry| entry.remote.as_ref())

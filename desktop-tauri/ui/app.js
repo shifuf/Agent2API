@@ -139,7 +139,7 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'plugins', 'settings'];
+const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'gateway', 'routing', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'tasks', 'requests', 'plugins', 'settings'];
 /** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它）
  *
@@ -506,7 +506,7 @@ function showPage(name, { persist = true } = {}) {
   // 老版本的「签到中心」菜单键是 `plugin:<pack>:checkin`（那时页面在插件包里）。
   // 升级后那条申报被内置页接管、不再注册，于是 localStorage 里存的这个键会
   // 认不出来 —— 用户停在签到页升级完，重启会掉到「报表」。这里把它接上。
-  let target = name;
+  let target = name === 'models' ? 'gateway' : name;
   if (typeof target === 'string' && target.startsWith(PLUGIN_PAGE_PREFIX) && target.endsWith(':checkin')) {
     target = 'checkin';
   }
@@ -574,11 +574,11 @@ function showPage(name, { persist = true } = {}) {
   // 账号页被加过 / 改过 / 删过（提供商记录与它的模型清单），而这一页的数据是
   // 自持的、不随主状态轮询更新。两件事（自定义目录 + 内置清单）都在面板里，
   // 这里只转发 —— 它自己保证「切页这次刷新一定落地」。
-  if (page === 'routing') {
-    void window.wbRoutingPanel?.load?.();
-  }
   if (page === 'gateway') {
     void window.wbModelsPanel?.refreshAll?.();
+  }
+  if (page === 'routing') {
+    void window.wbRoutingPanel?.load?.();
   }
   // Agent 页自持客户端清单与配置，切进去时拉一次最新（配置文件可能被
   // 客户端自己改过、也可能刚在别的窗口里被别的工具改过）
@@ -1043,21 +1043,11 @@ function renderProxyStatus() {
 function render() {
   renderAccountsView();
   renderGateway();
-  renderModels();
   renderProxyStatus();
   renderTopbarStatus();
 }
 
-/**
- * 模型管理区块由 models-panel.js 负责（表格渲染 / 筛选 / 启停 / 映射 / 刷新清单）。
- * 它自持从 /api/models/manage 拉来的数据；这里的调用只在轮询到新状态时提醒它
- * 「清单可能变了」，由它决定是否重拉。用可选链委托 —— 万一它还没执行完也只是
- * 本轮不画，不抛错把 render() 拖崩。
- */
-function renderModels() {
-  window.wbModelsPanel?.render();
-  if (currentPage === 'gateway') void window.wbModelsPanel?.load();
-}
+
 
 /** 账号列表由 accounts-view 模块负责（含优先级/禁用/代理徽章与行内面板） */
 function renderAccountsView() {

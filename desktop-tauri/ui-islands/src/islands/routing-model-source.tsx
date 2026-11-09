@@ -1,10 +1,17 @@
 import * as React from 'react'
 import { Badge, Label, Select, SelectContent, SelectItem, SelectTrigger } from '@ui'
 import { ModelBrand } from '../../../ui-shared/model-brand'
+import { modelRate } from '../../../ui-shared/model-rate'
 import { t } from '../i18n'
 import type { RouteModelChoice } from './routing-types'
 
 export type RoutingSource = { id: string; label: string; models: number; selected?: number }
+
+export function RoutingModelRate({ credits }: { credits?: string | null }) {
+  const rate = modelRate(credits)
+  return rate ? <span className='routing-model-rate' data-free={rate.free ? '' : undefined}
+    title={`${t('倍率')} · ${rate.label}`} aria-label={`${t('倍率')} ${rate.label}`}>{rate.label}</span> : null
+}
 
 export function RoutingSourceSelect({ sources, value, onChange, disabled = false, allCount }: {
   sources: RoutingSource[]; value: string; onChange(value: string): void; disabled?: boolean; allCount?: number

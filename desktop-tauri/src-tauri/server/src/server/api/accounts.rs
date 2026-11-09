@@ -302,6 +302,13 @@ fn decode_segment(value: &str) -> String {
 pub async fn accounts_entry(State(state): State<ServerState>, request: axum::extract::Request) -> Response {
     let method = request.method().clone();
     let full_path = request.uri().path().to_string();
+    if method == Method::GET {
+        if let Some(id) = full_path.strip_prefix("/api/accounts/").and_then(|tail| tail.strip_suffix("/credentials")) {
+            if !id.is_empty() && !id.contains('/') {
+                return super::account_credentials::details(&state, request.headers(), &decode_segment(id));
+            }
+        }
+    }
     // 原始查询串（未解码的原文，由用到它的分支自行 `query_param` 解码）。
     // 目前只有 `GET /api/accounts/usage?id=<id>` 用它 —— 那一支是「用户手点某一行
     // 的余额按钮」，与批量的区别见 `core::usage_query::query_all` 的说明。

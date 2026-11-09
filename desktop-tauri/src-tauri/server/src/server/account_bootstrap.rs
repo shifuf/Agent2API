@@ -217,6 +217,11 @@ pub(crate) fn run(store: &AccountStore) {
     // 都是 AutoClaw 客户端的私有文件布局 + safeStorage 解密链，属于「上游知识」。
     // 存量用户由插件的 `account.normalize`（桌面端导入）或
     // `POST /api/accounts` 的 `authFileContent`（手工导入一次）补齐。
+    match crate::server::core::group_migration::run(store) {
+        Ok(count) if count > 0 => logging::log("[Routing]", &format!("已将 {count} 个旧模型和独立路由迁入路由组，原配置备份已保留")),
+        Ok(_) => {},
+        Err(error) => logging::log("[Routing]", &format!("路由组迁移失败，未覆盖原配置：{error}")),
+    }
 }
 
 /// 旧版单账号 `auth.json` → 一个 workbuddy 账号（仅当账号列表为空时导入一次）。

@@ -30,8 +30,8 @@ export function MorePage() {
       title: t('转发链路'),
       entries: [
         { id: 'checkin', label: t('签到中心'), icon: 'checkin' },
-        { id: 'models', label: t('模型管理'), icon: 'model' },
         { id: 'routing', label: t('路由'), icon: 'grid' },
+        { id: 'models', label: t('模型管理'), icon: 'grid' },
         { id: 'agent', label: t('Agent 配置'), icon: 'agent' },
         { id: 'tools', label: t('工具服务'), icon: 'tools' },
         { id: 'proxies', label: t('网络代理'), icon: 'proxy' },

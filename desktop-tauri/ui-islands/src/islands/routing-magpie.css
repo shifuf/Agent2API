@@ -128,6 +128,9 @@
 .routing-choice-meta:empty { display: none; }
 .routing-choice-meta > span { padding: 1px 5px; border: 1px solid var(--ui-border, var(--border)); border-radius: 4px; font-size: 9.5px; line-height: 1.4; color: var(--ui-text-2, var(--text-3)); }
 .routing-choice-accounts { flex: none; margin-left: auto; font-size: 10.5px; color: var(--ui-text-2, var(--text-3)); }
+.routing-choice-stats { display: flex; flex: none; flex-direction: column; align-items: flex-end; gap: 5px; margin-left: auto; }
+.routing-model-rate { display: inline-flex; flex: none; align-items: center; width: fit-content; padding: 2px 7px; border: 1px solid var(--ui-border, var(--border)); border-radius: 6px; background: var(--ui-surface-2, var(--surface-2)); color: var(--ui-text, var(--text)); font-family: var(--font-mono, monospace); font-size: 11px; font-variant-numeric: tabular-nums; line-height: 1.5; white-space: nowrap; }
+.routing-model-rate[data-free] { color: var(--ui-success, #168655); background: color-mix(in srgb, var(--ui-success, #168655) 8%, transparent); border-color: color-mix(in srgb, var(--ui-success, #168655) 22%, transparent); }
 .routing-model-sources { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 10px; margin-top: 6px; }
 .routing-model-sources > span { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--ui-text-2, var(--text-3)); }
 .routing-model-sources .model-brand { width: 16px; height: 16px; border-radius: 4px; font-size: 8px; }
@@ -176,3 +179,5 @@
   .routing-workbench-bar .routing-page-actions > button { min-height: 34px; }
   .routing-overview-tabs { margin-right: auto; }
 }
+
+.routing-magpie-mobile-editor > .routing-group-form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }

@@ -200,6 +200,8 @@ export type AccountRecord = {
    * 有无「清除」按钮）。**值本身绝不透出**，后端只给这个布尔。
    */
   hasApiKey?: boolean
+  /** Custom-channel Key-group scope exposed for routing member selection. */
+  keyGroup?: { id?: string; enabled?: boolean; models?: string[] }
   /** 自定义账号：是否声明了「该上游无需鉴权」（与 `hasApiKey` 互斥，见后端 `state::no_auth`） */
   noAuth?: boolean
   /**

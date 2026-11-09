@@ -12,23 +12,16 @@ export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd
   onModel(model: string): void; onGroup(id: string): void; onAdd(): void
 }) {
   const [search, setSearch] = React.useState('')
-  const configured = editor.draft?.workspace.configuredModels || workspace?.configuredModels || []
-  const modelKeys = new Map(configured.map(model => [model.toLowerCase(), model]))
-  for (const model of Object.keys(editor.drafts).filter(model => model && draftDirty(editor.drafts[model]))) modelKeys.set(model.toLowerCase(), model)
-  if (editor.scope && !modelKeys.has(editor.scope.toLowerCase())) modelKeys.set(editor.scope.toLowerCase(), editor.scope)
-  const models = [...modelKeys.values()]
-    .filter(model => !Object.values(groups.drafts).some(draft => draft.group.model.toLowerCase() === model.toLowerCase()))
   const disabled = editor.busy || groups.busy || groups.loading
   const addDisabled = disabled || editor.loading || !(editor.draft || workspace) || !groups.data
   const query = search.trim().toLowerCase()
-  const shownModels = models.filter(model => model.toLowerCase().includes(query))
   const shownGroups = Object.values(groups.drafts).filter(({ group }) => routingGroupMatches(group, query, groups.data?.catalog || [], Object.values(groups.drafts).map(draft => draft.group)))
   const showGlobal = !query || t('全局默认').toLowerCase().includes(query)
   const dirtyDot = (dirty: boolean) => dirty ? <span className='routing-rail-dirty' title={t('有未保存的修改')} aria-label={t('有未保存的修改')}><StatusDot variant='warning' /></span> : undefined
   return <Sidebar className='routing-config-rail'>
-    <SidebarHeader className='routing-config-rail-head'><b>{t('路由配置')}</b><span>{1 + models.length + Object.keys(groups.drafts).length}</span>
+    <SidebarHeader className='routing-config-rail-head'><b>{t('路由配置')}</b><span>{1 + Object.keys(groups.drafts).length}</span>
       <Button variant='ghost' size='icon-sm' disabled={addDisabled} onClick={onAdd}
-        title={t('新增路由配置')} aria-label={t('新增路由配置')}><RouteIcon name='plus' size={14} /></Button>
+        title={t('新建路由组')} aria-label={t('新建路由组')}><RouteIcon name='plus' size={14} /></Button>
     </SidebarHeader>
     <div className='routing-rail-search'><Input value={search} onChange={event => setSearch(event.currentTarget.value)}
       placeholder={t('搜索路由配置')} aria-label={t('搜索路由配置')} /></div>
@@ -38,21 +31,16 @@ export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd
           trailing={dirtyDot(Boolean(editor.drafts[''] && draftDirty(editor.drafts[''])))} onClick={() => onModel('')}>
           <b>{t('全局默认')}</b><small>{t('账号启停与默认规则')}</small>
         </NavItem></> : null}
-      {shownModels.length ? <SidebarGroupLabel>{t('模型路由')}</SidebarGroupLabel> : null}
-      {shownModels.map(model => <NavItem key={model} className='routing-config-scope-item' active={!groups.selected && model.toLowerCase() === editor.scope.toLowerCase()}
-        disabled={disabled} trailing={dirtyDot(Boolean(editor.drafts[model.toLowerCase()] && draftDirty(editor.drafts[model.toLowerCase()])))} onClick={() => onModel(model)} title={model}>
-        <b>{model}</b><small>{editor.drafts[model.toLowerCase()]?.mode === 'inherit' ? t('继承全局') : t('独立配置')}</small>
-      </NavItem>)}
       {shownGroups.length ? <SidebarGroupLabel>{t('自定义路由组')}</SidebarGroupLabel> : null}
       {shownGroups.map(draft => <NavItem key={draft.group.id} disabled={disabled} className='routing-config-scope-item'
         active={draft.group.id === groups.selected} trailing={dirtyDot(groupDirty(draft))} onClick={() => onGroup(draft.group.id)} title={draft.group.model}>
         <b>{draft.group.name}</b><small>{draft.group.model}</small>
       </NavItem>)}
-      {!showGlobal && !shownModels.length && !shownGroups.length ? <Empty>{t('没有匹配的路由配置')}</Empty> : null}
+      {!showGlobal && !shownGroups.length ? <Empty>{t('没有匹配的路由配置')}</Empty> : null}
       {groups.error ? <p className='routing-config-error' role='alert'>{groups.error}<Button variant='link' disabled={groups.loading} onClick={() => void groups.load()}>{t('重新读取')}</Button></p> : null}
     </NavList>
     <SidebarFooter className='routing-config-rail-foot'>
-      <Button variant='dashed' disabled={addDisabled} onClick={onAdd}><RouteIcon name='plus' size={14} />{t('新增路由配置')}</Button>
+      <Button variant='dashed' disabled={addDisabled} onClick={onAdd}><RouteIcon name='plus' size={14} />{t('新建路由组')}</Button>
     </SidebarFooter>
   </Sidebar>
 }

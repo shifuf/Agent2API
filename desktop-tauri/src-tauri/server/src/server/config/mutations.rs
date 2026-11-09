@@ -2,6 +2,29 @@ use serde_json::Value;
 
 use super::{current, save_raw, synced_fingerprint, CONFIG, CONFIG_UPDATE_LOCK};
 
+/// Commit a configuration migration as one snapshot. Neither the in-memory
+/// configuration nor the backup/marker becomes visible if persistence fails.
+pub(crate) fn try_update_raw<T>(
+    mutate: impl FnOnce(&mut serde_json::Map<String, Value>) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = CONFIG_UPDATE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = current();
+    let mut raw = previous.raw.clone();
+    let result = mutate(&mut raw)?;
+    if raw == previous.raw { return Ok(result); }
+    let next = super::build(raw);
+    if !save_raw(&next.raw) { return Err("配置迁移未能写入数据库，原配置已保留".into()); }
+    let changed = synced_fingerprint(&previous.raw) != synced_fingerprint(&next.raw);
+    let catalog_changed = crate::server::core::providers::catalog::config_changed(&previous, &next);
+    let mut config = CONFIG.write().unwrap_or_else(|error| error.into_inner());
+    if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
+    *config = Some(next);
+    drop(config);
+    if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
+    if changed { crate::server::core::cloud_sync::auto_sync::notify_change(); }
+    Ok(result)
+}
+
 pub(crate) fn try_update_raw_field<T, E>(
     key: &str,
     mutate: impl FnOnce(&mut Value) -> Result<T, E>,

@@ -30,4 +30,4 @@ const initialPage = (() => {
     return 'overview'
   }
 })()
-window.dispatchEvent(new CustomEvent('wb:page', { detail: initialPage }))
+window.dispatchEvent(new CustomEvent('wb:page', { detail: initialPage === 'models' ? 'gateway' : initialPage }))

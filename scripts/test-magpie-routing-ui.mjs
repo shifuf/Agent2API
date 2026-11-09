@@ -88,11 +88,6 @@ try {
   await api('/api/custom-providers/models', { providerId: unavailable.provider.id, models: [{ id: 'unavailable-model' }], mappings: [] });
   await api('/api/custom-providers', { name: 'No fetched models', protocol: 'chat_completions', baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
     keyGroups: [{ id: 'empty', apiKeys: ['no-models'], models: [] }] });
-  const catalog = await api('/api/models/catalog');
-  const catalogWithAlias = await api('/api/models/catalog', { revision: catalog.revision, previousId: '', model: { id: 'custom-public-alias', name: 'Custom alias', enabled: true,
-    bindings: [{ provider: sources[0], model: 'gpt-4.1' }] } });
-  await api('/api/models/catalog', { revision: catalogWithAlias.revision, previousId: '', model: { id: 'gpt-4.1', enabled: true,
-    bindings: [{ provider: sources[1], model: 'gpt-4.1' }] } });
   for (const [id, name] of [['primary-route', 'Primary route'], ['child-route', 'Child route']]) {
     const state = await api('/api/routing/groups');
     const workspace = await api('/api/routing/workspace');
@@ -115,7 +110,7 @@ try {
   });
   await step('new group offers only connected providers and keeps selections across provider changes', async () => {
     await desktop.getByRole('button', { name: '新建路由组', exact: true }).click();
-    const dialog = desktop.getByRole('dialog', { name: '新增路由配置', exact: true });
+    const dialog = desktop.getByRole('dialog', { name: '新建路由组', exact: true });
     const source = dialog.getByRole('combobox', { name: '选择提供商', exact: true });
     await source.click();
     assert.deepEqual(await desktop.getByRole('option').evaluateAll(items => items.map(item => item.getAttribute('aria-label'))), ['North source', 'South source']);
@@ -146,7 +141,7 @@ try {
     assert.equal((await refresh).status(), 200);
     await desktop.locator('[data-routing-group="primary-route"]').waitFor();
     await desktop.getByRole('button', { name: '新建路由组', exact: true }).click();
-    const dialog = desktop.getByRole('dialog', { name: '新增路由配置', exact: true });
+    const dialog = desktop.getByRole('dialog', { name: '新建路由组', exact: true });
     await dialog.getByRole('combobox', { name: '选择提供商', exact: true }).click();
     assert.deepEqual(await desktop.getByRole('option').evaluateAll(items => items.map(item => item.getAttribute('aria-label'))), ['South source']);
     await desktop.getByRole('option', { name: 'South source', exact: true }).click();
@@ -155,30 +150,6 @@ try {
     const restored = desktop.waitForResponse(response => response.url().endsWith('/api/routing/groups') && response.request().method() === 'GET');
     await desktop.getByRole('button', { name: '重新读取', exact: true }).click();
     assert.equal((await restored).status(), 200);
-  });
-  await step('independent route creation keeps available custom public aliases under their bound providers', async () => {
-    await desktop.getByRole('button', { name: '新增路由配置', exact: true }).click();
-    const dialog = desktop.getByRole('dialog', { name: '新增路由配置', exact: true });
-    const alias = dialog.getByRole('radio', { name: /^custom-public-alias(?: |$)/ });
-    const source = dialog.getByRole('combobox', { name: '选择提供商', exact: true });
-    await source.click();
-    await desktop.getByRole('option', { name: 'North source', exact: true }).click();
-    await alias.waitFor();
-    assert.equal(await dialog.getByRole('radio', { name: /^gpt-4\.1(?: |$)/ }).count(), 0, 'A public model only belongs to providers bound to it');
-    await source.click();
-    await desktop.getByRole('option', { name: 'South source', exact: true }).click();
-    assert.equal(await alias.count(), 0);
-    await dialog.getByRole('radio', { name: /^gpt-4\.1(?: |$)/ }).waitFor();
-    await source.click();
-    await desktop.getByRole('option', { name: 'North source', exact: true }).click();
-    await alias.check();
-    assert.equal(await dialog.getByRole('radio', { name: 'unavailable-model', exact: true }).count(), 0);
-    await screenshot(desktop, 'routing-create-independent');
-    const saved = desktop.waitForResponse(response => response.url().includes('/api/routing/profile') && response.request().method() === 'PUT');
-    await dialog.getByRole('button', { name: '创建独立配置', exact: true }).click();
-    assert.equal((await saved).status(), 200);
-    assert((await api('/api/routing/workspace')).configuredModels.includes('custom-public-alias'));
-    await desktop.getByRole('button', { name: '路由组概览', exact: true }).click();
   });
   await step('discovery toggle uses the collection revision and keeps saved groups', async () => {
     const response = desktop.waitForResponse(response => response.url().endsWith('/api/routing/groups/actions') && response.request().method() === 'POST');
@@ -271,7 +242,7 @@ try {
     await desktop.getByRole('button', { name: '均衡分担', exact: true }).click();
     assert.equal(await desktop.getByRole('switch', { name: '路由组启用', exact: true }).getAttribute('aria-checked'), 'false');
     assert.equal((await api('/api/routing/groups')).groups.length, 2);
-    await desktop.getByRole('button', { name: '全局与模型规则', exact: true }).click();
+    await desktop.getByRole('button', { name: '全局网关设置', exact: true }).click();
     await desktop.getByText('全局默认', { exact: true }).first().waitFor();
     await desktop.getByRole('radio', { name: '请求回放', exact: true }).click();
     await desktop.getByText('历史只读，不影响当前配置', { exact: true }).waitFor();
@@ -283,13 +254,11 @@ try {
     assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await screenshot(mobile, 'mobile-routing-dashboard');
     await mobile.getByRole('button', { name: '新建路由组', exact: true }).click();
-    await mobile.getByRole('button', { name: '添加成员', exact: true }).click();
-    const createDialog = mobile.getByRole('dialog', { name: '添加参与模型', exact: true });
+    const createDialog = mobile.getByRole('dialog', { name: '新建路由组', exact: true });
     await createDialog.getByRole('combobox', { name: '选择提供商', exact: true }).waitFor();
     assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await screenshot(mobile, 'mobile-routing-create');
     await createDialog.getByRole('button', { name: '取消', exact: true }).click();
-    await mobile.getByRole('button', { name: '撤销修改', exact: true }).click();
     await mobile.locator('[data-routing-group="primary-route"]').getByRole('button', { name: '编辑路由组', exact: true }).click();
     await openDetails(mobile, '规则预演输入');
     await mobile.getByRole('spinbutton', { name: '预演输入 Token 数', exact: true }).fill('20000');

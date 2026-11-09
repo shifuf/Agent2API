@@ -72,7 +72,7 @@ async function ok(endpoint, body, key, method) {
 async function models(key) { return (await ok('/v1/models', undefined, key)).data.map(item => item.id).sort() }
 async function choices() {
   const [catalog, keys] = await Promise.all([ok('/api/models/catalog'), ok('/api/keys')])
-  return { sources: catalog.sources, keys }
+  return { sources: catalog.choices, keys }
 }
 function sourceModels(selection, provider) {
   return selection.sources.find(source => source.id === provider)?.models.map(model => model.id).sort() || []
@@ -145,16 +145,20 @@ try {
   const discovered = await ok('/api/custom-providers/fetch-models', { protocol: 'chat_completions', baseUrl: upstreamUrl, apiKey: 'key-a-one' })
   assert.ok(JSON.stringify(discovered).includes('wire-a'))
   assert.deepEqual(await models(), [])
-  let catalog = await ok('/api/models/catalog')
+  let catalog = await ok('/api/routing/groups')
   async function save(model, previousId = '') {
-    catalog = await ok('/api/models/catalog', { previousId, model, revision: catalog.revision })
+    const id = previousId || model.id
+    const group = model ? { id, model: model.id, name: model.name || model.id, enabled: model.enabled,
+      strategy: 'order', sticky: 'off', members: model.bindings.map((binding, index) => ({ ...binding, id: `member-${index}`, included: true, accountScope: 'all', accounts: [] })) } : null
+    catalog = await ok('/api/routing/groups', { id, group, revision: catalog.groups.find(row => row.group.id === id)?.revision ?? catalog.newRevision }, adminKey, 'PUT')
   }
   const shared = { id: 'shared-public', name: 'Shared', enabled: true, bindings: [{ provider: aid, model: 'wire-a' }, { provider: bid, model: 'wire-z' }] }
-  const staleRevision = catalog.revision
   await save(shared)
+  const staleRevision = catalog.groups.find(row => row.group.id === shared.id).revision
+  await save({ ...shared, name: 'Changed' }, shared.id)
   // A public name may equal another upstream ID; associations must resolve once.
   await save({ id: 'wire-a', name: 'One-hop collision', enabled: true, bindings: [{ provider: aid, model: 'wire-b' }] })
-  assert.equal((await request('/api/models/catalog', { model: shared, revision: staleRevision })).status, 400)
+  assert.equal((await request('/api/routing/groups', { id: shared.id, group: catalog.groups.find(row => row.group.id === shared.id).group, revision: staleRevision }, adminKey, 'PUT')).status, 409)
   assert.deepEqual(await models(), ['shared-public', 'wire-a'])
   async function makeKey(name, allowedProviders, allowedModels) {
     return (await ok('/api/keys', { name, key: `integration-${name}-key`, allowedProviders, allowedModels })).created
@@ -207,7 +211,7 @@ try {
     assert.deepEqual(await models(aKey.key), [])
     await denied('shared-public', aKey.key)
     await save({ ...shared, name: 'Retained unavailable binding' }, shared.id)
-    assert.deepEqual(catalog.models.find(model => model.id === shared.id).bindings, shared.bindings, 'Editing an unavailable binding must preserve it')
+    assert.deepEqual(catalog.groups.find(row => row.group.id === shared.id).group.members.map(({ provider, model }) => ({ provider, model })), shared.bindings, 'Editing an unavailable binding must preserve it')
     await ok(`/api/accounts/${sourceAccount}`, restored, adminKey, 'PATCH')
     await save(shared, shared.id)
   }

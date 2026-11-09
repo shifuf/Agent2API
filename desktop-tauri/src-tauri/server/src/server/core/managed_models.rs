@@ -212,7 +212,7 @@ fn text_list(value: &Value, count: usize, length: usize) -> bool {
     })
 }
 
-fn parse(value: &Value) -> Result<Vec<ManagedModel>, String> {
+pub(crate) fn parse(value: &Value) -> Result<Vec<ManagedModel>, String> {
     if value.is_null() {
         return Ok(Vec::new());
     }
@@ -346,24 +346,16 @@ pub fn public_models(store: &AccountStore, scope: Option<&KeyScope>) -> Vec<Valu
 pub fn models_by_provider(store: &AccountStore) -> Value {
     let snapshot = store.routing_snapshot();
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
-    for model in list().into_iter().filter(ManagedModel::published) {
-        for binding in &model.bindings {
-            if snapshot.available_providers.contains(&binding.provider)
-                && available(binding, &snapshot.accounts, None)
-                && source(&binding.provider, &binding.model).is_some()
-            {
-                result
-                    .entry(binding.provider.clone())
-                    .or_default()
-                    .push(model.id.clone());
-            }
-        }
-    }
     let accounts: Vec<_> = snapshot.accounts.iter().map(|account| account.as_ref().clone()).collect();
     let profiles = super::routing_discovery::effective_profiles(&config::routing_profiles(), &accounts);
     for group in profiles.groups.values().filter(|group| group.enabled && !group.hidden) {
         let projection = super::routing_groups::project_with_groups(group, &profiles.groups, &accounts, &Default::default(), None);
         for candidate in &projection.accounts {
+            if group.kind.is_image()
+                && !super::providers::images::candidate_supports_operation(candidate, super::providers::images::ImageOperation::Generate)
+                && !super::providers::images::candidate_supports_operation(candidate, super::providers::images::ImageOperation::Edit) {
+                continue;
+            }
             result
                 .entry(super::routing::provider_of(candidate).to_string())
                 .or_default()

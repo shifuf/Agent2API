@@ -373,6 +373,11 @@ pub async fn start(store: AccountStore) -> Option<Arc<Host>> {
     }
     if first.is_some() {
         crate::server::core::providers::adapter::restore_cached_catalogs();
+        match crate::server::core::group_migration::run(&store) {
+            Ok(count) if count > 0 => logging::log("[Routing]", &format!("插件模型清单加载后已迁移 {count} 个旧模型/路由组")),
+            Ok(_) => {},
+            Err(error) => logging::log("[Routing]", &format!("插件清单加载后路由组迁移仍未完成：{error}")),
+        }
         if crate::server::core::checkin_schedules::extend_plugin_providers_once() {
             logging::log("[Checkin]", "新安装插件的每日签到提供商已补入已有签到范围");
         }

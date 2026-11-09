@@ -4,19 +4,19 @@ import { t } from '../i18n'
 import { displayNameOf, providerOf } from './accounts-domain'
 import type { AccountRecord } from './accounts-shared'
 import { RouteIcon } from './routing-ui'
-import type { RouteGroup, RouteMember, RouteModelChoice } from './routing-types'
-import { createRouteMembers, newRouteId, routeGroupFieldsError, routeModelKey, RoutingGroupForm, ROUTING_MEMBER_LIMIT, type RoutingGroupFields } from './routing-group-form'
+import type { RouteGroup, RouteKind, RouteMember, RouteModelChoice } from './routing-types'
+import { accountCanRouteModel, createRouteMembers, newRouteId, routeGroupFieldsError, routeModelKey, RoutingGroupForm, ROUTING_MEMBER_LIMIT, type RoutingGroupFields } from './routing-group-form'
 import { RoutingModelPicker } from './routing-model-picker'
 
 export function RoutingGroupDialog({ group, reserved, onSave, onClose }: {
-  group: RouteGroup; reserved: string[]; onSave(group: RouteGroup): void; onClose(): void
+  group: RouteGroup; reserved: RouteGroup[]; onSave(group: RouteGroup): void; onClose(): void
 }) {
   const [fields, setFields] = React.useState<RoutingGroupFields>({ name: group.name, model: group.model, description: group.description })
   const [error, setError] = React.useState('')
   const save = () => {
-    const message = routeGroupFieldsError(fields, reserved, group.model)
+    const message = routeGroupFieldsError(fields, reserved, group.id)
     if (message) { setError(message); return }
-    onSave({ ...group, name: fields.name.trim(), model: fields.model.trim().toLowerCase(), description: fields.description.trim() })
+    onSave({ ...group, name: fields.name.trim(), model: fields.model.trim(), description: fields.description.trim() })
     onClose()
   }
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className='w-[min(600px,calc(100vw-40px))]'>
@@ -29,13 +29,13 @@ export function RoutingGroupDialog({ group, reserved, onSave, onClose }: {
   </DialogContent></Dialog>
 }
 
-export function RoutingMemberDialog({ choices, members, accounts, onAdd, onClose, groups = [], currentId = '' }: {
-  choices: RouteModelChoice[]; members: RouteMember[]; accounts: AccountRecord[]; onAdd(members: RouteMember[]): void; onClose(): void; groups?: RouteGroup[]; currentId?: string
+export function RoutingMemberDialog({ choices, members, accounts, onAdd, onClose, groups = [], currentId = '', routeKind = 'chat' }: {
+  choices: RouteModelChoice[]; members: RouteMember[]; accounts: AccountRecord[]; onAdd(members: RouteMember[]): void; onClose(): void; groups?: RouteGroup[]; currentId?: string; routeKind?: RouteKind
 }) {
   const [selected, setSelected] = React.useState<string[]>([])
   const [kind, setKind] = React.useState<'models' | 'groups'>('models')
   const [selectedGroups, setSelectedGroups] = React.useState<string[]>([])
-  const options = choices.filter(choice => choice.accountCount > 0 && !members.some(member => member.provider === choice.provider && member.model.toLowerCase() === choice.model.toLowerCase()))
+  const options = choices.filter(choice => (choice.kind || 'chat') === routeKind && choice.accountCount > 0 && !members.some(member => member.provider === choice.provider && member.model.toLowerCase() === choice.model.toLowerCase()))
   const byKey = new Map(options.map(choice => [routeModelKey(choice), choice]))
   const picked = selected.flatMap(key => { const choice = byKey.get(key); return choice ? [choice] : [] })
   const containsCurrent = (id: string, seen = new Set<string>()): boolean => {
@@ -44,7 +44,7 @@ export function RoutingMemberDialog({ choices, members, accounts, onAdd, onClose
     seen.add(id)
     return groups.find(group => group.id === id)?.members.some(member => member.group && containsCurrent(member.group, seen)) || false
   }
-  const nested = groups.filter(group => !containsCurrent(group.id) && !members.some(member => member.group === group.id))
+  const nested = groups.filter(group => (group.kind || 'chat') === routeKind && !containsCurrent(group.id) && !members.some(member => member.group === group.id))
   const count = kind === 'models' ? picked.length : selectedGroups.length
   const limit = Math.max(0, ROUTING_MEMBER_LIMIT - members.length)
   const add = () => {
@@ -59,7 +59,7 @@ export function RoutingMemberDialog({ choices, members, accounts, onAdd, onClose
       {kind === 'models' ? <RoutingModelPicker choices={options} selected={selected} onChange={setSelected} limit={limit} /> : <div className='routing-magpie-rules'>{nested.map(group => <label key={group.id} className='routing-group-picker-row'>
         <Checkbox checked={selectedGroups.includes(group.id)} disabled={!selectedGroups.includes(group.id) && count >= limit} onCheckedChange={on => setSelectedGroups(current => on ? [...current, group.id] : current.filter(id => id !== group.id))} />
         <div><b>{group.name}</b><small>{group.model}</small></div></label>)}{!nested.length ? <Empty>{t('没有可嵌套的路由组')}</Empty> : null}</div>}
-      <p className='routing-config-note'>{t('仅列出真实目录中的对话模型，不自动更改模型映射。')}</p>
+      <p className='routing-config-note'>{t('仅列出与当前路由接口一致的上游模型和路由组。')}</p>
     </DialogBody><DialogFooter><Button variant='outline' onClick={onClose}>{t('取消')}</Button><Button disabled={!count || count > limit} onClick={add}>{t('添加')} · {count}</Button></DialogFooter>
   </DialogContent></Dialog>
 }
@@ -68,7 +68,9 @@ export function RoutingMemberAccounts({ member, accounts, onSave, onClose }: {
   member: RouteMember; accounts: AccountRecord[]; onSave(ids: string[]): void; onClose(): void
 }) {
   const [selected, setSelected] = React.useState(member.accounts)
-  const available = accounts.filter(account => providerOf(account) === member.provider)
+  const eligible = accounts.filter(account => providerOf(account) === member.provider && accountCanRouteModel(account, member.model))
+  const selectedRecords = accounts.filter(account => providerOf(account) === member.provider && selected.includes(account.id))
+  const available = [...new Map([...eligible, ...selectedRecords].map(account => [account.id, account])).values()]
   const order = [...new Set([...selected, ...available.map(account => account.id)])]
   const move = (id: string, direction: number) => setSelected(current => {
     const next = [...current], index = next.indexOf(id), to = index + direction

@@ -22,9 +22,10 @@ export function RoutingPreviewPanel({ model, group, profile, globalScope = false
   const [revision, setRevision] = React.useState(0)
   const [facts, setFacts] = React.useState<RouteRequestFacts>({})
   const [classification, setClassification] = React.useState<RouteClassification | undefined>()
-  const effectiveNeeds = group ? needs : 'text'
+  const chat = group && group.kind !== 'image'
+  const effectiveNeeds = chat ? needs : 'text'
   const input = JSON.stringify({ model, group, profile, global: globalScope, needs: { tools: effectiveNeeds === 'tools', images: effectiveNeeds === 'images', video: effectiveNeeds === 'video' }, failFirst,
-    ...(group ? { facts: { ...facts, images: facts.images || effectiveNeeds === 'images' }, classification } : {}) })
+    ...(chat ? { facts: { ...facts, images: facts.images || effectiveNeeds === 'images' }, classification } : {}) })
   const [resolvedInput, setResolvedInput] = React.useState('')
   React.useEffect(() => {
     let alive = true
@@ -51,7 +52,7 @@ export function RoutingPreviewPanel({ model, group, profile, globalScope = false
     </div>
     <RoutingLivePanel compact workspace={current} model={model} loading={pending} error={failure} dirty={false} globalScope={globalScope}
       modelsAvailable={Boolean(model)} onOpenScope={onOpenScope} onRefresh={refresh} preview />
-    {group ? <>
+    {chat ? <>
       <RoutingPreviewFacts facts={facts} classification={classification} imagesRequired={effectiveNeeds === 'images'} onFacts={setFacts} onClassification={setClassification} />
       <RoutingPreviewRuleTrace rules={current?.rules} group={group} expandedMembers={current?.expandedMembers} loading={pending} />
     </> : null}
@@ -61,7 +62,7 @@ export function RoutingPreviewPanel({ model, group, profile, globalScope = false
       <DialogHeader><DialogTitle>{t('选路预演')} · {model || t('默认模型')}</DialogTitle></DialogHeader>
       <DialogBody>
         <div className='routing-preview-options'>
-          {group ? <div className='routing-rule-field'><Label>{t('请求需要')}</Label>
+          {chat ? <div className='routing-rule-field'><Label>{t('请求需要')}</Label>
             <RoutingSelect value={needs} label={t('请求需要')} options={[
               ['text', t('文本对话')], ['tools', t('工具调用')], ['images', t('图片输入')], ['video', t('视频输入')],
             ]} onChange={setNeeds} /></div> : null}

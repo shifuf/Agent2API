@@ -19,8 +19,8 @@ export type RoutingConfigProps = {
   onScope(model: string): void; onAccount(id: string): void; onSort(provider: string): void; onProtection(workspace: RoutingWorkspace): void
 }
 
-/** 账号启停即时保存；独立路由的参与名单、策略与顺序保留草稿。 */
-export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope, onAccount, onSort, onProtection }: RoutingConfigProps) {
+/** 全局账号启停即时保存；全局策略与顺序保留草稿。 */
+export function RoutingConfigPanel({ editor, scope, now, accountControl, onAccount, onSort, onProtection }: RoutingConfigProps) {
   const { setOpened, sectionOpen, setSectionOpen, search, setSearch, query, isOpen } = useRoutingExpansion()
   const [legacyDialog, setLegacyDialog] = React.useState<RoutingWorkspace['legacyGlobalParticipation']>(null)
   const draft = editor.draft
@@ -110,12 +110,6 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
     })) return
     await editor.save()
   }
-  const removeIndependent = async () => {
-    if (!await confirmDialog(t('删除后这个模型会重新跟随全局配置，已保存的独立设置和当前未保存修改都会被移除。'), {
-      title: t('删除独立配置'), confirmText: t('删除'), destructive: true,
-    })) return
-    if (await editor.remove()) onScope('')
-  }
   const renderProvider = (id: string) => <RoutingProviderCard key={id} id={id} profile={profile} workspace={workspace} scope={scope} now={now}
     index={participating.indexOf(id)} first={orderingPeers(id)[0] === id} last={orderingPeers(id).at(-1) === id}
     included={included(id)} open={isOpen(id)} locked={locked} busy={editor.busy} query={query} drag={drag}
@@ -173,13 +167,11 @@ export function RoutingConfigPanel({ editor, scope, now, accountControl, onScope
           <header className='routing-config-head'><div><span className='routing-config-eyebrow'>{inherited ? t('继承全局') : scope ? t('独立配置') : t('默认规则')}</span><h2>{scope || t('全局默认')}</h2></div>
             <RoutingActions label={t('路由配置操作')} actions={[
               { label: t('全局保护设置'), icon: 'shield', disabled: editor.busy, onClick: () => onProtection(workspace) },
-              ...(scope && workspace.customized ? [{ label: t('删除独立配置'), destructive: true, disabled, onClick: () => void removeIndependent() }] : []),
             ]} />
           </header>
           {globalAccounts && !workspace.globalAccountControl ? <div className='routing-inherited-note' role='alert'>{t('当前网关尚不支持全局账号启停，请更新网关后重新读取。')}</div> : null}
           {globalAccounts && legacy ? <div className='routing-inherited-note'><p>{t('检测到旧版全局参与设置，请先确认转换，再管理账号启停。')}</p>
             <Button variant='outline' disabled={disabled} onClick={() => setLegacyDialog(legacy)}>{t('转换旧版设置')}</Button></div> : null}
-          {inherited ? <div className='routing-inherited-note'><p>{t('没有独立配置的模型沿用全局路由。')}</p><Button variant='outline' disabled={disabled} onClick={() => void editor.create(scope)}>{t('创建独立配置')}</Button></div> : null}
           <div className='routing-config-rules'>
             <div className='routing-rule-field'><Label>{t('路由策略')}</Label><RoutingSelect label={t('路由策略')} value={profile.strategy || '__inherit'} disabled={locked}
               options={[...(scope ? [['__inherit', t('继承全局：{value}', { value: strategyLabel(workspace.globalSettings?.routingStrategy) })] as [string, string]] : []),

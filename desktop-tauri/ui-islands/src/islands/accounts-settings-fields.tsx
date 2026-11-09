@@ -111,7 +111,7 @@ export function CustomCredentialFields({ hasApiKey, noAuth, value, onValue, onTo
           </InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
-      <FieldDescription>{t('原密钥不会回显；更换密钥不会改变账号 ID。')}</FieldDescription>
+      <FieldDescription>{t('可在「已保存的密钥」中查看原密钥；更换密钥不会改变账号 ID。')}</FieldDescription>
     </Field>
     <div className={`acct-dlg-inline-note${noAuth || !hasApiKey && !pendingKey ? ' warning' : ''}`}>
       <AccountSettingsIcon name={noAuth || !hasApiKey ? 'info' : 'shield'} size={14} />

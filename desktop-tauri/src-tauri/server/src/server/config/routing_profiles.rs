@@ -118,7 +118,7 @@ pub(crate) fn from_raw(raw: &Map<String, Value>) -> Arc<RoutingProfiles> {
 
 fn string_list(value: Option<&Value>) -> Vec<String> {
     let mut result = Vec::new();
-    for value in value.and_then(Value::as_array).into_iter().flatten().take(MAX_ROUTING_MODELS) {
+    for value in value.and_then(Value::as_array).into_iter().flatten().take(super::routing_groups::MAX_GROUPS) {
         if let Some(id) = value.as_str().filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)) {
             if !result.iter().any(|known| known == id) { result.push(id.to_string()); }
         }

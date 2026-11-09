@@ -50,7 +50,7 @@ export function RoutingPage() {
     | { kind: 'sticky' }
     | { kind: 'account' | 'sort'; id: string }
     | { kind: 'protection'; workspace: RoutingWorkspace }
-    | { kind: 'create'; group?: boolean }
+    | { kind: 'create' }
     | null
   >(null)
   const workspace = editor.draft?.workspace || replay.workspace
@@ -120,7 +120,7 @@ export function RoutingPage() {
     const group = Object.values(groups.drafts).find(draft => draft.group.model.toLowerCase() === model.toLowerCase())
     groups.select(group?.group.id || '')
     setGroupOverview(false)
-    if (!group) void editor.load(model)
+    if (!group) void editor.load('')
   }
   const openConfig = (model: string) => { setMode('config'); openScope(model) }
   const refreshReplay = async () => {
@@ -148,9 +148,7 @@ export function RoutingPage() {
     return () => { requestTrace = undefined; refreshWorkspace = undefined }
   }, [replay.refresh, groups.load])
 
-  const groupModels = Object.values(groups.drafts).map(draft => draft.group.model)
-  const reserved = [...(creationWorkspace?.models || []), ...(creationWorkspace?.configuredModels || []), ...Object.keys(editor.drafts),
-    ...(groups.data?.catalog || []).map(choice => choice.model), ...groupModels]
+  const reserved = Object.values(groups.drafts).map(draft => draft.group)
   const rail = <RoutingRail editor={pageEditor} groups={groups} workspace={workspace} onModel={openScope} onGroup={id => { if (!busyRef.current) { groups.select(id); setGroupOverview(false) } }}
     onAdd={() => setModal({ kind: 'create' })} />
   const accountSettings = (id: string) => {
@@ -174,14 +172,13 @@ export function RoutingPage() {
         : t('历史只读，不影响当前配置')}</span>
       <div className='routing-page-actions'>
         {mode === 'config' ? <div className='routing-overview-tabs'><Button variant='ghost' size='sm' data-active={groupOverview ? '' : undefined} aria-pressed={groupOverview} onClick={() => { setGroupOverview(true); void groups.load() }}>{t('路由组概览')}</Button>
-          <Button variant='ghost' size='sm' data-active={!groupOverview ? '' : undefined} aria-pressed={!groupOverview} onClick={() => openScope('')}>{t('全局与模型规则')}</Button></div> : null}
+          <Button variant='ghost' size='sm' data-active={!groupOverview ? '' : undefined} aria-pressed={!groupOverview} onClick={() => openScope('')}>{t('全局网关设置')}</Button></div> : null}
         {mode === 'replay' ? <Button variant='ghost' size='sm' onClick={() => host().wbApp?.showPage('requests')}><RouteIcon name='requests' />{t('请求日志')}</Button> : null}
         <Button variant='ghost' size='sm' onClick={() => setModal({ kind: 'sticky' })}><RouteIcon name='lock' />{t('会话粘滞')}</Button>
         {mode === 'replay'
           ? <Button variant='ghost' size='sm' disabled={replay.loading} onClick={() => void refreshReplay()}><RouteIcon name='refresh' />{t('刷新')}</Button>
           : <Button variant='ghost' size='sm' disabled={editor.loading || pageEditor.busy || groups.loading || groups.busy} onClick={() => void reloadConfig()}><RouteIcon name='refresh' />{t('重新读取')}</Button>}
-        {mode === 'config' && groupOverview ? <Button size='sm' disabled={!workspace || !groups.data || pageEditor.busy || editor.loading || groups.busy || groups.loading}
-          onClick={() => setModal({ kind: 'create' })}><RouteIcon name='plus' size={14} />{t('新增路由配置')}</Button> : null}
+
       </div>
     </div>
 
@@ -195,7 +192,7 @@ export function RoutingPage() {
       </div> : null}
       {sortingError ? <div className='routing-page-error' role='alert'><RouteIcon name='info' /><span>{sortingError}</span>
         <Button variant='ghost' size='sm' disabled={sortingSyncBusy} onClick={() => void reloadSorting()}>{t('重试')}</Button></div> : null}
-      {groupOverview ? <RoutingGroupsDashboard editor={groups} onOpen={id => { groups.select(id); setGroupOverview(false) }} onCreate={() => setModal({ kind: 'create', group: true })} /> : <div className='routing-config-shell'>
+      {groupOverview ? <RoutingGroupsDashboard editor={groups} onOpen={id => { groups.select(id); setGroupOverview(false) }} onCreate={() => setModal({ kind: 'create' })} /> : <div className='routing-config-shell'>
         {rail}
         {groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
           reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
@@ -216,18 +213,16 @@ export function RoutingPage() {
       </section>
     </div>}
 
-    {modal?.kind === 'create' && creationWorkspace && groups.data ? <RoutingCreateDialog workspace={creationWorkspace} choices={groups.data.catalog}
-      initialType={modal.group ? 'group' : 'model'}
-      accounts={creationWorkspace.accounts} reserved={reserved} groupModels={groupModels}
-      disabled={pageEditor.busy || editor.loading || groups.busy || groups.loading} modelError={editor.error} onClose={() => setModal(null)}
-      onCreateModel={async model => { const created = await editor.create(model); if (created) { groups.select(''); setGroupOverview(false) } return created }}
+    {modal?.kind === 'create' && creationWorkspace && groups.data ? <RoutingCreateDialog choices={groups.data.catalog}
+      accounts={creationWorkspace.accounts} reserved={reserved}
+      disabled={pageEditor.busy || editor.loading || groups.busy || groups.loading} onClose={() => setModal(null)}
       onCreateGroup={group => { const created = groups.create(group); if (created) setGroupOverview(false); return created }} /> : null}
     {modal?.kind === 'sticky' ? <RoutingStickyDialog model={mode === 'config' ? scopeModel : replay.model} onClose={close} /> : null}
     {modal?.kind === 'protection' ? <RoutingSettingsDialog protectionOnly workspace={modal.workspace} onClose={close} /> : null}
     {modal?.kind === 'sort' ? <GroupSettingsDialog key={modal.id} provider={modal.id} onClose={close}
       accounts={workspace?.accounts} sorting={sorting}
       routeContext={groups.selected || editor.scope && editor.draft?.mode !== 'inherit'
-        ? <p className='routing-config-note'>{t('这里调整的是账号组的全局消耗规则；当前独立路由的账号顺序保持不变。')}</p> : undefined} /> : null}
+        ? <p className='routing-config-note'>{t('这里调整的是账号组的全局消耗规则；当前路由组的账号顺序保持不变。')}</p> : undefined} /> : null}
     {modal?.kind === 'account' ? <AccountSettingsDialog key={modal.id} id={modal.id} initialAccount={replay.workspace?.accounts.find(account => account.id === modal.id) || workspace?.accounts.find(account => account.id === modal.id)} onClose={close}
       routeContext={<p className='routing-config-note'>{t('账号设置与所有路由共用，不改变当前路由的参与名单。')}</p>} /> : null}
   </>

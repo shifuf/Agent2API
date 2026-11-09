@@ -1,18 +1,19 @@
 import { modelReasoning } from '../../../ui-shared/models-reasoning'
-import { ManagedModelsPage } from './ManagedModelsPage'
-import { activeModelBindings } from '../../../ui-shared/models-bindings'
-import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from '@ui'
+import { setCustomSourceEnabled } from '../../../ui-shared/custom-source-state'
+import { InputGroup, InputGroupInput, InputGroupAddon } from '@ui'
 import { useMemo, useRef, useState } from 'react'
-import { PageIntro, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
+import { PageIntro, IconButton, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
 import { providerLabel } from '../lib/providers'
-import { fetchManage, refreshModels, setModelEnabled, removeModelMapping, type ManageModel, type ManageMapping } from '../api/gateway'
+import { fetchManage, refreshModels, setModelEnabled, type ManageModel } from '../api/gateway'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
-import { Input, Card, Button, confirmDialog } from '@ui'
+import { Card, Button } from '@ui'
+import { apiCall } from '../api/client'
+import { ChannelKeyGroupsDialog, type ChannelRequest } from '../../../ui-islands/src/islands/channel-key-groups'
 import { Switch as UiSwitch } from '@ui'
 import { Badge as UiBadge } from '@ui'
 import { Toggle as UiToggle } from '@ui'
@@ -32,19 +33,16 @@ import { Toggle as UiToggle } from '@ui'
 
 type Filter = 'all' | 'enabled' | 'hidden'
 
-export function ModelsPage() {
-  const [sources, setSources] = useState(false)
-  if (!sources) return <ManagedModelsPage onSources={() => setSources(true)} />
-  return <div className='flex min-h-0 flex-1 flex-col'>
-    <div className='m-section'><Button variant='outline' onClick={() => setSources(false)}>{t('返回模型管理')}</Button>
-      <p className='mt-2 text-xs text-subtle'>{t('这里是上游候选目录。请在模型管理中添加对外模型后使用。')}</p></div>
-    <UpstreamModelsPage />
-  </div>
+type CustomSource = {
+  id: string; name?: string
+  models?: Array<{ id: string; enabled?: boolean; capabilities?: unknown }>
 }
+const channelRequest: ChannelRequest = (method, path, body) => apiCall(path, { method, body })
 
-function UpstreamModelsPage() {
+export function ModelsPage() {
+  const [customProviders, setCustomProviders] = useState<CustomSource[]>([])
+  const [editingProvider, setEditingProvider] = useState('')
   const [models, setModels] = useState<ManageModel[] | null>(null)
-  const [mappings, setMappings] = useState<ManageMapping[]>([])
   const [error, setError] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [query, setQuery] = useState('')
@@ -56,10 +54,13 @@ function UpstreamModelsPage() {
   const load = async () => {
     const current = ++revision.current
     try {
-      const view = await fetchManage()
+      const [view, custom] = await Promise.all([fetchManage(), apiCall<{ providers: CustomSource[] }>('/api/custom-providers')])
       if (current !== revision.current) return
-      setModels(view.models || [])
-      setMappings(view.mappings || [])
+      setCustomProviders(custom.providers || [])
+      setModels([...(view.models || []).filter(model => !String(model.provider).startsWith('custom-')),
+        ...(custom.providers || []).flatMap(provider => (provider.models || []).map(model => ({
+          ...model, provider: provider.id, providerLabel: provider.name, source: 'custom',
+        })))])
       setError('')
     } catch (failure) {
       if (current !== revision.current) return
@@ -99,52 +100,20 @@ function UpstreamModelsPage() {
   const enabledCount = (models || []).filter(item => item.enabled).length
   const hiddenCount = (models || []).filter(item => item.visibility === 'hidden').length
 
-  /**
-   * 「未挂载的映射」：指向的上游模型已不在清单里（上游下线 / 承载它的那家当前
-   * 没有行），因此挂不到任何模型行上。与桌面端同一份判据（后端的 `dangling`），
-   * 手机端只做**提示 + 清理** —— 常规的映射编辑仍在桌面端「模型管理」里做。
-   */
-  const danglingMappings = useMemo(
-    () => mappings.filter(item => item.dangling === true)
-      .sort((a, b) => String(a.provider || '').localeCompare(String(b.provider || ''))
-        || String(a.alias || '').localeCompare(String(b.alias || ''))),
-    [mappings],
-  )
-
-  const removeDangling = async (item: ManageMapping) => {
-    if (busy) return
-    const alias = String(item.alias || '')
-    const target = String(item.target || '')
-    if (!await confirmDialog(t('确定删除映射「{alias} → {target}」？它指向的上游模型已不在清单里。', { alias, target }))) return
-    setBusy(`mapping:${alias}:${target}`)
-    try {
-      const view = await removeModelMapping({ alias, target, provider: item.provider })
-      revision.current++
-      setModels(view.models || [])
-      setMappings(view.mappings || [])
-      store.toast(t('映射已删除'))
-    } catch (failure) {
-      store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
-    } finally {
-      setBusy('')
-    }
-  }
-
   const toggle = async (model: ManageModel, next: boolean) => {
     if (!model.id || !model.provider || busy) return
-    const conflicts = next ? activeModelBindings(
-      (models || []).filter(item => item.provider === model.provider),
-      mappings.filter(item => !item.provider || item.provider === model.provider),
-      model.id, model.id,
-    ) : []
     setBusy(`${model.provider}:${model.id}`)
     try {
+      if (model.provider.startsWith('custom-')) {
+        await setCustomSourceEnabled(channelRequest, model.provider, model.id, next)
+        await load()
+      } else {
       const view = await setModelEnabled({ id: model.id, provider: model.provider, enabled: next })
       revision.current++
-      setModels(view.models || [])
-      setMappings(view.mappings || [])
-      store.toast(next ? (conflicts.length ? t('已启用 {name}，其他同名绑定已自动关闭', { name: model.id })
-        : t('已启用 {name}', { name: model.id })) : t('已禁用 {name}', { name: model.id }))
+      setModels(previous => [...(view.models || []).filter(item => !String(item.provider).startsWith('custom-')),
+        ...(previous || []).filter(item => String(item.provider).startsWith('custom-'))])
+      }
+      store.toast(next ? t('已启用 {name}', { name: model.id }) : t('已禁用 {name}', { name: model.id }))
     } catch (failure) {
       store.toast(failure instanceof Error ? failure.message : String(failure), 'err')
     } finally {
@@ -198,6 +167,10 @@ function UpstreamModelsPage() {
       </div>
 
       <div className='m-body'>
+      <div className='m-section'>
+        <p className='mb-2 text-xs text-subtle'>{t('这里只维护上游来源；对外模型 ID 统一在路由组中配置。')}</p>
+        <Button variant='outline' onClick={() => store.push('routing')}>{t('管理路由组')}</Button>
+      </div>
       {error ? <ErrorNote text={error} /> : null}
       {refreshResults.length ? <div className='m-section'><Card className='m-card m-card-pad'>
         <div className='text-xs font-medium'>{t('模型目录刷新结果')}</div>
@@ -208,46 +181,6 @@ function UpstreamModelsPage() {
         </p>)}
       </Card></div> : null}
 
-      {/* 未挂载的映射：目标上游已不在清单里，别名调不通也挂不到行上。桌面端在
-          表格下方单列一块（models-dangling.tsx）；手机端只提示 + 清理。 */}
-      {danglingMappings.length ? (
-        <div className='m-section'>
-          <Card className='m-card m-card-pad'>
-            <div className='text-xs font-medium'>
-              {t('未挂载的模型映射')} · {danglingMappings.length}
-            </div>
-            <p className='mt-2 text-[11.5px] text-subtle' style={{ lineHeight: 1.65 }}>
-              {t('这些映射指向的上游模型已不在当前清单里，用对应别名发请求会失败。可以在这里删除，删掉后该对外名即可重新使用。')}
-            </p>
-            {danglingMappings.map(item => {
-              const key = `${item.provider || ''}:${item.alias || ''}:${item.target || ''}`
-              // 自映射（alias == target）= 模型自己的默认绑定：用户启停过它就会留下
-              // 这一条，模型下线后挂不到行上。显示成 `x → x` 只会让人困惑，只写一次。
-              const isDefault = item.isDefault === true
-                || String(item.alias || '').trim().toLowerCase() === String(item.target || '').trim().toLowerCase()
-              return (
-                <div key={key} style={{
-                  display: 'flex', alignItems: 'center', gap: 10, marginTop: 10,
-                  paddingTop: 10, borderTop: '1px solid var(--m-line)',
-                }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className='m-mono' style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {item.alias}{isDefault ? '' : ` → ${item.target}`}
-                    </div>
-                    <div style={{ fontSize: 10.5, color: 'var(--m-text-3)', marginTop: 3 }}>
-                      {providerLabel(item.provider)}
-                      {isDefault ? ` · ${t('默认绑定')}` : ''}
-                      {item.carried === false ? ` · ${t('目标已下线')}` : ` · ${t('未接入')}`}
-                    </div>
-                  </div>
-                  <Button size='sm' variant='ghost' className='text-destructive'
-                    onClick={() => void removeDangling(item)}>{t('删除')}</Button>
-                </div>
-              )
-            })}
-          </Card>
-        </div>
-      ) : null}
       {!models ? <SkeletonList rows={4} height={70} /> : null}
 
       {models && !groups.length ? (
@@ -258,10 +191,15 @@ function UpstreamModelsPage() {
         </div>
       ) : null}
 
+      {customProviders.filter(provider => !provider.models?.length).map(provider => <div className='m-section' key={provider.id}>
+        <Card className='m-card m-card-pad'><p className='mb-2 text-sm'>{provider.name || provider.id}</p>
+          <Button size='sm' variant='outline' onClick={() => setEditingProvider(provider.id)}>{t('获取模型')}</Button>
+        </Card>
+      </div>)}
       {groups.map(group => {
         const isCollapsed = collapsed.has(group.provider)
         return (
-          <div key={group.provider} className='m-section' style={{ marginTop: 12 }}>
+          <div key={group.provider} data-model-provider={group.provider} className='m-section' style={{ marginTop: 12 }}>
             <Button size='default' variant='ghost'
               type='button'
               onClick={() => {
@@ -332,11 +270,6 @@ function UpstreamModelsPage() {
                           ) : null}
                           {caps.context ? <UiBadge variant='secondary' shape='tag' className='m-pill'>{caps.context}</UiBadge> : null}
                           <UiBadge variant='secondary' shape='tag' className='m-pill'>{sourceLabel(model.source)}</UiBadge>
-                          {model.aliases?.length ? (
-                            <UiBadge variant='secondary' shape='tag' className='m-pill' style={{ color: 'var(--m-primary)' }}>
-                              {t('{n} 个映射', { n: model.aliases.length })}
-                            </UiBadge>
-                          ) : null}
                           {hidden ? (
                             <UiBadge variant='secondary' shape='tag' className='m-pill' style={{ color: 'var(--m-warn)' }}>
                               {t('不展示')}
@@ -357,15 +290,17 @@ function UpstreamModelsPage() {
                             {reasoningInfo.defaultLevel ? ` · ${t('默认档位：{level}', { level: reasoningInfo.defaultLevel })}` : ''}
                           </p>
                         ) : reasoningInfo.bindingSupported === false ? (
-                          <p className='mt-1 text-[10.5px] text-subtle'>{t('当前通道未声明可用档位，映射等级不会注入；请先获取模型目录。')}</p>
+                          <p className='mt-1 text-[10.5px] text-subtle'>{t('上游未声明思考档位')}</p>
                         ) : null}
                       </div>
-                      <SwitchSmall
-                        checked={Boolean(model.enabled)}
-                        disabled={Boolean(busy)}
-                        label={String(model.id)}
-                        onChange={next => void toggle(model, next)}
-                      />
+                      <div className='flex shrink-0 flex-col items-end gap-2'>
+                        <SwitchSmall
+                        checked={model.enabled !== false} disabled={Boolean(busy)}
+                        label={t('启用上游模型 {model}', { model: String(model.id) })}
+                        onChange={next => void toggle(model, next)} />
+                        {group.provider.startsWith('custom-') ? <Button size='sm' variant='outline'
+                          onClick={() => setEditingProvider(group.provider)}>{t('选择模型')}</Button> : null}
+                      </div>
                     </div>
                   )
                 })}
@@ -377,10 +312,12 @@ function UpstreamModelsPage() {
 
       <div className='m-section' style={{ paddingBottom: 8 }}>
         <Card className='m-card m-card-pad' style={{ fontSize: 11.5, color: 'var(--m-text-3)', lineHeight: 1.7 }}>
-          {t('映射、思考等级、上下文窗口与工具调用能力在桌面端「模型管理」里改；手机端只做启停。')}
+          {t('上游模型测试与能力设置可在桌面端「模型管理」中操作。')}
         </Card>
       </div>
       </div>
+      {editingProvider ? <ChannelKeyGroupsDialog providerId={editingProvider} request={channelRequest}
+        onSaved={load} onClose={() => setEditingProvider('')} /> : null}
     </div>
   )
 }

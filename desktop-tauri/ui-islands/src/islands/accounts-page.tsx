@@ -24,6 +24,7 @@ import {
 } from './accounts-panels'
 import { bindQueueDrag, type QueueDrop } from './accounts-queue-drag'
 import { AccountsDialogs } from './accounts-dialogs'
+import { AccountModelFetchButton } from './accounts-model-fetch'
 import { HiddenAccountsNotice } from './accounts-hidden-notice'
 import { activeGroupSortRules, manualOrderBlockedMessage } from './accounts-group-settings'
 import { Badge, Spinner } from '@ui'
@@ -438,6 +439,11 @@ function AccountsPage() {
           </ResponsiveSheet>
 
           <div className='actions'>
+            <AccountModelFetchButton
+              provider={store.filter.provider === 'all' ? undefined : store.filter.provider}
+              name={providerSummaryList().find(item => item.id === store.filter.provider)?.label}
+              disabled={!all.some(account => account.enabled !== false && account.available !== false && account.hasCredentials !== false
+                && (store.filter.provider === 'all' ? !providerOf(account).startsWith('custom-') : providerOf(account) === store.filter.provider))} />
             <Button id='btn-refresh-accounts' variant='outline' disabled={store.listBusy}
               title={t('重新读取账号列表和插件状态，不刷新 Token 或查询余额')}
               onClick={() => void refreshList({ feedback: true })}>

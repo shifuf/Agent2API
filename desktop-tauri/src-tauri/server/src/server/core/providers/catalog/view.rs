@@ -24,9 +24,9 @@ pub(super) fn models_response_with_active(
     active: Vec<(String, Vec<Value>)>,
 ) -> Value {
     let _ = active;
-    let mut data = crate::server::core::managed_models::public_models(store, scope);
+    let mut data = Vec::new();
     crate::server::core::routing_groups::append_public(store, scope, &mut data);
-    list_response_from(data, "managed", 0)
+    list_response_from(data, "routing-group", 0)
 }
 
 /// 供管理页面判断是否已有可用账号。

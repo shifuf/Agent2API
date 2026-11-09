@@ -10,6 +10,7 @@ export type KeyGroupDraft = {
   keys?: Array<{ accountId: string; tail?: string; name?: string }>
 }
 type ChannelRecord = { id: string; name?: string; baseUrl?: string; protocol?: string; keyGroups?: KeyGroupDraft[] }
+export type ChannelRequest = (method: 'GET' | 'POST', path: string, body?: unknown) => Promise<unknown>
 
 const drafts = new Map<string, KeyGroupDraft[]>()
 const candidateDrafts = new Map<string, Record<string, string[]>>()
@@ -93,8 +94,9 @@ function GroupModelSelection({ groups, title, onApply, onClose }: {
   </section>
 }
 
-export function ChannelKeyGroups({ draftId, fieldPrefix = draftId, providerId = '', baseUrl, protocol, initial }: {
+export function ChannelKeyGroups({ draftId, fieldPrefix = draftId, providerId = '', baseUrl, protocol, initial, request }: {
   draftId: string; fieldPrefix?: string; providerId?: string; baseUrl: () => string; protocol: () => string; initial?: KeyGroupDraft[]
+  request?: ChannelRequest
 }) {
   const [rows, setRows] = React.useState<KeyGroupDraft[]>(() => drafts.get(draftId) || initial || [emptyGroup()])
   const [candidates, setCandidates] = React.useState<Record<string, string[]>>(() => candidateDrafts.get(draftId) || {})
@@ -155,7 +157,7 @@ export function ChannelKeyGroups({ draftId, fieldPrefix = draftId, providerId = 
     const alreadySelecting = activeId === draftId && panel?.rowId === row.id && panel.kind === 'models' && panel.cacheKey === cacheKey
     setBusy(row.id); setError('')
     try {
-      const api = shared().wbProviders?.customRequest
+      const api = request || shared().wbProviders?.customRequest
       if (!api) throw new Error(t('接口尚未就绪'))
       const result = await api('POST', '/api/custom-providers/fetch-models', payload) as { models?: string[] }
       if (generation.current !== version || baseUrl().trim() !== endpoint || protocol() !== selectedProtocol) return
@@ -183,7 +185,7 @@ export function ChannelKeyGroups({ draftId, fieldPrefix = draftId, providerId = 
     const errors: string[] = []
     setBusy('all'); setError('')
     try {
-      const api = shared().wbProviders?.customRequest
+      const api = request || shared().wbProviders?.customRequest
       if (!api) throw new Error(t('接口尚未就绪'))
       for (const row of eligible) {
         if (generation.current !== version || baseUrl().trim() !== endpoint || protocol() !== selectedProtocol) return
@@ -309,14 +311,16 @@ export function ChannelKeyGroups({ draftId, fieldPrefix = draftId, providerId = 
   </div>
 }
 
-export function ChannelKeyGroupsDialog({ providerId, onClose }: { providerId: string; onClose: () => void }) {
+export function ChannelKeyGroupsDialog({ providerId, onClose, request, onSaved }: {
+  providerId: string; onClose: () => void; request?: ChannelRequest; onSaved?: () => Promise<void>
+}) {
   const [provider, setProvider] = React.useState<ChannelRecord | null>(null)
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const draftId = `edit-channel-${providerId}`
   React.useEffect(() => {
     let alive = true
-    const api = shared().wbProviders?.customRequest
+    const api = request || shared().wbProviders?.customRequest
     if (!api) { setError(t('接口尚未就绪')); return }
     void api('GET', '/api/custom-providers').then(result => {
       if (!alive) return
@@ -325,15 +329,18 @@ export function ChannelKeyGroupsDialog({ providerId, onClose }: { providerId: st
       setProvider(found)
     }).catch(error => { if (alive) setError(describeError(error)) })
     return () => { alive = false }
-  }, [draftId, providerId])
+  }, [draftId, providerId, request])
   async function save() {
     setBusy(true); setError('')
     try {
-      const api = shared().wbProviders?.customRequest
+      const api = request || shared().wbProviders?.customRequest
       if (!api) throw new Error(t('接口尚未就绪'))
       await api('POST', '/api/custom-providers/update', {id:providerId,keyGroups:readChannelGroups(draftId)})
-      await shared().wbProviders?.refreshCustom?.()
-      await shared().wbApp?.refresh?.()
+      if (onSaved) await onSaved()
+      else {
+        await shared().wbProviders?.refreshCustom?.()
+        await shared().wbApp?.refresh?.()
+      }
       clearChannelGroups(draftId)
       onClose()
     } catch(error) { setError(describeError(error)) }
@@ -354,7 +361,7 @@ export function ChannelKeyGroupsDialog({ providerId, onClose }: { providerId: st
           </div>
         </section>
         <section data-channel-section='keys' className='scroll-mt-4'>
-          <ChannelKeyGroups draftId={draftId} providerId={providerId}
+          <ChannelKeyGroups draftId={draftId} providerId={providerId} request={request}
             baseUrl={() => provider.baseUrl || ''} protocol={() => provider.protocol || 'chat_completions'} initial={provider.keyGroups?.map(row => ({...row,apiKeys:[]}))} />
         </section>
       </>}

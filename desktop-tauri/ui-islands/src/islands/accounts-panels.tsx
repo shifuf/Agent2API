@@ -52,6 +52,7 @@ import {
   tokenRulesOf, tokenWindowInfo, zcodePlanStateLabel,
 } from './accounts-domain'
 import { CreditDetailButton, creditRowsOf } from './accounts-credit-detail'
+import { AccountModelFetchButton } from './accounts-model-fetch'
 import { creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditsOf, type CreditExpirySummary, type ExpiringCredit } from '../../../ui-shared/credit-expiry'
 import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
@@ -518,6 +519,7 @@ export function GroupBandRow({ group, collapsed, colSpan }: {
             </Button>
           ) : null}
           <span className='grp-spacer' />
+          <AccountModelFetchButton compact provider={group.provider} name={t(group.label)} />
           <Button size='default' variant='ghost' type='button' className='grp-iconbtn grp-fold' aria-expanded={!collapsed}
             title={collapsed ? t('展开这一组') : t('折叠这一组')}
             onClick={() => toggleGroupCollapsed(group.provider)}

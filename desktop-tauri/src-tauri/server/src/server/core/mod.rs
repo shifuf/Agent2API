@@ -134,6 +134,7 @@ pub mod sidebar_layout;
 pub mod sub_kernel;
 pub mod subscriptions;
 pub mod managed_models;
+pub(crate) mod group_migration;
 // 工具服务（「工具服务」页）：网络搜索 / 视觉分析的上游配置、运行时编排与
 // 本机接入。三种对外协议（Skill / MCP / API）共享同一份上游配置，见该模块头
 pub mod tool_services;

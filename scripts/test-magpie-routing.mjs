@@ -110,10 +110,9 @@ try {
     assert.equal(selected.find(item => item.provider === scoped.provider.id && item.model === 'wire-second').accountCount, 2)
     const scopedAccounts = (await ok('/api/custom-providers')).providers.find(item => item.id === scoped.provider.id).keyGroups
     const firstAccount = scopedAccounts.find(item => item.id === 'first').accountIds[0]
-    const publicCatalog = await ok('/api/models/catalog')
-    await ok('/api/models/catalog', { revision: publicCatalog.revision, previousId: '', model: {
-      id: 'custom-route-alias', enabled: true, bindings: [{ provider: scoped.provider.id, model: 'wire-first' }],
-    } })
+    await save(group('custom-route-alias', { model: 'custom-route-alias', members: [
+      { id: 'source', provider: scoped.provider.id, model: 'wire-first', included: true, accountScope: 'all', accounts: [] },
+    ] }))
     const workspace = await ok('/api/routing/workspace')
     assert.deepEqual(workspace.modelsByProvider?.[scoped.provider.id], ['custom-route-alias'], 'Public aliases must retain their actual source provider')
     const persisted = group('kept-unavailable', { members: [{ id: 'first', provider: scoped.provider.id, model: 'wire-first', accounts: [], included: true }] })
@@ -197,6 +196,30 @@ try {
     const timed = group('timed', { firstToken: 1 }); await save(timed)
     slow = 'north'; const before = Date.now(); const answer = await chat(timed.model); slow = ''
     assert.equal(content(answer), 'south:gpt-4.1'); assert(Date.now() - before < 10000)
+  })
+  await step('ordered failover visits successive stalled members before returning content', async () => {
+    const ordered = group('ordered-stalls', { firstToken: 1, members: [members[0],
+      { ...members[0], id: 'north-mini', model: 'gpt-4.1-mini' }, members[1]] }); await save(ordered)
+    slow = 'north'; const before = calls.length
+    try {
+      assert.equal(content(await chat(ordered.model)), 'south:gpt-4.1')
+      assert.deepEqual(calls.slice(before).map(call => [call.source, call.model]),
+        [['north', 'gpt-4.1'], ['north', 'gpt-4.1-mini'], ['south', 'gpt-4.1']])
+    } finally { slow = '' }
+  })
+  await step('zero first-content timeout does not rotate a healthy HTTP 200 stream', async () => {
+    const disabled = group('no-content-deadline', { firstToken: 0, patience: 0 }); await save(disabled)
+    slow = 'north'; const before = calls.length
+    try {
+      await assert.rejects(async () => {
+        const response = await fetch(base + '/v1/chat/completions', { method: 'POST',
+          headers: { Authorization: `Bearer ${adminKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: disabled.model, stream: true, messages: [{ role: 'user', content: 'ping' }] }),
+          signal: AbortSignal.timeout(1800) })
+        await response.text()
+      }, error => error.name === 'TimeoutError' || error.name === 'AbortError')
+      assert.deepEqual(calls.slice(before).map(call => call.source), ['north'])
+    } finally { slow = '' }
   })
   await step('a failure after content is committed never starts a second upstream reply', async () => {
     const committed = group('committed', { firstToken: 1 }); await save(committed)

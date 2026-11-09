@@ -54,7 +54,8 @@ impl RequestRouting {
     }
 
     pub fn capture_request(model: &str, store: &crate::server::core::account_store::store::AccountStore,
-        body: &Value, scope: Option<&crate::server::core::key_scope::KeyScope>, ignore: bool) -> Result<Self, crate::server::errors::GatewayError> {
+        body: &Value, scope: Option<&crate::server::core::key_scope::KeyScope>, ignore: bool,
+        images: Option<crate::server::core::providers::images::ImageOperation>) -> Result<Self, crate::server::errors::GatewayError> {
         let (profiles, base) = config::routing_snapshot();
         let snapshot = store.routing_snapshot();
         let accounts: Vec<Value> = snapshot.accounts.iter()
@@ -70,10 +71,23 @@ impl RequestRouting {
         if ignore { routing.source_test = Some(model.to_string()); }
         if !ignore {
             if let Some(group) = profiles.group_for_model(model).cloned() {
+                if group.kind.is_image() != images.is_some() {
+                    return Err(crate::server::errors::GatewayError::bad_request("路由组类型与请求端点不匹配"));
+                }
                 if !crate::server::core::key_scope::allows_model(scope, &group.model) {
                     return Err(crate::server::errors::GatewayError::with_status(404, "此路由组不在网关 Key 的可用模型列表里").with_code("model_not_found"));
                 }
                 routing.group_projection = routing_groups::project_with_groups(&group, &profiles.groups, &accounts, &RequestNeeds::from_body(body), scope);
+                if let Some(operation) = images {
+                    let projection = &mut routing.group_projection;
+                    projection.accounts.retain(|account| {
+                        if crate::server::core::providers::images::candidate_supports_operation(account, operation) { return true; }
+                        projection.blocked.push(json!({"id":routing::account_id(account),"candidateId":routing_groups::attempt_key(account),
+                            "memberId":account.get("routingMemberId"),"provider":routing::provider_of(account),"model":routing_groups::candidate_model(account),
+                            "state":"unavailable","reason":format!("该成员不支持{}", operation.label())}));
+                        false
+                    });
+                }
                 for candidate in &mut routing.group_projection.accounts {
                     if let Some(model) = routing_groups::candidate_model(candidate).map(str::to_owned) {
                         if let Some(item) = routing_groups::catalog_model(routing::provider_of(candidate), &model) {

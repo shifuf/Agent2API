@@ -155,7 +155,7 @@ export function ModelsFetchTable({
         ?? { variant: 'outline' as const, label: String(item.status || t('未知')) }
       const count = Number(item.count)
       const note = item.status === 'refreshed'
-        ? t('远程目录已更新，「来源」列会显示为「远程」')
+        ? t('模型目录已刷新，可在路由组中选择。')
         : item.message || (item.fixed ? t('这家用固定模型清单，无可刷新') : t('本次没有取到新内容'))
       const at = formatTime(Number(item.refreshedAt) || 0)
       return (

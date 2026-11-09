@@ -27,6 +27,10 @@ import { serverIdentity } from '../lib/servers'
 import { t } from '../i18n'
 import { confirmDialog } from '@ui'
 import { MetricGrid, MetricCard } from '@ui'
+import { AccountCredentialDetails } from '../../../ui-shared/account-credential-details'
+import { apiCall } from '../api/client'
+
+const readCredentialDetails = (id: string) => apiCall(`/api/accounts/${encodeURIComponent(id)}/credentials`)
 
 /**
  * 账号详情抽屉。
@@ -331,6 +335,8 @@ export function AccountSheet({
                   </div>
                 </MetricCard>
               </MetricGrid>
+
+              <AccountCredentialDetails key={`${identity}:${account.id}`} id={account.id} read={readCredentialDetails} t={t} />
 
               {/* 首选是队列位次，不是账号属性：给它一个整行按钮，别混进删除那一排 */}
               <Button size='touch' variant='outline'

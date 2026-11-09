@@ -1,18 +1,16 @@
 import * as React from 'react'
-import { Badge, Button, Checkbox, Switch, TableCell, cn } from '@ui'
+import { Badge, Button, Switch, TableCell, cn } from '@ui'
 import { t } from '../i18n'
 import * as customSource from './models-custom-source'
 import type { ManageModel } from './models-custom-source'
-import { bindingReasoningLevel, modelReasoning } from './models-reasoning'
 import { testBlockReason, type ModelTestTarget } from './model-test-dialog'
 import {
   BOOLEAN_KEYS, CAPABILITY_LABELS, capabilitiesOf, capabilityState, capabilityTip, capSourceOf,
   exactTokens, formatTokens, normalizeOverrides, type CapabilityKey,
 } from './model-capability'
 import {
-  bindingKeyOf, bindingsOf, enabledBindingConflicts, esc, formatTime, getSnapshot, levelOf, models,
-  openCapability, openMapping, rowKeyOf, runRowAction, same, shared, subscribe, visibilityOf,
-  writeBinding, writeRemoveMapping, writeRemoveModel, type Align, type ColumnView, type Binding,
+  formatTime, getSnapshot, openCapability, rowKeyOf, runRowAction, subscribe, visibilityOf,
+  writeSourceState, type Align, type ColumnView,
 } from './models-panel-state'
 
 const cellClass = (base: string, align?: Align): string => (align ? `${base} ta-${align}` : base)
@@ -63,122 +61,14 @@ const CAP_ICON: Partial<Record<CapabilityKey, React.ReactNode>> = {
   ),
 }
 
-export function ModelCell({ columns, model, selection, togglePick, setTestTarget }: {
+export function ModelCell({ columns, model, onSelectCustom, setTestTarget }: {
   columns: ColumnView[]
   model: ManageModel
-  selection: ReadonlySet<string>
-  togglePick: (key: string, next: boolean) => void
+  onSelectCustom: (provider: string) => void
   setTestTarget: (target: ModelTestTarget) => void
 }) {
   const state = React.useSyncExternalStore(subscribe, getSnapshot)
   const busyRow = state.pending.has(rowKeyOf(model))
-  /** chip 上那枚等级标（未绑定时也渲染虚线样式，否则「怎么绑等级」会变成一个查不出的问题） */
-  function levelBadge(alias: string, target: string, providerId: string, busy: boolean) {
-    const level = levelOf(alias, target, providerId)
-    const model = models().find(item => same(item.provider, providerId) && same(item.id, target))
-    const info = modelReasoning(model)
-    const effective = info.bindingSupported === true ? bindingReasoningLevel(level, model) : ''
-    const title = info.bindingSupported === false
-      ? t('当前通道未声明可用档位，映射等级不会注入；请先获取模型目录。')
-      : info.fixedLevel
-        ? t('上游固定为 {level}，绑定其他等级也无法调高。', { level: info.fixedLevel })
-        : effective && effective.toLowerCase() !== level.toLowerCase()
-          ? t('绑定 {requested}，按当前通道将发送 {effective}。', { requested: level, effective })
-          : level ? t('思考等级 {level}（点击修改）', { level }) : t('设置思考等级（当前未绑定）')
-    return (
-      // 16px 小件（2xs 档）：原来那枚 mono 10px 的小药丸。已绑定走实心档、未绑定走虚线档，
-      // 与旧 CSS 的 `.alias-level` / `.alias-level.unset` 同一套语义（mono 粗体也照旧）；
-      // shadow-none 是清掉通用 button 规则的投影（旧 CSS 同样显式清过）
-      <Button variant={level ? 'secondary' : 'dashed'} size='2xs' disabled={busy}
-        className='font-mono font-bold shadow-none'
-        title={title}
-        onClick={() => openMapping({ alias, target, provider: providerId })}>
-        {info.fixedLevel ? `${t('固定思考档位')} ${info.fixedLevel}` : effective && effective.toLowerCase() !== level.toLowerCase()
-          ? `${level} → ${effective}` : level || t('＋等级')}
-      </Button>
-    )
-  }
-
-  /** 映射 chips：每条 chip 属于自己所在的那一行（提供商 × 上游模型），删除时带三元组精确定位 */
-  function aliasCell(model: ManageModel) {
-    const providerId = model.provider || ''
-    const bindings = bindingsOf(model)
-    const [head, ...rest] = bindings
-
-    /**
-     * 删除一条映射：同名映射允许多条，按（对外名 + 上游模型 + 提供商）三元组定位。
-     * 不用先弹确认框的那条路（等级标）见下 —— 它只写一个字段，保存前还能取消。
-     */
-    async function confirmUnmap(alias: string): Promise<void> {
-      const ok = await shared().wbConfirm?.ask?.({
-        title: t('删除映射'),
-        html: t('确定删除映射「<strong>{alias} → {target}</strong>」？', { alias: esc(alias), target: esc(model.id) }),
-        okText: t('删除'),
-        okClass: 'danger',
-      })
-      if (!ok) return
-      void runRowAction(
-        bindingKeyOf(alias, model.id, providerId),
-        () => writeRemoveMapping(providerId, alias, model.id),
-        t('映射已删除'),
-      )
-    }
-
-    const chip = (binding: Binding) => {
-      const alias = binding.alias
-      const on = binding.enabled !== false
-      const conflicts = on ? [] : enabledBindingConflicts(providerId, alias, model.id)
-      const busy = state.pending.has(bindingKeyOf(alias, model.id, providerId))
-      return (
-        <span className={cn('alias', !on && 'map-off')} key={`${alias}\u0001${binding.isDefault ? 'd' : 'm'}`}>
-          {/* 映射自己的开关（关掉 = 这条别名暂时不存在，可再打开）。行禁用时 chips 随行压淡，
-              映射开关另用 map-off 弱化 —— 两个维度独立，一眼可辨。size='sm' 是 24×14 的小号，
-              与旧 CSS 里 `.alias .switch .track` 同尺寸：标准档（36×21）塞进 22px 的药丸里
-              会把 chip 连同整张表的行高一起撑高 */}
-          <Switch size='sm' checked={on} disabled={busy}
-            title={on ? t('映射已启用，点击关闭') : conflicts.length
-              ? t('启用后将自动关闭该提供商的其他同名绑定：{bindings}', { bindings: conflicts.map(binding => `${binding.alias} → ${binding.target}`).join('、') })
-              : t('映射已关闭，点击启用')}
-            aria-label={t('{action}映射 {alias}', { action: on ? t('关闭') : t('启用'), alias })}
-            onCheckedChange={next => {
-              void runRowAction(
-                bindingKeyOf(alias, model.id, providerId),
-                () => writeBinding(providerId, alias, model.id, { enabled: next }),
-                next ? (conflicts.length ? t('映射已启用，其他同名绑定已自动关闭') : t('映射已启用')) : t('映射已关闭'),
-              )
-            }} />
-          {/* 名字本身就是复制入口（data-copy 走 clipboard.js 的全局委托，点一下
-              toast「已复制」）；title 同时承担两件事 —— 提示可点、长名字被
-              ellipsis 截断时悬停能看全 */}
-          <span className='t' data-copy={alias} title={t('点击复制：{name}', { name: alias })}>{alias}</span>
-          {binding.isDefault ? <span className='binding-default'>{t('默认')}</span> : null}
-          {levelBadge(alias, model.id, providerId, busy)}
-          {binding.isDefault ? null : (
-            // 16px 的删除小件（icon-2xs 档）：字号 / 行高照旧 CSS 的 `.alias .x` 给，
-            // 免得 × 跟着 chip 的 11px 一起缩水
-            <Button variant='ghost' size='icon-2xs' className='text-[12px] leading-none'
-              disabled={busy} title={t('删除映射 {alias}', { alias })}
-              onClick={() => void confirmUnmap(alias)}>×</Button>
-          )}
-        </span>
-      )
-    }
-    // 「＋ 映射」并排跟在**默认**那条右边（它是这一列的入口，不是一条绑定）：默认绑定永远
-    // 存在（没有映射时是合成出来的那条），所以这一行永远有内容
-    return (
-      <div className='aliases'>
-        <div className='alias-row'>
-          {head ? chip(head) : null}
-          {/* dashed = 「这里还能再添一个」的入口语义（对应旧的 .alias-add），与旁边那些
-              实心按钮一眼分开 */}
-          <Button variant='dashed' size='xs'
-            onClick={() => openMapping({ target: model.id, provider: providerId })}>{t('＋ 映射')}</Button>
-        </div>
-        {rest.map(chip)}
-      </div>
-    )
-  }
-
   /**
    * 「来源」列：这一家的清单当前是远程拉的还是内置静态表（后端给的 source，前端只做文案映射）。
    * 呈现为「色点 + 小字」（.src）而不是描边徽标：这一列每行都在重复同一个词，徽标的框
@@ -223,7 +113,7 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
     if (visibility === 'hidden') {
       return (
         <span className='src hidden-visibility'
-          title={t('上游能列出这个模型，但官方客户端不展示它；本仓已默认关闭它的默认绑定（点这一行的开关可以手动打开）')}>
+          title={t('上游能列出这个模型，但官方客户端不展示它。')}>
           <i aria-hidden='true' />{t('不展示')}
         </span>
       )
@@ -369,35 +259,7 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
    * 对外名称统一在模型映射列切换。
    */
   function cellFor(column: ColumnView, model: ManageModel, busyRow: boolean) {
-    /**
-     * 「移除」删掉的是那条**登记**（它的存在完全由这次登记决定，没有「上游刷新会把它带回来」
-     * 这回事，移除后 /v1/models、路由同时消失）。判据用后端给的 source，前端不自己推断。
-     */
-    async function confirmRemoveModel(): Promise<void> {
-      const ok = await shared().wbConfirm?.ask?.({
-        title: t('移除自定义模型'),
-        html: t('确定移除自定义模型「<strong>{id}</strong>」？这条登记会被<b>直接移除</b>，之后 <code>/v1/models</code> 不再广告它、请求它也会被拒。', { id: esc(model.id) }),
-        okText: t('移除'),
-        okClass: 'danger',
-      })
-      if (!ok) return
-      void runRowAction(
-        rowKeyOf(model),
-        () => writeRemoveModel(model.provider || '', model.id),
-        // 文案按**行**的归属判（聚合视图里两家的行混在一张表上，视图级 custom 不再适用）
-        customSource.isCustom(model.provider || '') ? t('模型已移除') : t('自定义模型已移除'),
-      )
-    }
-
     switch (column.key) {
-      case 'check':
-        return (
-          <TableCell className={cellClass('cell-check', column.align)}>
-            <Checkbox checked={selection.has(rowKeyOf(model))} title={t('勾选后可批量操作')}
-              aria-label={t('勾选后可批量操作')}
-              onCheckedChange={next => togglePick(rowKeyOf(model), next === true)} />
-          </TableCell>
-        )
       case 'model':
         return (
           <TableCell className={cellClass('cell-model', column.align)}>
@@ -431,8 +293,16 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
         return <TableCell className={cellClass('cell-budget', column.align)}>{budgetCell(model)}</TableCell>
       case 'caps':
         return <TableCell className={cellClass('cell-caps', column.align)}>{capsCell(model)}</TableCell>
-      case 'alias':
-        return <TableCell className={cellClass('cell-alias', column.align)}>{aliasCell(model)}</TableCell>
+      case 'state':
+        return <TableCell className={cellClass('cell-state', column.align)}>
+          <div className='flex items-center gap-2'><Switch
+            checked={model.enabled !== false} disabled={busyRow}
+            aria-label={t('启用上游模型 {model}', { model: model.id })}
+            onCheckedChange={enabled => void runRowAction(rowKeyOf(model),
+              () => writeSourceState(model.provider || '', model.id, enabled))} />
+            {customSource.isCustom(model.provider) ? <Button size='sm' variant='ghost'
+              onClick={() => onSelectCustom(model.provider || '')}>{t('选择模型')}</Button> : null}</div>
+        </TableCell>
       case 'act': {
         // 「测试」的门禁（该家没有可用账号）由 model-test-dialog 统一判定，这里只把
         // 理由挂到 title 上 —— 禁用而不说原因等于让用户猜。未启用的行**不置灰**：
@@ -442,7 +312,6 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
         // 移除按钮判据按**行**判（聚合视图里内置与自定义的行混在一张表上，视图级的
         // custom 布尔不再适用）：内置家只露手动登记的（source=manual，上游目录带来的
         // 行由清单决定存在性），自定义家的每一行都是用户登记的、都可以移除
-        const removable = model.source === 'manual' || customSource.isCustom(model.provider || '')
         return (
           <TableCell className={cellClass('cell-act r', column.align)}>
             <div className='row-actions'>
@@ -451,10 +320,6 @@ export function ModelCell({ columns, model, selection, togglePick, setTestTarget
                 onClick={() => setTestTarget({ provider: model.provider || '', id: model.id })}>
                 {t('测试')}
               </Button>
-              {removable ? (
-                <Button variant='ghost' size='sm' className='text-destructive' disabled={busyRow}
-                  onClick={() => void confirmRemoveModel()}>{t('移除')}</Button>
-              ) : null}
             </div>
           </TableCell>
         )

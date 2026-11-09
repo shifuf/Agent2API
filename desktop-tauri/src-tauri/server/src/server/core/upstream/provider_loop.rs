@@ -430,7 +430,6 @@ pub(super) async fn forward_with_providers(
     // `provider_only`，就是被钉住的那一家）；发送侧的按家改写照常走生产语义，
     // 关闭的默认绑定解析不出目标、名字原样直发，见 `ForwardRequest` 的说明。
     let candidates = if ctx.routing.group.is_some() {
-        if ctx.images.is_some() { return Err(GatewayError::bad_request("对话路由组不能用于图片生成")); }
         ctx.routing.providers(Vec::new())
     } else if ctx.ignore_model_gate {
         ctx.key_scope

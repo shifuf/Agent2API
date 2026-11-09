@@ -9,6 +9,8 @@ import {
 import '../styles/accounts-settings-dialog.css'
 import { t } from '../i18n'
 import { ChannelKeyGroupsDialog } from './channel-key-groups'
+import { AccountCredentialDetails } from '../../../ui-shared/account-credential-details'
+import { accountRequest } from './add-account-bridge'
 import {
   ACCOUNT_CONCURRENCY_MAX as CONC_MAX, errorMessage, esc, shared, toast,
   type AccountRecord, type LimiterGroup,
@@ -36,6 +38,8 @@ import {
 
 type AccountLike = AccountRecord
 type PaneId = 'basic' | 'credential' | 'query' | 'limiter' | 'network' | 'provider'
+
+const readCredentialDetails = (id: string) => accountRequest('GET', `/api/accounts/${encodeURIComponent(id)}/credentials`)
 
 function peersOf(account: AccountLike, all: AccountLike[]): AccountLike[] {
   const provider = providerOf(account)
@@ -510,7 +514,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
 
   // 内置账号仅在有余额凭证或套餐通道时显示凭证分区。
   const concDefault = Number(providerFeatures(providerOf(target)).concurrencyDefault) || 0
-  const hasCredentialPane = isCatpaw || isCustomAccount || supportsPlanChannel(target)
+  const hasCredentialPane = true
   const accountPanes: PaneId[] = ['basic', ...(hasCredentialPane ? ['credential' as const] : []),
     ...(supportsUsage(target) ? ['query' as const] : []), 'limiter', 'network']
   const providerLabel = provider?.name || shared().wbProviders?.labelOf?.(providerOf(target)) || providerOf(target)
@@ -632,6 +636,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, initialPane
                   ) : null}
 
                   {pane === 'credential' && hasCredentialPane ? <>
+                    {!busy && !editKeyGroups ? <AccountCredentialDetails key={id} id={id} read={readCredentialDetails} t={t} /> : null}
                     {isCatpaw ? <BalanceTokenField configured={account.hasBalanceToken === true} value={balanceToken}
                       onChange={setBalanceToken} clearBusy={interactionBusy} onClear={() => void clearBalanceToken()} /> : null}
                     {isCustomAccount ? <Button variant='outline' onClick={() => setEditKeyGroups(true)}>{t('管理渠道 Key 分组与模型')}</Button> : null}

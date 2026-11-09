@@ -60,9 +60,8 @@ fn validate_collection(profiles:&config::RoutingProfiles,accounts:&[Value]) -> R
     for group in profiles.groups.values() {
         config::routing_groups::validate(group)?;
         config::routing_groups::validate_graph(group,&effective.groups)?;
-        if !seen.insert(group.model.to_lowercase()) || config::routing_groups::public_model_occupied(&group.model)
-            || profiles.models.contains_key(&group.model.to_lowercase()) {
-            return Err("对外模型 ID 已被模型或其他路由占用".into());
+        if !seen.insert(group.model.to_lowercase()) {
+            return Err("对外模型 ID 已被其他路由组占用".into());
         }
     }
     Ok(())
@@ -104,7 +103,7 @@ fn apply(state:&ServerState,payload:Action)->Result<Value,String> {
             }
             "arrange" => {
                 let all:HashSet<_>=profiles.groups.keys().chain(found.iter().map(|group|&group.id)).cloned().collect();
-                if payload.ids.len()>1000 || payload.ids.iter().any(|id|!all.contains(id))
+                if payload.ids.len()>config::routing_groups::MAX_GROUPS || payload.ids.iter().any(|id|!all.contains(id))
                     || payload.ids.iter().collect::<HashSet<_>>().len()!=payload.ids.len() {return Err("路由组顺序无效".into())}
                 profiles.group_order=payload.ids.clone();
             }

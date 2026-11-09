@@ -863,5 +863,15 @@
   "查看全部 {n} 个成员": "Ver todos os {n} membros",
   "尚未添加成员，打开编辑后选择上游模型。": "Nenhum membro ainda. Abra o editor para selecionar modelos upstream.",
   "试试其他名称，或清空搜索。": "Tente outro nome ou limpe a busca.",
-  "新建路由组，将多个模型组合为一个对外入口。": "Crie um grupo de roteamento para expor vários modelos por uma única entrada."
+  "新建路由组，将多个模型组合为一个对外入口。": "Crie um grupo de roteamento para expor vários modelos por uma única entrada.",
+  "设置对外模型 ID，再选择提供此路由的上游模型。": "Defina um ID público de modelo e selecione os modelos de origem desta rota.",
+  "请求接口": "API de requisição",
+  "对话": "Conversa",
+  "图像": "Imagem",
+  "图像路由用于图片生成与编辑，仅列出图像模型。": "Rotas de imagem atendem à geração e edição de imagens. Apenas modelos de imagem são listados.",
+  "对话路由用于文本和多模态对话，仅列出对话模型。": "Rotas de conversa atendem a conversas de texto e multimodais. Apenas modelos de conversa são listados.",
+  "对外模型 ID 已被路由组「{name}」占用": "Este ID público de modelo já é usado pelo grupo de rotas “{name}”.",
+  "仅列出与当前路由接口一致的上游模型和路由组。": "Apenas modelos de origem e grupos que usam a mesma API desta rota são listados.",
+  "全局网关设置": "Configurações globais do gateway",
+  "这里调整的是账号组的全局消耗规则；当前路由组的账号顺序保持不变。": "Estas configurações controlam as regras globais de uso do grupo de contas; a ordem das contas neste grupo de rotas é mantida."
 }

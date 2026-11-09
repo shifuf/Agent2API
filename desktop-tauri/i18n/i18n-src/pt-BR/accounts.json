@@ -1,4 +1,5 @@
 {
+  "获取上游模型": "Buscar modelos upstream",
   " · 今日 {used} / {quota}": " · Hoje {used} / {quota}",
   " · 当前 {n}": " · Atual {n}",
   " · 本周期 {used} / {quota}": " · Este período {used} / {quota}",
@@ -973,5 +974,16 @@
   "，只对 OpenCode Zen 这类上游有意义，别的家请关掉。": ", o que só faz sentido para upstreams como o OpenCode Zen; desligue esta opção para os outros.",
   "，已达到上限": ", limite atingido",
   "：到「网络代理」页的「订阅管理」里点「同步 Clash Verge」把出口导进池后即可选 —— 那样能集中测试、也能被多个账号共用。": ": acesse a página 「Proxy de rede」, abra 「Gerenciar assinaturas」 e clique em 「Sincronizar Clash Verge」 para importar as saídas para o pool; assim elas poderão ser selecionadas — desse jeito é possível testar de forma centralizada e compartilhar entre várias contas.",
-  "；": "; "
+  "；": "; ",
+  "已保存的密钥": "Credenciais salvas",
+  "查看密钥详情": "Ver detalhes das credenciais",
+  "隐藏密钥详情": "Ocultar detalhes das credenciais",
+  "点击后读取当前已保存的凭证；隐藏或关闭窗口后清除。": "As credenciais salvas são lidas ao clicar e removidas da visualização ao ocultar ou fechar.",
+  "正在读取密钥详情…": "Lendo detalhes das credenciais…",
+  "读取密钥详情失败，请重试": "Não foi possível ler as credenciais. Tente novamente.",
+  "提供商凭证（JSON）": "Credenciais do provedor (JSON)",
+  "此账号无需鉴权，没有已保存的密钥。": "Esta conta não exige autenticação e não possui chave salva.",
+  "此账号使用客户端实时登录态，没有已保存的密钥。": "Esta conta usa a sessão atual do cliente e não possui chave salva.",
+  "此账号没有可查看的已保存凭证。": "Esta conta não possui credenciais salvas para exibir.",
+  "可在「已保存的密钥」中查看原密钥；更换密钥不会改变账号 ID。": "Veja a chave atual em Credenciais salvas. Substituí-la não altera o ID da conta."
 }

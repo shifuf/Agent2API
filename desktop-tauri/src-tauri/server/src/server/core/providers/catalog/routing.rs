@@ -113,7 +113,21 @@ pub fn providers_for_model(model: &str) -> Vec<String> {
 
 /// 只返回有开启绑定的提供商，不把关闭的 ID 回落给默认提供商。
 pub fn forwarding_providers(model: &str) -> Vec<String> {
-    crate::server::core::managed_models::carriers(model)
+    fn collect(group: &crate::server::config::RoutingGroup, profiles: &crate::server::config::RoutingProfiles,
+        seen: &mut std::collections::HashSet<String>, providers: &mut Vec<String>) {
+        if !group.enabled || group.hidden || !seen.insert(group.id.clone()) { return; }
+        for member in group.members.iter().filter(|member| member.included) {
+            if let Some(child) = profiles.groups.get(&member.group) { collect(child, profiles, seen, providers); }
+            else if member.group.is_empty() && !providers.contains(&member.provider)
+                && crate::server::core::routing_groups::catalog_model(&member.provider, &member.model).is_some() {
+                providers.push(member.provider.clone());
+            }
+        }
+    }
+    let profiles = crate::server::config::routing_profiles();
+    let mut providers = Vec::new();
+    if let Some(group) = profiles.group_for_model(model) { collect(group, &profiles, &mut Default::default(), &mut providers); }
+    providers
 }
 
 /// 「这个名字是不是被关掉了」—— 只在广告里没有它时用来区分「承载家全被关闭」
@@ -138,13 +152,7 @@ pub fn model_blocked_everywhere(model: &str) -> bool {
 }
 
 pub fn wire_target_for_provider(model: &str, provider_id: &str, _account: Option<&Value>) -> WireTarget {
-    let requested = model.trim();
-    if !custom_providers::is_custom_provider_id(provider_id) {
-        if let Some(model) = crate::server::core::managed_models::target(provider_id, requested) {
-            return WireTarget { model, reasoning: None };
-        }
-    }
-    source_wire_target_for_provider(requested, provider_id)
+    source_wire_target_for_provider(model.trim(), provider_id)
 }
 
 /// The trusted source-test path bypasses public bindings but retains legacy source mappings.
@@ -157,20 +165,4 @@ pub fn source_wire_target_for_provider(model: &str, provider_id: &str) -> WireTa
         builtin_target(&model_rules::shared(), provider_id, &manifest_for_provider(provider_id), requested)
     };
     resolved.unwrap_or_else(|| WireTarget { model: requested.to_string(), reasoning: None })
-}
-
-pub fn default_model_catalog() -> Vec<Value> {
-    crate::server::core::managed_models::list().into_iter().filter(|model| model.enabled)
-        .filter_map(|model| {
-            let source = model.bindings.iter().find_map(|binding|
-                crate::server::core::managed_models::source(&binding.provider, &binding.model))?;
-            if super::super::images::model_is_image(&source) { return None; }
-            let mut item = source;
-            item["id"] = model.id.into();
-            Some(item)
-        }).collect()
-}
-
-pub fn default_model_usable(model: &str) -> bool {
-    entry_id_in_manifest(&default_model_catalog(), model).is_some()
 }
