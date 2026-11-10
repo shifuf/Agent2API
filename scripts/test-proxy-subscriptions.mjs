@@ -110,6 +110,11 @@ try {
       return
     }
     originCalls++
+    if (body.stream) {
+      res.setHeader('Content-Type', 'text/event-stream')
+      res.end(`data: ${JSON.stringify({ id: 'chatcmpl-local', choices: [{ index: 0, delta: { content: 'local-only' }, finish_reason: null }] })}\n\ndata: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`)
+      return
+    }
     res.end(JSON.stringify({ id: 'chatcmpl-local', object: 'chat.completion', created: 0, model: body.model,
       choices: [{ index: 0, message: { role: 'assistant', content: 'local-only' }, finish_reason: 'stop' }],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }))
@@ -222,9 +227,11 @@ try {
     const provider = (await ok('/api/custom-providers')).providers.find(item => item.id === channel.provider.id)
     const accountId = provider.keyGroups[0].accountIds[0]
     await ok(`/api/accounts/${accountId}`, { proxy: { source: 'pool', proxyId: selected.id } }, 'PATCH')
-    let catalog = await ok('/api/models/catalog')
-    await ok('/api/models/catalog', { revision: catalog.revision, model: { id: 'subscription-smoke', name: 'Subscription smoke',
-      enabled: true, bindings: [{ provider: provider.id, model: 'wire-local' }] } })
+    const catalog = await ok('/api/routing/groups')
+    await ok('/api/routing/groups', { revision: catalog.newRevision, id: 'subscription-smoke',
+      group: { id: 'subscription-smoke', model: 'subscription-smoke', name: 'Subscription smoke', enabled: true,
+        strategy: 'order', sticky: 'off', members: [{ id: 'subscription-source', provider: provider.id,
+          model: 'wire-local', included: true, accountScope: 'selected', accounts: [accountId] }] } }, 'PUT')
     const readyNode = () => until('referenced node listener', async () => {
       const current = await poolNode(remote.id, 'stable-node')
       return current?.enabled && current.port && (await ok('/api/subscriptions/kernel')).running ? current : false
@@ -232,7 +239,8 @@ try {
     const chatBody = { model: 'subscription-smoke', stream: false, messages: [{ role: 'user', content: 'ping' }] }
     async function chatThrough(expectedPassword) {
       const previous = proxyCalls.length
-      await ok('/v1/chat/completions', chatBody)
+      const response = await ok('/v1/chat/completions', chatBody)
+      assert.equal(response.choices[0].message.content, 'local-only')
       assert.ok(proxyCalls.length > previous, 'Chat must traverse the selected subscription proxy')
       assert.equal(proxyCalls.at(-1), `Basic ${Buffer.from(`local-user:${expectedPassword}`).toString('base64')}`)
     }
@@ -292,6 +300,7 @@ try {
   console.log('PASS: subscription URL/YAML validation, duplicate rejection, local-content edit preservation, disabled/local/missing refresh errors and subscription CRUD')
 } catch (error) {
   console.error(logs)
+  console.error(error)
   throw error
 } finally {
   if (child && child.exitCode === null && child.signalCode === null && !spawnError) {
