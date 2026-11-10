@@ -54,6 +54,10 @@ use serde_json::Value;
 
 use crate::server::config::ImageCompressSettings;
 
+#[cfg(test)]
+#[path = "image_compress_sync_tests.rs"]
+mod sync_tests;
+
 /// data URL 的 base64 解/编码引擎：标准字母表，解码放宽到贴近 Node 的
 /// `Buffer.from(x, 'base64')`（允许少填充与非零尾随位）—— 松一点只会让我们
 /// 多压几张图，收紧了会把本该压的图原样放行。编码方向用规范填充。
@@ -93,20 +97,23 @@ pub fn compress_images_in_place(
         return ImageCompressStats::default();
     }
     let mut stats = ImageCompressStats::default();
-    let mut writes: Vec<(usize, usize, String)> = Vec::with_capacity(targets.len());
-    for (message_index, part_index, uri) in targets {
-        let next = compress_with_cache(&uri, settings);
-        let Some(next) = next else { continue };
-        if next == uri {
-            continue;
-        }
-        stats.compressed += 1;
-        stats.bytes_before += uri.len();
-        stats.bytes_after += next.len();
-        writes.push((message_index, part_index, next));
-    }
-    for (message_index, part_index, next) in writes {
+    for (message_index, part_index) in targets {
         let pointer = format!("/messages/{message_index}/content/{part_index}");
+        let (before, next) = {
+            let Some(uri) = body.pointer(&pointer).and_then(image_uri_of) else {
+                continue;
+            };
+            let Some(next) = compress_with_cache(uri, settings) else {
+                continue;
+            };
+            if next == uri {
+                continue;
+            }
+            (uri.len(), next)
+        };
+        stats.compressed += 1;
+        stats.bytes_before += before;
+        stats.bytes_after += next.len();
         if let Some(part) = body.pointer_mut(&pointer) {
             set_image_uri(part, next);
         }
@@ -134,8 +141,8 @@ pub fn has_compressible(body: &Value) -> bool {
     })
 }
 
-/// 收集所有「内嵌 base64 图片」的位置与原始 data URI（只读借用一遍）。
-fn collect_targets(body: &Value) -> Vec<(usize, usize, String)> {
+/// 只保留图片位置，避免同时复制全部原图。
+fn collect_targets(body: &Value) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
         return out;
@@ -147,7 +154,7 @@ fn collect_targets(body: &Value) -> Vec<(usize, usize, String)> {
         for (part_index, part) in parts.iter().enumerate() {
             let Some(uri) = image_uri_of(part) else { continue };
             if uri.starts_with("data:image/") {
-                out.push((message_index, part_index, uri.to_string()));
+                out.push((message_index, part_index));
             }
         }
     }
