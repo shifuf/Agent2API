@@ -65,7 +65,11 @@ fn patch(
             ) {
                 *new.decor_mut() = old.decor().clone();
             }
-            table.insert(key, replacement);
+            if let Some(existing) = table.get_mut(key) {
+                *existing = replacement;
+            } else {
+                table.insert(key, replacement);
+            }
         }
     }
     Ok(())
@@ -86,4 +90,25 @@ fn item(value: &Value) -> Result<Item, String> {
         .parse::<DocumentMut>()
         .map_err(|e| format!("TOML 值无法解析: {e}"))?;
     document.remove("value").ok_or_else(|| "TOML 值缺失".into())
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    #[test]
+    fn upstream_sync_toml_preserves_key_comments_quotes_bom_and_crlf() {
+        let original = "\u{feff}# user note\r\n\"model\"  = \"old\" # keep tail\r\n[provider]\r\n# provider note\r\n'base_url' = \"https://old.invalid\"\r\n";
+        let desired = serde_json::json!({"model":"new", "provider":{"base_url":"https://new.invalid"}});
+        let rendered = render(original, &desired).unwrap();
+        assert_eq!(rendered, "\u{feff}# user note\r\n\"model\"  = \"new\" # keep tail\r\n[provider]\r\n# provider note\r\n'base_url' = \"https://new.invalid\"\r\n");
+        assert_eq!(parse(&rendered).unwrap(), desired);
+    }
+
+    #[test]
+    fn upstream_sync_toml_still_inserts_and_removes_fields() {
+        let desired = serde_json::json!({"model":"new", "provider":{"enabled":true}});
+        let rendered = render("obsolete = 1\nmodel = \"old\"\n", &desired).unwrap();
+        assert_eq!(parse(&rendered).unwrap(), desired);
+    }
 }
