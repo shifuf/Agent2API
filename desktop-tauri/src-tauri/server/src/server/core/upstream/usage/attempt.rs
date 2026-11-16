@@ -21,6 +21,10 @@ pub struct AttemptDetail {
     pub member_id: String,
     #[serde(default)]
     pub model: String,
+    #[serde(rename = "responseModels", default)]
+    pub response_models: Vec<String>,
+    #[serde(rename = "responseModelSource", default)]
+    pub response_model_source: String,
     #[serde(default)]
     pub reasoning: String,
     #[serde(default)]
@@ -113,6 +117,7 @@ impl RequestTelemetry {
             account_id, candidate_id, member_id, model: String::new(), reasoning: String::new(), reason, sticky_hit,
             started_at: Some(crate::server::logging::now_ms()), response_at: None, finished_at: None,
             status: None, error: None, retries: Vec::new(), notice: None, body_bytes: None,
+            response_models: Vec::new(), response_model_source: String::new(),
         });
         self.enter_phase(&mut guard, LogPhase::Waiting);
         self.flush_live(&guard);

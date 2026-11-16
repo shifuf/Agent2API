@@ -745,7 +745,7 @@ impl ProtocolTranslateStream {
             })
         });
         let guarded = crate::server::core::upstream::stall::idle_guard(
-            Box::pin(described),
+            crate::server::core::upstream::model_trace::observe(Box::pin(described), telemetry.clone()),
             std::time::Duration::from_millis(
                 crate::server::config::timeout_settings().stream_idle_ms(),
             ),

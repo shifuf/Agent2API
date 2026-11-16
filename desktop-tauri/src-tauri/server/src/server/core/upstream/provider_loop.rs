@@ -1934,7 +1934,7 @@ async fn attempt_queue(
             && response_protocol == crate::server::core::providers::adapter::UpstreamResponse::Chat
             && response.status().is_success()
         {
-            let head = refusal::hold_head(response).await;
+            let head = refusal::hold_head(response, ctx.telemetry.clone()).await;
             // 两条判据汇成一个三元组 `(给明细的文案, 是不是配额型, 给客户端标签)`：
             //   · 配额型（**正文标记**命中）⇒ **罚账号**（冷却到正文里的窗口重置时刻）+ 换家；
             //   · 内容型（`finish_reason` 命中）⇒ 不罚账号（内容问题，换谁都会拒）+ 换家。

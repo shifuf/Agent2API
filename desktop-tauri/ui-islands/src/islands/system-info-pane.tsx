@@ -172,21 +172,37 @@ function getSnapshot(): State {
  * 失败不清空已有的 `info`：与更新面板同一个取向 —— 环境信息不会因为一次
  * 网络抖动就变成未知，留着上一次的值 + 一句失败原因比整页「—」有用。
  */
-async function load(): Promise<void> {
+let pendingLoad: { hide: boolean; task: Promise<void> } | null = null
+let loadSequence = 0
+
+function load(): Promise<void> {
+  const hide = snapshot.hideUsername
+  if (pendingLoad?.hide === hide) return pendingLoad.task
+  const sequence = ++loadSequence
+  const task = fetchInfo(hide, sequence).finally(() => {
+    if (pendingLoad?.task === task) pendingLoad = null
+  })
+  pendingLoad = { hide, task }
+  return task
+}
+
+async function fetchInfo(hide: boolean, sequence: number): Promise<void> {
   const api = shared().workbuddyDesktop
   if (!api?.getSystemInfo) {
     publish({ status: 'unavailable', error: t('当前环境不支持读取版本信息（桥接方法缺失）') })
     return
   }
-  if (snapshot.status !== 'ready') publish({ status: 'loading' })
+  publish({ status: 'loading' })
   try {
-    const info = await api.getSystemInfo({ hideUsername: snapshot.hideUsername })
+    const info = await api.getSystemInfo({ hideUsername: hide })
+    if (sequence !== loadSequence) return
     if (!info) {
       publish({ status: 'unavailable', error: t('后端没有返回版本信息') })
       return
     }
     publish({ status: 'ready', info, error: '' })
   } catch (error) {
+    if (sequence !== loadSequence) return
     publish({
       status: 'unavailable',
       error: error instanceof Error ? error.message : String(error),
@@ -196,7 +212,8 @@ async function load(): Promise<void> {
 
 /** 拨「隐藏用户名」：先更新开关再重拉（让用户看到路径立刻变化） */
 function toggleHideUsername(next: boolean): void {
-  publish({ hideUsername: next })
+  // 清掉旧路径，防止脱敏请求完成前复制到未脱敏信息。
+  publish({ hideUsername: next, info: null })
   void load()
 }
 
@@ -351,8 +368,7 @@ function GroupCard({ title, rows }: { title: string; rows: Array<[string, React.
 function SystemInfoPanel() {
   const state = React.useSyncExternalStore(subscribe, getSnapshot)
 
-  // 面板常驻（root 随应用生命周期），进设置页时由 wbSystemInfoPane.load() 重拉
-  React.useEffect(() => { void load() }, [])
+  // 由 settings-state 在实际访问本分类时加载，隐藏面板挂载不触发重查询。
 
   const info = state.info
   const app = info?.app || {}

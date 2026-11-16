@@ -184,7 +184,7 @@ pub fn scan_finish_reason(text: &str) -> Option<String> {
 /// 入参是**未消费**的 `reqwest::Response`（调用点在本函数之后不再需要它）：
 /// 状态码与响应头在这里取出，字节流被包上进空闲守卫（与 `ForwardStream::new`
 /// 同一件事，只是提前到这里 —— 预读期间上游卡住也不能把请求挂死）。
-pub async fn hold_head(response: reqwest::Response) -> HeldHead {
+pub async fn hold_head(response: reqwest::Response, telemetry: std::sync::Arc<super::usage::RequestTelemetry>) -> HeldHead {
     let status = response.status().as_u16();
     let headers = response.headers().clone();
     // 与 `ForwardStream::new` / 聚合器同款：reqwest 错误就地描述成文案折进 io::Error
@@ -194,7 +194,7 @@ pub async fn hold_head(response: reqwest::Response) -> HeldHead {
         })
     });
     let mut source = stall::idle_guard(
-        Box::pin(inner),
+        super::model_trace::observe(Box::pin(inner), telemetry),
         Duration::from_millis(config::timeout_settings().stream_idle_ms()),
     );
     let mut buffered: Vec<u8> = Vec::new();

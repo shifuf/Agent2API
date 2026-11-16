@@ -576,6 +576,7 @@ export function showCategory(category?: string | null): void {
     ? String(category)
     : CATEGORIES[0].id
   publish({ category: target, scrollReset: snapshot.scrollReset + 1 })
+  if (settingsOpened) void loadCategory(target)
 }
 
 /** 导航项点击：切换并记住偏好 */
@@ -2704,40 +2705,45 @@ export async function panelLogout(): Promise<boolean> {
 
 /**
  * 设置页数据入口（app.js 切入该页时调用，upgrade-panel 迁移完成后也调）。
- * 九个取数并行，各自失败各自降级 —— 一个接口挂了不该把整页拖成空白。
+ * 只读取当前分类；同一次进入设置页期间保留其他分类的未保存草稿。
  */
+let settingsOpened = false
+const categoryLoads = new Map<string, Promise<void>>()
+const loadedCategories = new Set<string>()
+
+function loadCategory(category: string): Promise<void> {
+  const pending = categoryLoads.get(category)
+  if (pending) return pending
+  if (loadedCategories.has(category) && category !== 'system' && category !== 'about') return Promise.resolve()
+  const tasks: Record<string, (() => unknown)[]> = {
+    account: [loadAccount, loadCaptcha],
+    general: [loadSettings, loadLanExtras],
+    display: [],
+    gateway: [loadQueue, loadImageCompress, loadCaptchaPool, loadDeveloperRoleCompat,
+      loadClineHeaders, loadZcodeVersion, loadPrompt, loadModelsDev, loadSanitize, loadDebug],
+    retry: [loadRetry],
+    timeout: [loadTimeouts],
+    security: [loadCors],
+    data: [loadRetention, loadStorage, reconnectDbRestore],
+    system: [() => shared().wbSystemInfoPane?.load?.()],
+    about: [() => shared().wbUpdatePanel?.load?.()],
+  }
+  const task = Promise.resolve().then(async () => {
+    await Promise.all((tasks[category] || []).map(run => run()))
+    loadedCategories.add(category)
+  }).finally(() => { categoryLoads.delete(category) })
+  categoryLoads.set(category, task)
+  return task
+}
+
 export async function load(): Promise<void> {
+  loadedCategories.clear()
   restoreCategory()
+  settingsOpened = true
   renderUnits()
   publish({ panelLogin: readPanelLogin() })
   window.dispatchEvent(new Event('wb:settings-load'))
-  await Promise.all([
-    loadSettings(),
-    loadLanExtras(),
-    loadRetention(),
-    loadRetry(),
-    loadTimeouts(),
-    loadQueue(),
-    loadImageCompress(),
-    loadCaptchaPool(),
-    loadDebug(),
-    loadSanitize(),
-    loadDeveloperRoleCompat(),
-    loadClineHeaders(),
-    loadZcodeVersion(),
-    loadCors(),
-    loadPrompt(),
-    loadStorage(),
-    loadCaptcha(),
-    loadAccount(),
-    loadModelsDev(),
-    reconnectDbRestore(),
-    // 软件更新面板是另一个岛（update-panel.tsx），切进设置页时让它自己刷新一次
-    shared().wbUpdatePanel?.load?.(),
-    // 「版本信息」也是独立岛（system-info-pane.tsx）：同样在切进设置页时重拉 ——
-    // 版本 / 运行时长 / 在途请求这些读数会随时间变，缓存一份旧的没有意义
-    shared().wbSystemInfoPane?.load?.(),
-  ])
+  await loadCategory(snapshot.category)
 }
 
 /* ─── 刷新按钮（各自的 toast 文案照旧） ─────── */

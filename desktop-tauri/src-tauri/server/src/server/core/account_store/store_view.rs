@@ -195,6 +195,19 @@ impl AccountStore {
         self.snapshot(&state, Visibility::All)
     }
 
+    /// 诊断页只需要计数，不构造公开账号、代理说明和提供商摘要。
+    pub fn diagnostic_counts(&self) -> (usize, usize, usize) {
+        let state = self.read_state();
+        let now = crate::server::logging::now_ms();
+        let enabled = state.accounts.iter().filter(|a| a.enabled()).count();
+        let limited = state.accounts.iter().filter(|a| {
+            a.get("rateLimits").and_then(Value::as_object).map_or(false, |limits| {
+                limits.values().any(|info| info.get("resetAt").and_then(Value::as_i64).map_or(false, |reset| reset > now))
+            })
+        }).count();
+        (state.accounts.len(), enabled, limited)
+    }
+
     /// 界面用的账号快照：**只含此刻真的能用的那些家**（判据见 [`account_visible`]）。
     ///
     /// 所有面向用户的账号入口都应走这一条（`/api/session`、`/api/accounts`、

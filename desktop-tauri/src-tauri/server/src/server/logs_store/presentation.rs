@@ -204,7 +204,7 @@ impl serde::Serialize for ContextField<'_> {
 /// 分页本身。分组总数仍按全量算（分页器需要它），但页外组只留
 /// first/last/count 这几个标量。
 pub fn groups_paged(
-    entries: Vec<LogEntry>,
+    entries: impl IntoIterator<Item = LogEntry>,
     aggregate: bool,
     offset: usize,
     limit: usize,
@@ -212,20 +212,21 @@ pub fn groups_paged(
     const WINDOW_MS: i64 = 30_000;
 
     if !aggregate {
-        let grouped = entries.len();
-        let groups = entries
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|entry| LogGroup {
+        let mut grouped = 0;
+        let mut groups = Vec::new();
+        for entry in entries {
+            let index = grouped;
+            grouped += 1;
+            if index < offset || index >= offset.saturating_add(limit) { continue; }
+            groups.push(LogGroup {
                 id: entry.id,
                 first_ts: entry.ts,
                 last_ts: entry.ts,
                 count: 1,
                 entries: vec![entry.clone()],
                 entry,
-            })
-            .collect();
+            });
+        }
         return (grouped, groups);
     }
 

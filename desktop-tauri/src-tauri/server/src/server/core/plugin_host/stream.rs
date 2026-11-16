@@ -128,12 +128,13 @@ impl UsageSniffer {
             self.done |= complete;
             return;
         }
-        if ![b"usage".as_slice(), b"error".as_slice()]
+        if ![b"usage".as_slice(), b"error".as_slice(), b"model".as_slice()]
             .iter().any(|field| self.data.windows(field.len()).any(|window| window == *field))
         {
             return;
         }
         let Ok(chunk) = serde_json::from_slice::<Value>(&self.data) else { return };
+        telemetry.observe_response_model(&chunk, "plugin");
         if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
             telemetry.report_usage(usage);
         }
@@ -399,5 +400,25 @@ impl Drop for RpcStream {
                 host.abort(id).await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod model_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn model_only_plugin_frames_are_observed_without_usage_and_stay_with_their_attempt() {
+        let telemetry = RequestTelemetry::new();
+        telemetry.note_attempt_started("plugin-a", "a");
+        let mut sniffer = UsageSniffer::default();
+        for part in [b"data: {\"mo".as_slice(), b"del\":\"plugin-model\"}\n\n"] {
+            sniffer.feed(part, &telemetry);
+        }
+        telemetry.note_attempt_started("plugin-b", "b");
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.attempts_detail[0].response_models, vec!["plugin-model"]);
+        assert_eq!(snapshot.attempts_detail[0].response_model_source, "plugin");
+        assert!(snapshot.attempts_detail[1].response_models.is_empty());
     }
 }

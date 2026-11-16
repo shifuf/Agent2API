@@ -91,7 +91,7 @@ impl AnthropicToChatStream {
             })
         });
         let guarded = super::stall::idle_guard(
-            Box::pin(described),
+            super::model_trace::observe(Box::pin(described), telemetry.clone()),
             Duration::from_millis(crate::server::config::timeout_settings().stream_idle_ms()),
         );
         Self {
@@ -191,7 +191,7 @@ impl AiSdkNdjsonToChatStream {
             })
         });
         let guarded = super::stall::idle_guard(
-            Box::pin(described),
+            super::model_trace::observe(Box::pin(described), telemetry.clone()),
             Duration::from_millis(crate::server::config::timeout_settings().stream_idle_ms()),
         );
         Self {
@@ -298,7 +298,7 @@ impl ChatglmToChatStream {
             })
         });
         let guarded = super::stall::idle_guard(
-            Box::pin(described),
+            super::model_trace::observe(Box::pin(described), telemetry.clone()),
             Duration::from_millis(crate::server::config::timeout_settings().stream_idle_ms()),
         );
         Self {
@@ -402,7 +402,7 @@ impl AntigravityToChatStream {
             })
         });
         let guarded = super::stall::idle_guard(
-            Box::pin(described),
+            super::model_trace::observe(Box::pin(described), telemetry.clone()),
             Duration::from_millis(crate::server::config::timeout_settings().stream_idle_ms()),
         );
         Self {

@@ -299,6 +299,10 @@ pub struct AttemptDetail {
     pub member_id: String,
     #[serde(default)]
     pub model: String,
+    #[serde(rename = "responseModels", default)]
+    pub response_models: Vec<String>,
+    #[serde(rename = "responseModelSource", default)]
+    pub response_model_source: String,
     #[serde(default)]
     pub reasoning: String,
     #[serde(default)]
@@ -576,6 +580,8 @@ impl NewRequestEntry {
                     candidate_id: item.candidate_id,
                     member_id: item.member_id,
                     model: item.model.trim().to_string(),
+                    response_models: item.response_models,
+                    response_model_source: item.response_model_source,
                     reasoning: item.reasoning.trim().to_string(),
                     reason: item.reason,
                     sticky_hit: item.sticky_hit,

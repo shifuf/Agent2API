@@ -797,6 +797,11 @@ impl RequestStats {
     /// 存储概况显示「请求记录 N 条 / 报表 N 天」）；库不可用时那两个值都是 0，
     /// 而 `storage_api` 会同时给出 `available: false`，界面据此显示「—」
     /// 而不是一排看着正常的 0（0 与「真的没有数据」在数字上无法区分）。
+    pub fn count(&self) -> usize {
+        let guard = self.guard();
+        self.with_conn(&guard, sql::count_all).unwrap_or(0)
+    }
+
     pub fn stats(&self) -> Value {
         let loaded = {
             let guard = self.guard();

@@ -453,7 +453,10 @@ const ACCOUNTS_MODEL_API: AccountsModelApi = {
 export function installAccountsApi(): void {
   installListRefresh()
   window.wbAccountsView = {
-    render: () => { syncAccountSorting(); bump() },
+    render: () => {
+      if (document.hidden || shared().wbApp?.currentPage !== 'accounts') return
+      syncAccountSorting(); bump()
+    },
     refreshList,
     refreshCaches,
     syncConnections,

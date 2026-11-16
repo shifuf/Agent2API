@@ -508,6 +508,7 @@ pub type LiveSink = Arc<dyn Fn(&TelemetrySnapshot) + Send + Sync>;
 /// 即可，计时读侧自己算。
 #[derive(Default, PartialEq)]
 struct LiveStamp {
+    response_models: usize,
     provider: String,
     account_id: String,
     account_name: String,
@@ -535,6 +536,7 @@ impl LiveStamp {
     fn of(snapshot: &TelemetrySnapshot) -> Self {
         let last = snapshot.attempts_detail.last();
         Self {
+            response_models: last.map(|item| item.response_models.len()).unwrap_or(0),
             provider: snapshot.provider.clone().unwrap_or_default(),
             account_id: snapshot.account_id.clone(),
             account_name: snapshot.account_name.clone(),
@@ -599,6 +601,26 @@ impl Default for RequestTelemetry {
 }
 
 impl RequestTelemetry {
+    /// Only upstream declarations, never a requested-model fallback or translated frame.
+    pub fn observe_response_model(&self, value: &Value, source: &str) {
+        let mut models = Vec::new();
+        for path in ["/model", "/response/model", "/message/model", "/modelVersion", "/response/modelVersion"] {
+            if let Some(model) = value.pointer(path).and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty() && m.len() <= 512) {
+                if !models.contains(&model) { models.push(model); }
+            }
+        }
+        if models.is_empty() { return; }
+        let mut guard = self.lock();
+        let Some(last) = guard.current_attempt_mut() else { return; };
+        for model in models {
+            if last.response_models.len() < 8 && !last.response_models.iter().any(|m| m == model) {
+                last.response_models.push(model.to_string());
+            }
+        }
+        last.response_model_source = source.to_string();
+        self.flush_live(&guard);
+    }
+
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(TelemetrySnapshot::default()),

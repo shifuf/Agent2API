@@ -395,21 +395,22 @@ impl LogStore {
         let computed = self.with_conn(&guard, |conn| -> rusqlite::Result<QueryResult> {
             let total = sql::count_all(conn)?;
             let last_id = sql::max_id(conn)?;
-            let filtered = sql::select_matching_desc(conn, &plan)?;
-            let matched = filtered.len();
+            let mut matched = 0;
             let mut counts: std::collections::HashMap<String, i64> =
                 std::collections::HashMap::new();
-            for entry in &filtered {
-                *counts.entry(entry.level.clone()).or_insert(0) += 1;
-            }
+            let (grouped, groups) = sql::with_matching_desc(conn, &plan, |entries| {
+                let entries = entries.inspect(|entry| {
+                    matched += 1;
+                    *counts.entry(entry.level.clone()).or_insert(0) += 1;
+                });
+                presentation::groups_paged(entries, query.aggregate, query.offset, limit)
+            })?;
             let by_level = level_map(LEVELS.iter().map(|level| {
                 (
                     (*level).to_string(),
                     counts.get(*level).copied().unwrap_or(0),
                 )
             }));
-            let (grouped, groups) =
-                presentation::groups_paged(filtered, query.aggregate, query.offset, limit);
             let entries = groups.iter().map(|group| group.entry.clone()).collect();
             Ok(QueryResult {
                 entries,

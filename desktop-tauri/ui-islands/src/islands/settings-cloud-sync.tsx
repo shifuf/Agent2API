@@ -54,7 +54,7 @@ import {
 type Busy = 'load' | 'test' | 'save' | 'upload' | 'download' | 'remote' | 'key' | null
 type DialogKind = 'upload' | 'download' | 'key' | null
 
-export function CloudSyncPanel() {
+export function CloudSyncPanel({ active = true }: { active?: boolean }) {
   const bridge = shared().workbuddyDesktop
   const [view, setView] = React.useState<CloudSyncView | null>(null)
   const [form, setForm] = React.useState<Form>(emptyForm)
@@ -112,6 +112,7 @@ export function CloudSyncPanel() {
   }, [])
 
   React.useEffect(() => {
+    if (!active) return
     const reload = () => {
       if (busyRef.current !== null && busyRef.current !== 'load') return
       void load(true, true)
@@ -123,7 +124,7 @@ export function CloudSyncPanel() {
       window.removeEventListener('wb:settings-load', reload)
       if (typeof unsubscribe === 'function') unsubscribe()
     }
-  }, [load])
+  }, [load, active])
 
   const patch = (changes: Partial<Form>) => {
     setForm(current => ({ ...current, ...changes }))

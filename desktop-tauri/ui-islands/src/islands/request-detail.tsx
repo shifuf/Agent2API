@@ -44,15 +44,11 @@ import type { ReplayRow, RouteDecision } from './routing-types'
  *      「请求发生时开关没开」，其次是已被清理 —— 都不是错误。
  *   ④ 原始报文 —— 调试模式保存的**上游**原始报文（`getDebugTraffic` 的四段：
  *      请求头 / 请求体 / 响应头 / 响应体，凭据已脱敏），原样保留为四块竖排。
- *      调试模式没开（或该条已被淘汰出最近 500 条）时**整个标签隐藏** ——
- *      它本来就是可选的排障数据，缺了不该让用户在空标签里找内容。
+ *      调试模式没开或正文已清理时显示空态。
  *
  * ── 迁移里最需要保持的三条取舍 ──────────────────────────────
- *   · 两个接口在 open 时**并行**发起，谁到了渲染谁（各自动自己那块与标签条，
- *     互不阻塞）；
- *   · **切换标签不发任何请求**，只切显示 —— 四个 pane 始终挂载、用 hidden 切
- *     display，pane 里的 DOM（含气泡里 <details> 的展开态）原样保留；滚动位置
- *     另由 scrollTops 记 / 还原（display:none 会把滚动容器的高度塌掉、归零）；
+ *   · 每种正文在首次进入对应标签时读取一次；详情首屏不读取正文。
+ *   · 正文 DOM 只在标签可见时挂载，滚动位置由 scrollTops 记 / 还原。
  *   · 快速连点两条详情时**只认最后一次 open**（模块级 seq 作 token），
  *     迟到的旧响应一律丢弃。
  *
@@ -84,6 +80,11 @@ const DEFAULT_TAB: TabKey = 'detail'
 
 /** 尝试明细的一行（后端 AttemptDetail 里用得到的字段） */
 type AttemptDetail = {
+  model?: string
+  reasoning?: string
+  reason?: string
+  responseModels?: string[]
+  responseModelSource?: string
   provider?: string
   providerLabel?: string
   account?: string
@@ -411,7 +412,7 @@ function AttemptsTable({ row }: { row: RequestRow }) {
     <Table className='text-[11.5px]'>
       <TableHeader>
         <TableRow className={NO_HOVER}>
-          {[t('轮次'), t('提供商'), t('账号'), t('结果'), t('体积'), t('内部重试'), t('提示')].map(label => (
+          {[t('轮次'), t('提供商'), t('账号'), t('模型溯源'), t('结果'), t('体积'), t('内部重试'), t('提示')].map(label => (
             <TableHead key={label} className={ATTEMPT_HEAD}>{label}</TableHead>
           ))}
         </TableRow>
@@ -448,6 +449,16 @@ function AttemptsTable({ row }: { row: RequestRow }) {
                 {providerName(item) || (item?.provider ? String(item.provider) : t('未知'))}
               </TableCell>
               <TableCell className={ATTEMPT_CELL}>{item?.account ? String(item.account) : '—'}</TableCell>
+              <TableCell className={`${ATTEMPT_CELL} min-w-40 break-all`}>
+                <div>{t('发送模型')}: {item.model || '—'}{item.reasoning ? ` (${item.reasoning})` : ''}</div>
+                <div>{t('响应模型')}: {item.responseModels?.length ? item.responseModels.join(', ') : t('未采集到')}</div>
+                {item.responseModels?.length ? <div className='text-muted-foreground'>
+                  {item.responseModelSource === 'plugin' ? t('来源：插件返回') : t('来源：上游原始响应')}
+                </div> : null}
+                {item.model && item.responseModels?.some(model => model !== item.model)
+                  ? <div className='text-warning'>{t('模型名称不一致，请核对别名或上游路由')}</div> : null}
+                {item.reason ? <div className='text-muted-foreground'>{item.reason}</div> : null}
+              </TableCell>
               <TableCell className={ATTEMPT_CELL}>{attemptResult(item)}</TableCell>
               <TableCell className={`${ATTEMPT_CELL} whitespace-nowrap`} title={bodyTitle}>
                 {bodyText}
@@ -461,7 +472,7 @@ function AttemptsTable({ row }: { row: RequestRow }) {
         })}
         {details.length < attempts ? (
           <TableRow className={NO_HOVER}>
-            <TableCell colSpan={7} className={`${ATTEMPT_CELL} text-muted-foreground`}>
+            <TableCell colSpan={8} className={`${ATTEMPT_CELL} text-muted-foreground`}>
               {t('另有 {missing} 次尝试未记录明细（只保留最早的 {kept} 条）', {
                 missing: attempts - details.length, kept: details.length,
               })}
@@ -556,7 +567,9 @@ export function RequestDetailPane({ row }: { row: RequestRow | null }) {
             </div>
           ) : '—'}
         </Field>
-        <Field label={t('尝试明细')}><AttemptsTable row={row} /></Field>
+        <Field label={t('尝试明细')}><div className='min-w-0 overflow-x-auto'><AttemptsTable row={row} />
+          <p className='mt-2 text-[11.5px] text-muted-foreground'>{t('响应模型是上游或插件声明的名称，不能证明实际模型身份；旧记录及未返回模型字段的响应无法追溯。')}</p>
+        </div></Field>
         <Field label={t('敏感词')}>
           {/* 命中标签（与列表「敏」标签同一套紫，这里展开写词与次数） */}
           {Array.isArray(row.sensitiveHits) && row.sensitiveHits.length ? (
@@ -590,6 +603,7 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
   const [debug, setDebug] = React.useState<DebugState>(null)
   const [hint, setHint] = React.useState('—')
   const [terminate, setTerminate] = React.useState<TerminateState>('idle')
+  const requested = React.useRef({ preview: false, raw: false })
 
   /** 卸载标志：await 期间用户关了窗（或换了壳），回来的响应一律丢弃 */
   const aliveRef = React.useRef(true)
@@ -618,7 +632,7 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
     }
   }
 
-  /** 上游调试报文（标签 ③）：确认有内容才亮出标签；没有（404 等）标签整体隐藏 */
+  /** 上游调试报文：进入标签才读取，无正文时显示空态。 */
   async function loadDebug() {
     try {
       const response = await api().getDebugTraffic(id)
@@ -642,14 +656,25 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
     }
   }
 
-  // 打开即并行拉两个数据源（旧实现的 open() 同样是打头就发两条）
+  // 详情首屏只使用列表元数据；正文访问对应标签时才读取。
   React.useEffect(() => {
     aliveRef.current = true
-    if (id) { void loadRaw(); void loadDebug() }
-    else { setRaw('gone'); setDebug('gone') }
+    if (!id) { setRaw('gone'); setDebug('gone') }
     return () => { aliveRef.current = false }
     // 只在挂载时拉一次：本岛是「打开时建、关闭即卸」，id 不会中途变
   }, [])
+
+  React.useEffect(() => {
+    if (!id) return
+    if (active === 'preview' && !requested.current.preview) {
+      requested.current.preview = true
+      void loadRaw()
+    }
+    if (active === 'raw' && !requested.current.raw) {
+      requested.current.raw = true
+      void loadDebug()
+    }
+  }, [active, id])
 
   /**
    * 还原当前 pane 的滚动位置：切换标签只改 hidden（display:none），pane 的 DOM 原样
@@ -661,9 +686,8 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
     if (body) body.scrollTop = scrollTops.current[active]
   }, [active])
 
-  /** 切换标签：只切显示，不发请求、不重建 pane */
+  /** 记住各标签滚动位置；正文标签按需读取与渲染。 */
   function switchTab(next: TabKey) {
-    if (next === 'raw' && !isPlainObject(debug)) return // 标签还没出现，点不到就不用防
     if (next === 'route' && !hasRoute(row)) return
     if (next === active) return
     const body = bodyRef.current
@@ -706,7 +730,7 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
     }
   }
 
-  const showRaw = isPlainObject(debug)
+  const showRaw = !!id
   const showRoute = hasRoute(row)
   // 选项集合只在「原始报文 / 路由回放是否可用」翻转时换引用，免得每次渲染都换数组把
   // 分段控件的测量 effect 打醒
@@ -725,17 +749,18 @@ function RequestDetail({ id, row, token, onClose }: RequestDetailProps) {
         <DialogBody ref={bodyRef} className='gap-3'>
           <SegmentedControl options={tabOptions} value={active} onValueChange={switchTab}
             aria-label={t('详情内容')} className='self-start' />
-          {/* 四个 pane 常驻（用 hidden 切显示，不卸载）：切换标签时 pane 的 DOM 与展开态
-              原样保留，滚动位置由上面的 layout effect 还原。pane 不标 role="tabpanel" ——
+          {/* 元数据 pane 保留展开态，正文 pane 只在可见时挂载，避免隐藏 DOM 留存大报文。
+              滚动位置由上面的 layout effect 还原。pane 不标 role="tabpanel" ——
               分段控件是 radiogroup 语义（不是 tablist），孤立的 tabpanel 是残缺结构 */}
           <section hidden={active !== 'detail'}><RequestDetailPane row={row} /></section>
           {showRoute ? (
             <section hidden={active !== 'route'}><RequestRoutePane row={row} /></section>
           ) : null}
-          <section hidden={active !== 'preview'}><PreviewPane state={raw} /></section>
-          {showRaw ? (
-            <section hidden={active !== 'raw'}>
-              <RawPane data={(debug as { data: DebugTraffic }).data} />
+          {active === 'preview' ? <section><PreviewPane state={raw} /></section> : null}
+          {active === 'raw' ? (
+            <section>
+              {debug && debug !== 'gone' ? <RawPane data={debug.data} />
+                : <Empty text={debug === 'gone' ? t('这条请求没有保存这一段报文') : t('正在读取…')} />}
             </section>
           ) : null}
         </DialogBody>

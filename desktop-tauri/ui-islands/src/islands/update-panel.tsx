@@ -1161,7 +1161,6 @@ function UpdatePanel() {
   // 重载），把进度轮询收掉 —— 悬挂的定时器会一直按 1 秒打后端
   React.useEffect(() => () => { stopPolling() }, [])
   // 头部那句「GitHub Token 未填写」的首次读数（之后由 load 与弹窗关闭刷新）
-  React.useEffect(() => { void refreshTokenHint() }, [])
 
   // 作者主页与项目仓库都指向**源码仓库**：安装包放在借来的构建账号下，
   // 那个账号的主页没有代码也没有 issue，不能拿来当「关于作者」的落点

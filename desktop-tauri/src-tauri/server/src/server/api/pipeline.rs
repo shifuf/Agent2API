@@ -446,6 +446,8 @@ fn stored_attempt_details(list: &[usage::AttemptDetail]) -> Vec<AttemptDetail> {
             candidate_id: item.candidate_id.clone(),
             member_id: item.member_id.clone(),
             model: item.model.clone(),
+            response_models: item.response_models.clone(),
+            response_model_source: item.response_model_source.clone(),
             reasoning: item.reasoning.clone(),
             reason: item.reason.clone(),
             sticky_hit: item.sticky_hit,

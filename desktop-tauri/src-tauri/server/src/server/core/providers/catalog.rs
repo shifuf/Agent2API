@@ -108,6 +108,18 @@ pub(crate) fn managed_manifests(store: &AccountStore) -> Vec<(String, Vec<Value>
         .collect()
 }
 
+/// 诊断计数不需要补齐 models.dev 元数据或应用能力覆盖。
+pub(crate) fn managed_model_count(store: &AccountStore) -> usize {
+    let accounts = store.routing_snapshot();
+    all_provider_ids().into_iter().filter(|id| accounts.available_providers.contains(id))
+        .map(|provider| {
+            let Some(adapter) = adapter_by_id(&provider) else { return 0; };
+            adapter.list_models().into_iter().chain(model_rules::custom_models_for(&provider))
+                .map(|model| model_id(&model).to_lowercase()).filter(|id| !id.is_empty())
+                .collect::<std::collections::HashSet<_>>().len()
+        }).sum()
+}
+
 pub fn active_manifests(store: &AccountStore) -> Vec<(String, Vec<Value>)> {
     managed_manifests(store).into_iter().filter_map(|(provider, manifest)| {
         let manifest = adapter_by_id(&provider)

@@ -72,6 +72,7 @@ pub mod sse;
 pub mod stall;
 pub mod translate;
 pub mod usage;
+pub mod model_trace;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -640,7 +641,7 @@ impl ForwardStream {
         // 流式响应空闲超时（设置页「请求超时」第三项）：逐分片计时，
         // 收到新数据即重置；计时器在流启动时就武装（见 stall 的模块头）
         let guarded = stall::idle_guard(
-            Box::pin(inner),
+            model_trace::observe(Box::pin(inner), telemetry.clone()),
             std::time::Duration::from_millis(
                 crate::server::config::timeout_settings().stream_idle_ms(),
             ),

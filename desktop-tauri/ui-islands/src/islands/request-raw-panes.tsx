@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Button, Empty, HtmlContent, Spinner } from '@ui'
 import { t } from '../i18n'
+import { exceedsPreviewBudget, PREVIEW_LIMIT } from './request-preview-budget'
 
 export type RawBody = Record<string, unknown>
 export type DebugTraffic = Record<string, unknown>
@@ -20,6 +21,16 @@ const DEBUG_SEGS = [
   { label: t('响应体'), pick: (data: DebugTraffic) => data.responseBody ? String(data.responseBody) : '' },
 ]
 
+async function copyBody(text: string) {
+  const app = window as unknown as { copyToClipboard?: (value: string) => Promise<boolean>; toast?: (text: string, kind?: string) => void }
+  let ok = false
+  try {
+    if (app.copyToClipboard) ok = await app.copyToClipboard(text)
+    else { await navigator.clipboard.writeText(text); ok = true }
+  } catch { /* Present clipboard failures instead of dropping a rejected promise. */ }
+  app.toast?.(ok ? t('已复制') : t('复制失败，请手动选择复制'), ok ? undefined : 'err')
+}
+
 export function hasDebugTraffic(data: DebugTraffic): boolean {
   return [data.requestHeaders, data.requestBody, data.responseHeaders, data.responseBody]
     .some(value => typeof value === 'string' ? value.trim() !== '' : value != null)
@@ -35,12 +46,19 @@ export function RequestEmpty({ text, loading = false }: { text: string; loading?
 }
 
 export function PreviewPane({ state }: { state: RawState }) {
-  if (!state) return <RequestEmpty text={t('正在读取…')} loading />
-  const body = state === 'gone' ? null : state.body
+  const body = !state || state === 'gone' ? null : state.body
   const bridge = window as unknown as {
     wbConversationPreview?: { render?: (request: unknown, response: unknown) => string }
   }
-  const html = body ? bridge.wbConversationPreview?.render?.(body.requestBody, body.responseBody) || '' : ''
+  const oversized = React.useMemo(() => !!body && exceedsPreviewBudget([body.requestBody, body.responseBody]), [body])
+  const html = React.useMemo(() => body && !oversized
+    ? bridge.wbConversationPreview?.render?.(body.requestBody, body.responseBody) || '' : '', [body, oversized])
+  if (!state) return <RequestEmpty text={t('正在读取…')} loading />
+  if (oversized && body) return <div className='flex flex-col gap-3'>
+    <RequestEmpty text={t('正文过大，已暂停对话预览；可复制已保存正文查看。')} />
+    {state !== 'gone' && state.truncated ? <div className='text-warning'>{t('旧版本保存的正文可能已截断，无法恢复缺失内容')}</div> : null}
+    <Button variant='outline' onClick={() => { void copyBody(jsonText(body)) }}>{t('复制')}</Button>
+  </div>
   if (!html) return <RequestEmpty text={t('无报文原文（未开启「调试模式」，或已被清理）')} />
   return (
     <div>
@@ -72,12 +90,14 @@ export function RawPane({ data }: { data: DebugTraffic }) {
           <div key={seg.label} className='flex min-w-0 flex-col gap-1.5'>
             <div className='flex items-center gap-2'>
               <h3 className='text-[11.5px] font-semibold tracking-[.02em] text-muted-foreground'>{seg.label}</h3>
-              {text && <Button variant='outline' size='xs' className='ml-auto' data-copy={text}>{t('复制')}</Button>}
+              {text && <Button variant='outline' size='xs' className='ml-auto'
+                onClick={() => { void copyBody(text) }}>{t('复制')}</Button>}
             </div>
             {text ? (
               <pre tabIndex={0} aria-label={seg.label}
                 className='m-0 max-h-80 overflow-auto rounded-md border border-border bg-surface-2 p-[10px_12px] font-mono text-[11.5px] leading-[1.6] whitespace-pre-wrap text-subtle [overflow-wrap:anywhere]'>
-                {text}
+                {text.slice(0, PREVIEW_LIMIT)}
+                {text.length > PREVIEW_LIMIT ? `\n${t('显示内容已截断，复制可获取完整正文。')}` : ''}
               </pre>
             ) : <RequestEmpty text={t('这条请求没有保存这一段报文')} />}
           </div>

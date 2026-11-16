@@ -77,12 +77,14 @@ pub async fn get_traffic(State(_state): State<ServerState>, Query(params): Query
     if id.is_empty() {
         return errors::management_error(400, "缺少 id");
     }
-    match debug_traffic::get(id) {
-        Some(entry) => ok_json(debug_traffic::detail_payload(&entry)),
-        None => errors::management_error(
+    let id = id.to_string();
+    match tokio::task::spawn_blocking(move || debug_traffic::get(&id).map(|entry| debug_traffic::detail_payload(&entry))).await {
+        Ok(Some(payload)) => ok_json(payload),
+        Ok(None) => errors::management_error(
             404,
             "该请求没有保存原始报文（调试模式当时未开启，或记录已超出保留条数）",
         ),
+        Err(error) => errors::management_error(500, format!("调试报文读取失败: {error}")),
     }
 }
 

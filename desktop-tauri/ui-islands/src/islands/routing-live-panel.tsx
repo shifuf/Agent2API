@@ -3,7 +3,7 @@ import { Badge, Button, Spinner, StatusDot } from '@ui'
 import { t } from '../i18n'
 import { formatDuration, RouteIcon, stickyLabel, strategyLabel } from './routing-ui'
 import { RoutingStateText } from './routing-state-text'
-import type { RouteEntry, RoutePreview } from './routing-types'
+import { host, type RouteEntry, type RoutePreview } from './routing-types'
 
 /** 服务端只读预演；紧凑摘要与完整候选共用同一结果。 */
 export function RoutingLivePanel({ workspace, model, loading, error, dirty, globalScope, modelsAvailable, onOpenScope, onRefresh, preview = false, compact = false }: {
@@ -21,7 +21,9 @@ export function RoutingLivePanel({ workspace, model, loading, error, dirty, glob
 }) {
   const [now, setNow] = React.useState(() => Date.now())
   React.useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    const timer = window.setInterval(() => {
+      if (!document.hidden && host().wbApp?.currentPage === 'routing') setNow(Date.now())
+    }, 1000)
     return () => window.clearInterval(timer)
   }, [])
 

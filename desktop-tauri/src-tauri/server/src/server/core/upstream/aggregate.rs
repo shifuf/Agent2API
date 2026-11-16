@@ -77,7 +77,7 @@ pub async fn aggregate_sse_completion(
         }
         item
     });
-    aggregate_frame_stream(Box::pin(stream), telemetry, policy).await
+    aggregate_frame_stream(super::model_trace::observe(Box::pin(stream), telemetry.clone()), telemetry, policy).await
 }
 
 /// 聚合一条**标准 chat SSE** 字节流（不限定来源）。

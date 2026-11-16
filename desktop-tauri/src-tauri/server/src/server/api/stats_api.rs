@@ -217,7 +217,11 @@ pub async fn stats_summary(State(state): State<ServerState>, Query(params): Quer
 /// 收尾后由终态记账覆盖。status 过滤也认 `running` 值（只看进行中）。
 pub async fn stats_requests(State(state): State<ServerState>, Query(params): Query<Params>) -> Response {
     let filter = match checked_filter(&params) { Ok(value) => value, Err(response) => return response };
-    ok_json(state.request_stats().query_requests(&filter))
+    let stats = state.request_stats().clone();
+    match tokio::task::spawn_blocking(move || stats.query_requests(&filter)).await {
+        Ok(result) => ok_json(result),
+        Err(error) => errors::management_error(500, format!("请求日志读取失败: {error}")),
+    }
 }
 
 /// 从查询串解析筛选条件 —— GET / DELETE / clear-preview 三条路由共用同一份
@@ -357,9 +361,12 @@ pub async fn stats_request_raw(
     let Some(id) = text_of(&params, "id") else {
         return errors::management_error(400, "缺少 id 参数");
     };
-    match state.request_stats().raw_body(&id) {
-        Some(value) => ok_json(value),
-        None => errors::management_error(404, format!("未找到该请求的原始报文（id: {id}）")),
+    let stats = state.request_stats().clone();
+    let lookup_id = id.clone();
+    match tokio::task::spawn_blocking(move || stats.raw_body(&lookup_id)).await {
+        Ok(Some(value)) => ok_json(value),
+        Ok(None) => errors::management_error(404, format!("未找到该请求的原始报文（id: {id}）")),
+        Err(error) => errors::management_error(500, format!("原始报文读取失败: {error}")),
     }
 }
 

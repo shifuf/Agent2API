@@ -1877,7 +1877,7 @@ function DataPane({ snap }: { snap: SettingsSnapshot }) {
           数据流（它只读写 /api/cloud-sync，与设置页其它面板没有状态交集）。
           排在「整库备份 / 恢复」之前 —— 两者都是「整份数据搬来搬去」的语义，
           云同步更常用，放上面。 */}
-      <CloudSyncPanel />
+      <CloudSyncPanel active={snap.category === 'data'} />
 
       <DatabaseBackupPanel />
 
@@ -2343,6 +2343,7 @@ function LanDialog({ confirm, register }: { confirm: LanConfirm; register: LanRe
 function useAdminPanels(category: string): Set<string> {
   const [panels, setPanels] = React.useState<Set<string>>(() => new Set())
   React.useEffect(() => {
+    if (category !== 'gateway') return
     let cancelled = false
     void (async () => {
       try {

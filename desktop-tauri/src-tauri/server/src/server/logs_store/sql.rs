@@ -180,20 +180,60 @@ pub(super) fn select_matching_desc(
     conn: &Connection,
     plan: &FilterPlan,
 ) -> rusqlite::Result<Vec<LogEntry>> {
+    with_matching_desc(conn, plan, |entries| entries.collect())
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    #[test]
+    fn streamed_paging_preserves_unicode_filter_legacy_classification_and_group_windows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT, message TEXT, data TEXT);").unwrap();
+        for id in 1..=100 {
+            insert(&conn, &LogEntry { id, ts: id as i64 * 1000, level: "info".into(), category: "plugin".into(),
+                message: "[Plugin] [HTTP] GET https://example.test/ÉXITO".into(), data: Some(serde_json::json!({"account":"a"})) }).unwrap();
+        }
+        let query = Query { view: LogView::Debug, keyword: Some("éxito".into()), aggregate: true, offset: 1, limit: Some(1), ..Default::default() };
+        let plan = FilterPlan::of(&query);
+        let mut matched = 0;
+        let (total, groups) = with_matching_desc(&conn, &plan, |entries| {
+            presentation::groups_paged(entries.inspect(|_| matched += 1), true, 1, 1)
+        }).unwrap();
+        assert_eq!(matched, 100);
+        assert_eq!(total, 4);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, 69);
+        assert_eq!(groups[0].count, 31);
+        assert_eq!(groups[0].entries.last().unwrap().id, 39);
+        let (total, groups) = with_matching_desc(&conn, &plan, |entries| presentation::groups_paged(entries, false, 99, 10)).unwrap();
+        assert_eq!(total, 100);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, 1);
+    }
+}
+
+/// 在数据库游标上逐条归一、筛选，分页调用方不再持有整份历史正文。
+pub(super) fn with_matching_desc<T>(
+    conn: &Connection,
+    plan: &FilterPlan,
+    consume: impl FnOnce(&mut dyn Iterator<Item = LogEntry>) -> T,
+) -> rusqlite::Result<T> {
     let sql = format!(
         "SELECT {COLUMNS} FROM logs{} ORDER BY id DESC",
         plan.where_sql
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut rows = stmt.query(params_from_iter(plan.binds.iter()))?;
-    let mut entries = Vec::new();
-    while let Some(row) = rows.next()? {
-        let entry = decode_row(row)?;
-        if plan.matches(&entry) {
-            entries.push(entry);
-        }
-    }
-    Ok(entries)
+    let rows = stmt.query_map(params_from_iter(plan.binds.iter()), decode_row)?;
+    let mut failure = None;
+    let mut entries = rows.filter_map(|result| match result {
+        Ok(entry) => plan.matches(&entry).then_some(entry),
+        Err(error) => { failure = Some(error); None }
+    });
+    let result = consume(&mut entries);
+    drop(entries);
+    match failure { Some(error) => Err(error), None => Ok(result) }
 }
 
 pub(super) fn insert(conn: &Connection, entry: &LogEntry) -> rusqlite::Result<()> {

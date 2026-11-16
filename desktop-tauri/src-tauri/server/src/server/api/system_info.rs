@@ -56,6 +56,13 @@ pub async fn get_system_info(
         params.hide_username.as_deref().map(str::trim),
         Some("1") | Some("true") | Some("yes") | Some("on")
     );
+    match tokio::task::spawn_blocking(move || collect_system_info(&state, hide)).await {
+        Ok(info) => ok_json(info),
+        Err(error) => crate::server::errors::management_error(500, format!("系统信息读取失败: {error}")),
+    }
+}
+
+fn collect_system_info(state: &ServerState, hide: bool) -> Value {
     let show = |path: &Path| -> String {
         if hide {
             system_info::mask_path(path)
@@ -75,28 +82,12 @@ pub async fn get_system_info(
 
     // 库里的实际 schema 版本：库不可用时为 null（不拿程序常量冒充 —— 那会让
     // 「库没打开」看起来像「版本对得上」）。
-    let db_schema = if db_available {
-        db::stored_schema_version(&db_file)
-    } else {
-        None
-    };
+    let db_schema = state.db().and_then(|db| db.with(|conn| {
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).ok()
+    })).flatten();
 
     let snapshot = config::current();
-    let accounts = state.store().list_accounts();
-    let account_list = accounts
-        .get("accounts")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let account_count = account_list.len();
-    let enabled_accounts = account_list
-        .iter()
-        .filter(|item| item.get("enabled").and_then(Value::as_bool).unwrap_or(false))
-        .count();
-    let limited_accounts = account_list
-        .iter()
-        .filter(|item| is_rate_limited(item))
-        .count();
+    let (account_count, enabled_accounts, limited_accounts) = state.store().diagnostic_counts();
 
     let in_flight: usize = state
         .upstream()
@@ -106,16 +97,15 @@ pub async fn get_system_info(
         .map(|(_, count)| count)
         .sum();
 
-    let stats = state.request_stats().stats();
-    let requests = stats.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let requests = state.request_stats().count();
     let logs = crate::server::logging::store_ref()
-        .map(|store| store.stats().total)
+        .map(|store| store.len())
         .unwrap_or(0);
 
     let token_status = status_json();
     let has_update_proxy = config::update_proxy().is_some();
 
-    ok_json(json!({
+    json!({
         "app": {
             // 编译期版本：桌面壳会用它自己的运行时 package_info 覆盖显示，
             // 其余形态这就是唯一真值（与 `/api/update/check` 的缺省口径一致）
@@ -190,33 +180,12 @@ pub async fn get_system_info(
             "accounts": account_count,
             "enabledAccounts": enabled_accounts,
             "limitedAccounts": limited_accounts,
-            "models": crate::server::core::providers::catalog::managed_manifests(state.store())
-                .into_iter()
-                .map(|(_, models)| models.into_iter()
-                    .map(|model| crate::server::core::models::model_id(&model).to_lowercase())
-                    .filter(|id| !id.is_empty())
-                    .collect::<std::collections::HashSet<_>>().len())
-                .sum::<usize>(),
+            "models": crate::server::core::providers::catalog::managed_model_count(state.store()),
             "inFlight": in_flight,
             "requests": requests,
             "logs": logs,
             "upgradePending": state.upgrade_pending(),
         },
-    }))
-}
-
-/// 账号是否处于限流冷却（与前端 `isRateLimited` 同一判据：任一模型的
-/// `resetAt` 晚于当前时刻）。
-fn is_rate_limited(account: &Value) -> bool {
-    let Some(limits) = account.get("rateLimits").and_then(Value::as_object) else {
-        return false;
-    };
-    let now = crate::server::logging::now_ms();
-    limits.values().any(|info| {
-        info.get("resetAt")
-            .and_then(Value::as_i64)
-            .map(|reset| reset > now)
-            .unwrap_or(false)
     })
 }
 

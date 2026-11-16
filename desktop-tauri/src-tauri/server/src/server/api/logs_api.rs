@@ -119,9 +119,12 @@ pub async fn query_logs(State(_state): State<ServerState>, Query(params): Query<
 
     let query = match log_query(&params) { Ok(query) => query, Err(response) => return response };
 
-    let result = store.query(&query);
-    let mut data = match serde_json::to_value(&result) {
-        Ok(value) => value,
+    let result = tokio::task::spawn_blocking(move || serde_json::to_value(store.query(&query))).await;
+    let mut data = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            return crate::server::errors::management_error(500, format!("日志查询结果序列化失败: {error}"));
+        }
         Err(error) => {
             logging::log("[Logs]", &format!("❌ 日志查询结果序列化失败: {error}"));
             return raw_json(json!({ "success": false, "error": "日志查询失败" }));
@@ -139,8 +142,9 @@ pub async fn stats_logs(State(_state): State<ServerState>) -> Response {
         Ok(store) => store,
         Err(response) => return response,
     };
-    let mut data = match serde_json::to_value(store.stats()) {
-        Ok(value) => value,
+    let mut data = match tokio::task::spawn_blocking(move || serde_json::to_value(store.stats())).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return crate::server::errors::management_error(500, format!("日志统计序列化失败: {error}")),
         Err(error) => {
             logging::log("[Logs]", &format!("❌ 日志统计序列化失败: {error}"));
             return raw_json(json!({ "success": false, "error": "日志统计失败" }));

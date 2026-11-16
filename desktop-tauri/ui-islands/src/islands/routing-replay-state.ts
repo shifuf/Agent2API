@@ -61,7 +61,9 @@ export function useRoutingReplay(active: boolean, workspaceModel?: string) {
 
   React.useEffect(() => {
     if (!active) return
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    const timer = window.setInterval(() => {
+      if (!document.hidden && host().wbApp?.currentPage === 'routing') setNow(Date.now())
+    }, 1000)
     return () => window.clearInterval(timer)
   }, [active])
 
