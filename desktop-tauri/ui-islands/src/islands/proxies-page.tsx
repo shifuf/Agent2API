@@ -113,6 +113,9 @@
  */
 
 import * as React from 'react'
+import { ProxyGroups } from '../../../ui-shared/proxy-groups'
+import { accountRequest } from './add-account-bridge'
+const proxyGroupsActive = () => !document.hidden && wb().wbApp?.currentPage === 'proxies'
 import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import {
@@ -581,6 +584,7 @@ function ProxiesPage() {
       <div className='px-3 pt-3'>
         <KernelBar showPortRange />
       </div>
+      <ProxyGroups request={accountRequest} t={t} active={proxyGroupsActive} />
 
       {/* 工具条与批量条**共用一个槽位**：勾选后原地换成批量条，取消选择换回来 ——
           两条不叠着，表格不会因为多出一条状态带而整体下移。

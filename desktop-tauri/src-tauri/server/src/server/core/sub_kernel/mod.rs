@@ -276,6 +276,7 @@ pub fn spawn_worker() {
 }
 
 async fn execute(command: Command) {
+    let _operation = runtime::groups::CONTROL.lock().await;
     match command {
         Command::Restart(providers) => {
             // 启动 / 重启 = 用户明确要内核起来，手动关闭闩在此清零

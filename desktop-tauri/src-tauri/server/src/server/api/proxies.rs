@@ -498,7 +498,7 @@ fn listener_flow(
 /// 两条测试并发时后切的会把先切的覆盖掉，先测的那条就走了别人的出口 ——
 /// 前端本来同时只放行一条测试（其余按钮禁用），这把锁兜的是多入口（桌面 +
 /// headless 面板）与将来并发化的可能性。
-pub(super) static SUB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static SUB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn pool_test(state: &ServerState, body: &Bytes) -> Response {
     let payload = match parse_body(body) {

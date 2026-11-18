@@ -104,6 +104,10 @@ struct ClientCache {
 
 static CLIENTS: Mutex<Option<ClientCache>> = Mutex::new(None);
 
+pub(crate) fn invalidate_clients() {
+    *lock_clients() = None;
+}
+
 /// 缓存键：`协议://主机:端口`（不含凭证，理由见 ClientCache 的注释）。
 ///
 /// 直连（proxy 为 None）不在这里 —— 它走独立的 `DIRECT` 键，

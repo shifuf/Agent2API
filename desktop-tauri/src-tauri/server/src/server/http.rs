@@ -482,6 +482,11 @@ pub fn panel_router(state: ServerState) -> Router {
         // 到几十秒），写操作立即返回列表 + 内核快照，前端轮询看结果 ——
         // 契约详见 api::subscriptions 的模块头。
         .route("/api/subscriptions", any(api::subscriptions::entry))
+        .route("/api/subscriptions/groups", any(api::subscriptions::entry))
+        .route("/api/subscriptions/groups/members", any(api::subscriptions::entry))
+        .route("/api/subscriptions/groups/select", any(api::subscriptions::entry))
+        .route("/api/subscriptions/groups/test", any(api::subscriptions::entry))
+        .route("/api/subscriptions/groups/cancel", any(api::subscriptions::entry))
         .route("/api/subscriptions/add", any(api::subscriptions::entry))
         .route("/api/subscriptions/save", any(api::subscriptions::entry))
         .route("/api/subscriptions/refresh", any(api::subscriptions::entry))

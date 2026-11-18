@@ -155,7 +155,7 @@ export function KernelBar({ showPortRange = false }: { showPortRange?: boolean }
             {t('节点端口范围 {base}–{end}', { base: range.base, end: range.end })}
           </span>
         ) : null}
-        <div className='ml-auto flex items-center gap-2'>
+        <div className='ml-auto flex flex-wrap items-center gap-2'>
           <Button size='sm' variant='outline' disabled={(snapshot.pending || installBusy) && !importing}
             onClick={() => setImportOpen(true)}>{importing ? t('正在导入…') : t('手动导入内核')}</Button>
           {!status?.installed ? (

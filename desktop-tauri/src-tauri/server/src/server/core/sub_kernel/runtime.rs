@@ -47,6 +47,11 @@ use crate::server::core::sub_kernel::{
 };
 use crate::server::logging;
 
+#[path = "dependencies.rs"]
+mod dependencies;
+#[path = "runtime_groups.rs"]
+pub mod groups;
+
 /// 控制端口候选范围（避开 Clash Verge 默认的 7897 与常见 9090）
 const CONTROLLER_PORT_BASE: u16 = 19090;
 const CONTROLLER_PORT_END: u16 = 19099;
@@ -222,11 +227,30 @@ fn read_provider_nodes(provider_id: &str) -> Vec<String> {
     let Some(items) = parsed.get("proxies").and_then(Yaml::as_sequence) else {
         return Vec::new();
     };
-    items
+    let mut names: Vec<String> = items
         .iter()
         .filter_map(|item| item.get("name").and_then(Yaml::as_str).map(str::to_string))
         .filter(|name| !is_information_node(name))
-        .collect()
+        .collect();
+    let defs = read_provider_definitions(&[ProviderInput {
+        id: provider_id.to_string(), name: String::new(), url: String::new(), content: String::new(),
+    }]);
+    let group_defs = read_provider_groups(&[ProviderInput {
+        id: provider_id.to_string(), name: String::new(), url: String::new(), content: String::new(),
+    }]);
+    if let Ok((_, groups)) = dependencies::inline(&defs, &group_defs) {
+        let aliases: HashSet<_> = groups.iter().filter_map(|g| g["name"].as_str()).collect();
+        if let Some(groups) = parsed.get("proxy-groups").and_then(Yaml::as_sequence) {
+            for group in groups {
+                if let Some(name) = group.get("name").and_then(Yaml::as_str) {
+                    if aliases.contains(node_alias(provider_id, name).as_str()) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
 }
 
 /// 读各订阅缓存里的**节点定义**（`<订阅id>::<节点名>` → mihomo 的 proxy 条目）。
@@ -243,6 +267,14 @@ fn read_provider_nodes(provider_id: &str) -> Vec<String> {
 /// 取不到的条目直接跳过（不是错误）：形状认不出来的节点这轮开不了监听器，
 /// 池里照常显示它、端口留空，下一次重启再试。
 fn read_provider_definitions(providers: &[ProviderInput]) -> HashMap<String, Value> {
+    read_provider_entries(providers, "proxies")
+}
+
+fn read_provider_groups(providers: &[ProviderInput]) -> HashMap<String, Value> {
+    read_provider_entries(providers, "proxy-groups")
+}
+
+fn read_provider_entries(providers: &[ProviderInput], field: &str) -> HashMap<String, Value> {
     let dir = crate::server::core::sub_kernel::kernel_dir().join("providers");
     let mut defs: HashMap<String, Value> = HashMap::new();
     for provider in providers {
@@ -253,7 +285,7 @@ fn read_provider_definitions(providers: &[ProviderInput]) -> HashMap<String, Val
         let Ok(parsed) = serde_yaml::from_str::<Yaml>(&text) else {
             continue;
         };
-        let Some(items) = parsed.get("proxies").and_then(Yaml::as_sequence) else {
+        let Some(items) = parsed.get(field).and_then(Yaml::as_sequence) else {
             continue;
         };
         for item in items {
@@ -262,7 +294,7 @@ fn read_provider_definitions(providers: &[ProviderInput]) -> HashMap<String, Val
             };
             // 信息节点不进定义表：它会被内联进顶层 proxies（见 build_config），
             // 留着等于给测试组多塞几个永远连不通的假出口
-            if is_information_node(name) {
+            if field == "proxies" && is_information_node(name) {
                 continue;
             }
             // YAML → JSON：配置是 json! 拼出来再交给 serde_yaml 序列化的，定义也要
@@ -420,11 +452,12 @@ async fn poll_providers(
 /// Verge 的端口却是通的（那条路不经过本内核），所以现象是「订阅节点全测不通、
 /// Clash 节点都能测通」。
 ///
-/// 所以：`defs` 里有的节点，定义原样搬进顶层 `proxies`、只把 `name` 换成
+/// 所以：`defs` 里有的节点，定义搬进顶层 `proxies`、把 `name` 换成
 /// `wbn_<节点键哈希>`（**内部名**，与监听器名同一字符串 —— 一对一的节点身份，
 /// 顺带避开「两条订阅有同名节点」这种顶层 proxy 重名冲突），监听器 `proxy`
 /// 也指这个内部名。`proxy-providers` 保留：节点清单（池镜像 / 控制器查询）与
-/// 周期更新还是走它，只是不再被监听器直接引用。
+/// 周期更新还是走它，只是不再被监听器直接引用。`dialer-proxy` 及其依赖的
+/// 代理组成员也按同一订阅改写别名，保留完整代理链（见 dependencies 模块）。
 ///
 /// ── 内联是**全量**的（不只是分到端口的那批）──────────────────
 /// 统一测试口（见下）背后的策略组成员是**全部节点**——「测试」要能切到任何
@@ -446,6 +479,7 @@ fn build_config(
     test_port: u16,
     listeners: &[NodeTarget],
     defs: &HashMap<String, Value>,
+    groups: &HashMap<String, Value>,
 ) -> Result<String, String> {
     let mut proxy_providers = Map::new();
     for provider in providers {
@@ -480,20 +514,8 @@ fn build_config(
     }
     // 全量内联：defs 里有的节点全部进顶层（测试组要能切到任何一条）。
     // HashMap 遍历序随机，按 key 排序让配置输出稳定可对照。
-    let mut inline: Vec<(&String, &Value)> = defs.iter().collect();
-    inline.sort_by(|a, b| a.0.cmp(b.0));
-    let mut proxies: Vec<Value> = Vec::new();
-    let mut aliases: Vec<String> = Vec::new();
-    for (key, definition) in inline {
-        let Some(object) = definition.as_object() else {
-            continue;
-        };
-        let alias = alias_of_key(key);
-        let mut entry = object.clone();
-        entry.insert("name".to_string(), Value::String(alias.clone()));
-        aliases.push(alias);
-        proxies.push(Value::Object(entry));
-    }
+    let (proxies, mut proxy_groups) = dependencies::inline(defs, groups)?;
+    let aliases: Vec<Value> = proxies.iter().chain(proxy_groups.iter()).map(|proxy| proxy["name"].clone()).collect();
     let mut listener_list: Vec<Value> = listeners
         .iter()
         // 未分配端口的节点（lazy listeners：还没被账号引用）不进配置 ——
@@ -504,7 +526,7 @@ fn build_config(
             let key = node_key(&target.provider_id, &target.node);
             // 全量内联后这里的缺项只剩「两次读缓存之间节点没了」的兜底：
             // 跳过，不留死监听器
-            if !defs.contains_key(&key) {
+            if !defs.contains_key(&key) && !groups.contains_key(&key) {
                 return None;
             }
             Some(json!({
@@ -517,7 +539,6 @@ fn build_config(
         })
         .collect();
     // 统一测试口（没有节点时不生成：空策略组会让内核配置解析失败）
-    let mut proxy_groups: Vec<Value> = Vec::new();
     if !aliases.is_empty() {
         proxy_groups.push(json!({
             "name": TEST_GROUP_NAME,
@@ -659,6 +680,7 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
         provider_nodes.push((provider.id.clone(), read_provider_nodes(&provider.id)));
     }
     let mut defs = read_provider_definitions(providers);
+    let mut groups = read_provider_groups(providers);
 
     // ③ 端口分配：状态文件里沿用，缺了才现分配
     let mut state = read_state();
@@ -684,6 +706,7 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
         &state_ports(&state),
         &provider_nodes,
         &defs,
+        &groups,
         controller_port,
         test_port,
     )?;
@@ -699,6 +722,7 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
         &secret,
         &targets,
         &defs,
+        &groups,
     )
     .await?;
 
@@ -721,23 +745,28 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect();
-            if !latest.is_empty() {
+            if !latest.is_empty() && names.is_empty() {
                 *names = latest;
             }
         }
     }
     let latest_defs = read_provider_definitions(providers);
-    if provider_content_changed(&provider_nodes, &live_nodes, &defs, &latest_defs) {
+    let latest_groups = read_provider_groups(providers);
+    if provider_content_changed(&provider_nodes, &live_nodes, &defs, &latest_defs)
+        || groups != latest_groups
+    {
         // 释放本轮刚启动的监听器，再按注册表复用端口；否则会把自己的端口判成外部占用。
         stop_kernel().await;
         // 定义要**重新读**：首次拉取的缓存是这一轮才落地的（② 读时还没有），
         // 拿旧的那份会让新节点全都「没有定义」而分不到端口
         defs = latest_defs;
+        groups = latest_groups;
         let next_targets = allocate_listeners(
             providers,
             &state_ports(&state),
             &live_nodes,
             &defs,
+            &groups,
             controller_port,
             test_port,
         )?;
@@ -751,6 +780,7 @@ pub async fn run_restart(providers: &[ProviderInput]) -> Result<(), String> {
             &secret,
             &next_targets,
             &defs,
+            &groups,
         )
         .await?;
         final_targets = next_targets;
@@ -824,9 +854,11 @@ async fn restart_with_config(
     secret: &str,
     targets: &[NodeTarget],
     defs: &HashMap<String, Value>,
+    groups: &HashMap<String, Value>,
 ) -> Result<(), String> {
     let dir = crate::server::core::sub_kernel::kernel_dir();
-    let config = build_config(providers, controller_port, secret, test_port, targets, defs)?;
+    let config = build_config(providers, controller_port, secret, test_port, targets, defs, groups)?;
+    let config = groups::restore_config(&config, groups)?;
     std::fs::write(dir.join("config.yaml"), &config)
         .map_err(|error| format!("写入内核配置失败: {error}"))?;
 
@@ -936,7 +968,10 @@ pub async fn run_refresh(sub_id: &str, providers: &[ProviderInput]) -> Result<()
         .iter()
         .find(|provider| provider.id == sub_id)
         .ok_or_else(|| "订阅不存在".to_string())?;
-    let before: HashSet<String> = read_provider_nodes(sub_id).into_iter().collect();
+    let previous_defs = read_provider_definitions(std::slice::from_ref(provider));
+    let before: HashSet<String> = read_provider_nodes(sub_id).into_iter()
+        .filter(|name| previous_defs.contains_key(&node_key(sub_id, name)))
+        .collect();
     controller_put(
         controller_port,
         secret,
@@ -1261,6 +1296,7 @@ fn allocate_listeners(
     ports: &Map<String, Value>,
     provider_nodes: &[(String, Vec<String>)],
     defs: &HashMap<String, Value>,
+    groups: &HashMap<String, Value>,
     controller_port: u16,
     test_port: u16,
 ) -> Result<Vec<NodeTarget>, String> {
@@ -1288,7 +1324,7 @@ fn allocate_listeners(
             // 拿不到节点定义就开不出能用的监听器（见 build_config 的「内联」一节）：
             // 不给它端口，池里停在「未分配端口」，下一次重启（账号引用变化触发的
             // 补建）等缓存落地后再补 —— 给一个连不上的地址比留空更坏
-            if !defs.contains_key(&key) {
+            if !defs.contains_key(&key) && !groups.contains_key(&key) {
                 continue;
             }
             let port = match ports.get(&key).and_then(json_u16) {
@@ -1456,6 +1492,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configuration_preserves_dialer_proxy_between_renamed_nodes() {
+        let providers = vec![ProviderInput {
+            id: "chain".into(), name: "Chain".into(), url: String::new(),
+            content: "proxies: []".into(),
+        }];
+        let defs = HashMap::from([
+            (node_key("chain", "exit"), json!({"name":"exit","type":"http","server":"exit.example","port":8080,"dialer-proxy":"front"})),
+            (node_key("chain", "front"), json!({"name":"front","type":"http","server":"front.example","port":8080})),
+        ]);
+        let yaml = build_config(&providers, 19090, "secret", 19099, &[], &defs, &HashMap::new()).unwrap();
+        let config: Value = serde_yaml::from_str(&yaml).unwrap();
+        let proxies = config["proxies"].as_array().unwrap();
+        let exit = proxies.iter().find(|p| p["server"] == "exit.example").unwrap();
+        let front = proxies.iter().find(|p| p["server"] == "front.example").unwrap();
+        assert_eq!(exit["dialer-proxy"], front["name"]);
+    }
+
+    #[test]
     fn configuration_exposes_only_assigned_listeners_but_tests_all_nodes() {
         let providers = vec![
             ProviderInput {
@@ -1495,7 +1549,7 @@ mod tests {
                 port: None,
             },
         ];
-        let yaml = build_config(&providers, 19090, "secret", 19099, &listeners, &defs).unwrap();
+        let yaml = build_config(&providers, 19090, "secret", 19099, &listeners, &defs, &HashMap::new()).unwrap();
         let config: Value = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(config["proxy-providers"]["sub_remote"]["type"], "http");
         assert_eq!(config["proxy-providers"]["sub_local"]["type"], "file");

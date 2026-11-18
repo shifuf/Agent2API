@@ -1,4 +1,7 @@
 import { useState } from 'react'
+import { ProxyGroups, type GroupRequest } from '../../../ui-shared/proxy-groups'
+import { apiCall } from '../api/client'
+const groupRequest: GroupRequest = (method, path, body) => apiCall(path, { method, body })
 import {
   Button, Card, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
   DialogTitle, Input, SegmentedControl, Switch,
@@ -158,6 +161,7 @@ export function ProxiesPage() {
         </Card>
       </div> : null}
       {kernelError ? <ErrorNote text={kernelError} /> : null}
+      <ProxyGroups key={identity} request={groupRequest} t={t} />
       {importOpen && kernel ? <KernelImportSheet status={kernel} onClose={() => setImportOpen(false)} onChanged={refresh} /> : null}
 
     {error ? <ErrorNote text={error} /> : null}

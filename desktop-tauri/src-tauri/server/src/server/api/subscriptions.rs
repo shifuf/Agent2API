@@ -156,6 +156,11 @@ pub async fn entry(request: axum::extract::Request) -> Response {
     };
     match (method.as_str(), rest.as_str()) {
         ("GET", "") => ok_json(build_payload()),
+        ("GET", "groups") => group_action("list", &body).await,
+        ("POST", "groups/members") => group_action("members", &body).await,
+        ("POST", "groups/select") => group_action("select", &body).await,
+        ("POST", "groups/test") => group_action("test", &body).await,
+        ("POST", "groups/cancel") => group_action("cancel", &body).await,
         ("POST", "add") => add(&body).await,
         ("POST", "save") => save(&body).await,
         ("POST", "refresh") => refresh(&body),
@@ -173,6 +178,22 @@ pub async fn entry(request: axum::extract::Request) -> Response {
             format!("Not found: {} {full_path}", method.as_str()),
         ),
     }
+}
+
+async fn group_action(action: &str, body: &Bytes) -> Response {
+    let input = if action == "list" { json!({}) } else {
+        match parse_body(body) { Ok(value) => value, Err(_) => return management_error(400, "请求内容不是有效 JSON") }
+    };
+    use sub_kernel::runtime::groups;
+    let result = match action {
+        "list" => groups::list(None).await,
+        "members" => groups::list(Some(&input)).await,
+        "select" => groups::select(&input).await,
+        "test" => groups::test(&input).await,
+        "cancel" => Ok(groups::cancel(&input)),
+        _ => unreachable!(),
+    };
+    match result { Ok(value) => ok_json(value), Err(error) => management_error(400, error) }
 }
 
 // ─── 订阅 CRUD ─────────────────────────────────────────────

@@ -21,9 +21,11 @@ const temp = await mkdtemp(path.join(os.tmpdir(), 'agent2api-subscriptions-test-
 const adminKey = 'subscription-test-admin-local-only'
 const sockets = new Set()
 const servers = []
-let child, childExit, spawnError, base, logs = '', originCalls = 0, subscriptionCalls = 0
+let child, childExit, spawnError, base, logs = '', originCalls = 0, subscriptionCalls = 0, chainCalls = 0
+const frontAuth = []
 const proxyCalls = []
 let remoteNodes = []
+let remoteGroups = []
 
 function track(socket) {
   sockets.add(socket)
@@ -95,10 +97,12 @@ async function toggle(id, enabled) {
 
 try {
   const origin = await listen(async (req, res) => {
+    if (req.url === '/speed') { res.end(Buffer.alloc(6 * 1024 * 1024, 65)); return }
+    if (req.url === '/slow-speed') { res.writeHead(200); res.write('x'); return }
     if (req.url === '/subscription.yaml') {
       subscriptionCalls++
       res.writeHead(200, { 'Content-Type': 'application/yaml', 'Cache-Control': 'no-store' })
-      res.end(yaml(remoteNodes))
+      res.end(JSON.stringify({ proxies: remoteNodes, 'proxy-groups': remoteGroups }))
       return
     }
     let raw = ''
@@ -154,12 +158,40 @@ try {
     name, type: 'http', server, port: proxy.address().port, username: 'local-user', password,
   })
   remoteNodes = [node('stable-node'), node('unused-node')]
-  const localNodes = [node('local-imported-node')]
+  const front = await listen((_req, res) => res.writeHead(403).end())
+  front.on('connect', (req, socket, head) => {
+    if (![ `127.0.0.1:${proxy.address().port}`, `localhost:${proxy.address().port}` ].includes(req.url)) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+    chainCalls++
+    frontAuth.push(String(req.headers['proxy-authorization'] || ''))
+    const upstream = track(net.connect({ host: '127.0.0.1', port: proxy.address().port }, () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      if (head.length) upstream.write(head)
+      socket.pipe(upstream).pipe(socket)
+    }))
+    socket.once('close', () => upstream.destroy())
+    upstream.once('close', () => socket.destroy())
+  })
+  const localContent = Buffer.from(JSON.stringify({
+    proxies: [
+      { ...node('local-imported-node'), 'dialer-proxy': 'front-group' },
+      { ...node('second-exit', '127.0.0.1', 'second-password'), 'dialer-proxy': 'front-group' },
+      { name: 'front-node', type: 'http', server: '127.0.0.1', port: front.address().port },
+      { name: 'second-front', type: 'http', server: '127.0.0.1', port: front.address().port, username: 'second-front', password: 'front-password' },
+    ],
+    'proxy-groups': [
+      { name: 'front-group', type: 'select', proxies: ['front-node', 'second-front'] },
+      { name: 'exit-group', type: 'select', proxies: ['local-imported-node', 'second-exit'] },
+    ],
+  })).toString('base64')
   const reserve = await listen((_req, res) => res.end())
   const port = reserve.address().port
   await new Promise(resolve => reserve.close(resolve))
   base = `http://127.0.0.1:${port}`
   const env = { ...process.env, AGENT2API_PROXY_HOME: temp, AGENT2API_HOST: '127.0.0.1',
+    AGENT2API_UI_DIR: path.resolve('desktop-tauri/ui'),
     AGENT2API_PROXY_PORT: String(port), AGENT2API_PROXY_API_KEY: adminKey,
     AGENT2API_ACCOUNT_KEY: '3'.repeat(64), AGENT2API_SELF_UPDATE: '0', AGENT2API_PANEL_PORT: '',
     AGENT2API_ADMIN_USER: '', AGENT2API_ADMIN_PASSWORD: '', AGENT2API_ADMIN_PASSWORD_HASH: '' }
@@ -174,6 +206,7 @@ try {
   }, 60000)
   assert.deepEqual((await ok('/api/subscriptions')).items, [])
   assert.equal((await ok('/api/subscriptions/kernel')).installed, false)
+  assert.deepEqual((await ok('/api/subscriptions/groups')).groups, [])
 
   for (const url of ['', 'ftp://127.0.0.1/sub', 'http://', 'http://exa mple.com/sub']) {
     await rejected('/api/subscriptions/add', { name: 'invalid', url })
@@ -197,7 +230,7 @@ try {
   const remote = (await ok('/api/subscriptions/add', remoteInput)).items.find(item => item.url === remoteInput.url)
   assert.ok(remote)
   await rejected('/api/subscriptions/add', { ...remoteInput, name: 'Duplicate URL' })
-  const localInput = { name: 'Imported YAML', fileName: 'local.yaml', contentBase64: encoded(localNodes) }
+  const localInput = { name: 'Imported YAML', fileName: 'local.yaml', contentBase64: localContent }
   const local = (await ok('/api/subscriptions/add', localInput)).items.find(item => item.kind === 'local')
   assert.ok(local)
   assert.equal(local.fileName, 'local.yaml')
@@ -252,6 +285,56 @@ try {
     }
     await readyNode()
     await chatThrough('old-password')
+    const chainNode = await poolNode(local.id, 'local-imported-node')
+    await ok(`/api/accounts/${accountId}`, { proxy: { source: 'pool', proxyId: chainNode.id } }, 'PATCH')
+    await until('chain listener', async () => (await poolNode(local.id, 'local-imported-node'))?.port
+      && (await ok('/api/subscriptions/kernel')).running)
+    const chainBefore = chainCalls
+    await chatThrough('old-password')
+    assert.ok(chainCalls > chainBefore, 'Full YAML dialer group must actually tunnel through the front proxy')
+    const groupInput = { providerId: local.id, group: 'exit-group' }
+    await ok('/api/subscriptions/groups/select', { providerId: local.id, group: 'front-group', node: 'second-front' })
+    const groupNode = await poolNode(local.id, 'exit-group')
+    assert.ok(groupNode, 'Exit group is a stable pool target')
+    await ok(`/api/accounts/${accountId}`, { proxy: { source: 'pool', proxyId: groupNode.id } }, 'PATCH')
+    await until('group listener', async () => (await poolNode(local.id, 'exit-group'))?.port
+      && (await ok('/api/subscriptions/kernel')).running)
+    const choose = (node) => ok('/api/subscriptions/groups/select', { ...groupInput, node })
+    await choose('second-exit')
+    await chatThrough('second-password')
+    assert.equal(frontAuth.at(-1), `Basic ${Buffer.from('second-front:front-password').toString('base64')}`)
+    const beforeSelection = (await ok('/api/subscriptions/groups/members', groupInput)).groups[0]
+    assert.equal(beforeSelection.selected, 'second-exit')
+    assert.equal(beforeSelection.members.length, 2)
+    assert.ok(!JSON.stringify(beforeSelection).includes('password'))
+    await rejected('/api/subscriptions/groups/select', { ...groupInput, node: 'front-node' })
+    const speed = await ok('/api/subscriptions/groups/test', { ...groupInput, node: 'local-imported-node', kind: 'speed', id: 'speed-test', url: `${originUrl}/speed` })
+    assert.equal(speed.success, true)
+    assert.equal(speed.bytes, 5 * 1024 * 1024)
+    assert.ok(speed.bytesPerSecond > 0)
+    const latency = await ok('/api/subscriptions/groups/test', { ...groupInput, node: 'local-imported-node', kind: 'delay', id: 'latency-test', url: `${originUrl}/` })
+    assert.equal(latency.success, true)
+    assert.equal(typeof latency.delay, 'number')
+    assert.equal((await ok('/api/subscriptions/groups/members', groupInput)).groups[0].selected, 'second-exit')
+    const slow = ok('/api/subscriptions/groups/test', { ...groupInput, node: 'local-imported-node', kind: 'speed', id: 'cancel-test', url: `${originUrl}/slow-speed` })
+    await until('active cancellable test', async () => (await ok('/api/subscriptions/groups/cancel', { id: 'cancel-test' })).canceled, 5000)
+    assert.equal((await slow).success, false)
+    const runtimeBeforeRestart = JSON.parse(await readFile(path.join((await ok('/api/subscriptions/kernel')).kernelDir, 'kernel-state.json'), 'utf8')).pid
+    await ok('/api/subscriptions/kernel/restart', {})
+    await until('restored group selection', async () => {
+      const group = (await ok('/api/subscriptions/groups/members', groupInput)).groups[0]
+      const state = await ok('/api/subscriptions/kernel')
+      const pid = JSON.parse(await readFile(path.join(state.kernelDir, 'kernel-state.json'), 'utf8')).pid
+      return group.available && group.selected === 'second-exit' && pid !== runtimeBeforeRestart && state.running
+    })
+    await chatThrough('second-password')
+    assert.equal((await ok('/api/subscriptions/groups/members', { providerId: local.id, group: 'front-group' })).groups[0].selected, 'second-front')
+    if (process.env.PLAYWRIGHT_MODULE) {
+      const { checkGroupBrowser } = await import('./test-proxy-groups-browser.mjs')
+      await checkGroupBrowser(base, adminKey, process.env.GROUP_SCREENSHOT_DIR || temp)
+    }
+    await ok(`/api/accounts/${accountId}`, { proxy: { source: 'pool', proxyId: selected.id } }, 'PATCH')
+    await readyNode()
     await toggle(remote.id, false)
     await rejected('/api/subscriptions/refresh', { id: remote.id })
     await until('paused node without listener', async () => {
@@ -265,7 +348,12 @@ try {
     assert.equal((await account(accountId)).proxy.config.proxyId, selected.id)
     await chatThrough('old-password')
 
-    remoteNodes = [node('stable-node', 'localhost', 'new-password'), node('unused-node')]
+    remoteNodes = [
+      { ...node('stable-node', 'localhost', 'new-password'), 'dialer-proxy': 'front-group' },
+      node('unused-node'),
+      { name: 'front-node', type: 'http', server: '127.0.0.1', port: front.address().port },
+    ]
+    remoteGroups = [{ name: 'front-group', type: 'select', proxies: ['front-node'] }]
     const fetchedBefore = subscriptionCalls
     const kernelBefore = await ok('/api/subscriptions/kernel')
     const pidBefore = JSON.parse(await readFile(path.join(kernelBefore.kernelDir, 'kernel-state.json'), 'utf8')).pid
@@ -278,7 +366,9 @@ try {
         && config.includes('server: localhost') && config.includes('password: new-password')
     })
     assert.equal((await readyNode()).id, selected.id)
+    const refreshedChainBefore = chainCalls
     await chatThrough('new-password')
+    assert.ok(chainCalls > refreshedChainBefore, 'Remote full YAML refresh must preserve its chain group')
     await ok('/api/subscriptions/remove', { id: remote.id })
     await until('deleted subscription pool cleanup', async () => !(await pool()).some(item => item.providerId === remote.id))
     const retained = (await account(accountId)).proxy
@@ -287,7 +377,7 @@ try {
     await rejectChat()
     await ok(`/api/accounts/${accountId}`, { proxy: { source: 'direct' } }, 'PATCH')
     assert.equal((await account(accountId)).proxy.source, 'direct', 'The stale reference must be editable')
-    console.log('PASS: local HTTP pull, YAML node import, lazy listener, pause/resume identity and account reference, same-name server/password refresh, proxy traffic, delete cleanup and fail-closed stale reference')
+    console.log('PASS: local HTTP pull, full YAML chain group import and two-hop traffic, lazy listener, pause/resume identity and account reference, same-name server/password refresh, proxy traffic, delete cleanup and fail-closed stale reference')
   }
 
   for (const item of (await ok('/api/subscriptions')).items) await ok('/api/subscriptions/remove', { id: item.id })
