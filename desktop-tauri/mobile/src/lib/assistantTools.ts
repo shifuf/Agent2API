@@ -33,6 +33,7 @@ import { apiCall } from '../api/client'
 import { accountName } from '../lib/format'
 import { createBalanceTool } from '../../../ui-shared/assistant-read-balance'
 import { t } from '../i18n'
+import { newId } from '../../../ui-shared/ids'
 import { ASSISTANT_READ_TOOLS } from './assistant-read-tools'
 import { ASSISTANT_IMAGE_TOOLS } from './assistant-image-tools'
 import {
@@ -381,7 +382,7 @@ const testModel: AssistantTool = {
   run: async (args, context) => {
     checkToolSignal(context)
     if (!context?.apiKey) throw new Error(t('请先选择一把 API Key'))
-    const testId = crypto.randomUUID()
+    const testId = newId()
     const payload: Record<string, unknown> = { provider: str(args.provider), model: str(args.id), test_id: testId }
     const prompt = str(args.prompt, 4000)
     if (prompt) payload.prompt = prompt

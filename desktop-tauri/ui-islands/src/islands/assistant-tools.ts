@@ -22,6 +22,7 @@
  */
 
 import { t } from '../i18n'
+import { newId } from '../../../ui-shared/ids'
 import { modelOptionsFrom, type ModelOption } from './assistant-models'
 import { ASSISTANT_READ_META, ASSISTANT_READ_TOOLS } from './assistant-read-tools'
 import { ASSISTANT_ACCOUNT_TOOLS } from './assistant-account-tools'
@@ -702,7 +703,7 @@ const testModel: AssistantTool = {
     const api = bridge()
     if (!api.testModel) throw new Error(t('当前客户端缺少读取接口：{name}', { name: 'testModel' }))
     if (!context?.apiKey) throw new Error(t('请先选择一把 API Key'))
-    const testId = crypto.randomUUID()
+    const testId = newId()
     const payload: Record<string, unknown> = { provider: str(args.provider), model: str(args.id), test_id: testId }
     const prompt = str(args.prompt, 4000)
     if (prompt) payload.prompt = prompt

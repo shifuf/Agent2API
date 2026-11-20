@@ -530,14 +530,13 @@ pub const DEFAULT_MODEL_REFRESH_MINUTES: i64 = 60;
 pub const DEFAULT_LOGS_AUTO_REFRESH_SECONDS: i64 = 1;
 pub const DEFAULT_REQUESTS_AUTO_REFRESH_SECONDS: i64 = 1;
 pub const DEFAULT_REPORT_AUTO_REFRESH_SECONDS: i64 = 1;
-/// 软件版本检查默认间隔（分钟）：每 20 分钟查一次 GitHub 最新发布。
+/// 软件版本检查默认间隔（分钟）：每 4 小时查一次 GitHub 最新发布。
 ///
-/// 20 分钟 = 3 次/小时，相对匿名限额（60 次/小时，且**按出口 IP 计** —— 同一
-/// 出口下的其它程序共用这份额度）留足余量，又能让新版本的提示在一刻钟量级内
-/// 出现。**这个默认值只影响「没配过间隔」的情形**：已经保存过
+/// 降低后台查询频率，减少同一出口共享匿名限额时的竞争。
+/// **这个默认值只影响「没配过间隔」的情形**：已经保存过
 /// `scheduledTasks.updateCheck.interval` 的配置按原值跑（`interval_field`
 /// 只在键缺失或越界时才回落到默认），所以调整它不会改写老用户的设置。
-pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 20;
+pub const DEFAULT_UPDATE_CHECK_MINUTES: i64 = 240;
 
 /// 间隔型任务的取值范围。上下限分两套（分钟 / 秒），因为两类任务的合理区间
 /// 差着量级：后端维护任务按分钟（1 分钟～1 天），前端刷新按秒（1 秒～10 分钟）。

@@ -48,6 +48,18 @@ export function isSnapshotWallet(value: unknown): boolean {
   return wallet?.snapshot === true || wallet?.type === 'magicubes'
 }
 
+const NON_BALANCE_WALLET_TYPES = new Set(['solo_parallel', 'solo_package', 'fast_request_per'])
+
+/** 运行维度与快照不表示可用余额；保留真实余额为零的读数。 */
+export function balanceWalletOf(wallets: readonly unknown[]): UsageObject | null {
+  for (const value of wallets) {
+    const wallet = object(value)
+    if (!wallet || NON_BALANCE_WALLET_TYPES.has(String(wallet.type || '')) || isSnapshotWallet(wallet)) continue
+    if (usageNumberOrNull(wallet.balance) !== null) return wallet
+  }
+  return null
+}
+
 /** 旧版魔粒明细把钱包余额和已用次数都写成了 remain，兼容时只转换这一种钱包。 */
 export function creditPacksOf(value: unknown): UsageObject[] {
   const usage = object(value)

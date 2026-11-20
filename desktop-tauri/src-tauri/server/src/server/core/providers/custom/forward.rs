@@ -281,11 +281,12 @@ pub(crate) async fn forward(
     quirks.apply_emulation_headers(&mut headers, api_key, &outbound, &base_url);
     quirks.apply_to(&mut headers);
 
+    let outbound_model = outbound.get("model").and_then(Value::as_str).unwrap_or("");
     logging::verbose(
         "[CustomProvider]",
         &format!(
             "POST {url} model={} stream={stream} account={account_id} 出口={}{}",
-            if requested.is_empty() { "(默认)" } else { &requested },
+            if outbound_model.is_empty() { "(默认)" } else { outbound_model },
             describe_proxy(proxy.as_ref()),
             if quirks.emulate_opencode { " 伪装=opencode" } else { "" },
         ),
@@ -815,8 +816,8 @@ impl futures::Stream for ProtocolTranslateStream {
 ///
 /// ── 两道改写的细节（与内置家的对应关系）────────────────────────
 ///   - **模型名**：`custom_providers::wire_model_for` 一次解析出「上游真名 +
-///     思考等级」（两者同源，见那个函数的说明）。真名与请求名忽略大小写相同
-///     时**不复制**（零改写是常态）；不同才升级成副本；
+///     思考等级」（两者同源，见那个函数的说明）。出站 `model` 必须与目录中的
+///     上游真名逐字相同，大小写或别名不同都要改写；
 ///   - **思考等级**：三个条件同时满足才注入 `reasoning_effort` —— 绑定非空、
 ///     客户端没显式给 `reasoning_effort` / `reasoning`（用户显式意图优先）、
 ///     等级不是关闭思考（`model_rules::reasoning_is_off`；本网关不向任何
@@ -842,10 +843,11 @@ fn rewrite_body(body: &Value, provider_id: &str, requested: &str, source_test: b
     } else {
         custom_providers::wire_model_for(provider_id, requested)
     };
-    if !wire_model.eq_ignore_ascii_case(requested) {
+    let current = outbound.get("model").and_then(Value::as_str).unwrap_or("");
+    if !wire_model.is_empty() && current != wire_model {
         logging::verbose(
             "[CustomProvider]",
-            &format!("provider={provider_id} 按映射改写模型名 {requested} → {wire_model}"),
+            &format!("provider={provider_id} 按模型清单改写模型名 {current} → {wire_model}"),
         );
         if let Some(object) = outbound.as_object_mut() {
             object.insert("model".to_string(), Value::String(wire_model));

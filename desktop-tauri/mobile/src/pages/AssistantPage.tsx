@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { newId } from '../../../ui-shared/ids'
 import { Icon } from '../components/Icon'
 import { MarkdownLite } from '../components/MarkdownLite'
 import { Button, Textarea, Sheet, SheetContent, SheetHeader, SheetTitle, SheetBody, confirmDialog } from '@ui'
@@ -99,7 +100,7 @@ export function AssistantPage() {
   const [tools, setTools] = useState<Array<Record<string, unknown>>>([])
   const enabledToolsRef = useRef<Record<string, boolean>>({})
   const modeRef = useRef<'confirm' | 'full'>('confirm')
-  const sessionRef = useRef<string>(crypto.randomUUID())
+  const sessionRef = useRef<string>(newId())
   const mountedRef = useRef(true)
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const historyRef = useRef<ChatMessage[]>([])
@@ -222,8 +223,8 @@ export function AssistantPage() {
     }
     const attached = [...attachments]
     const attachedFiles = [...textFiles]
-    const userId = crypto.randomUUID()
-    const replyId = crypto.randomUUID()
+    const userId = newId()
+    const replyId = newId()
     const history: ChatMessage[] = [...historyRef.current, {
       id: userId, role: 'user', content,
       ...(attached.length ? { images: attached } : {}),
@@ -254,7 +255,7 @@ export function AssistantPage() {
       const generatedImages: ImageAsset[] = []
       for (let round = 0; round < 6; round++) {
         if (controller.signal.aborted || !mountedRef.current || serverIdentity() !== identity) break
-        const roundId = round === 0 ? replyId : crypto.randomUUID()
+        const roundId = round === 0 ? replyId : newId()
         unfinishedId = roundId
         setBubbles(previous => previous.map(item => item.id === replyId ? { ...item, messageIds: [...new Set([...(item.messageIds || []), roundId])] } : item))
         let pendingCalls: ToolCall[] = []
@@ -418,7 +419,7 @@ export function AssistantPage() {
     historyRef.current = []
     titleRef.current = ''
     setTitle('')
-    sessionRef.current = crypto.randomUUID()
+    sessionRef.current = newId()
     setHistoryOpen(false)
   }
 

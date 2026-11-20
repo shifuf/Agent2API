@@ -24,6 +24,7 @@
  */
 
 import { assistantFileOf, jsonTopLevelKeys } from './assistant-files'
+import { workbuddyCredentialEdition } from './workbuddy-credentials'
 import type { ImageToolContext } from './assistant-image-tools'
 import type { Translate } from './assistant-read-types'
 
@@ -124,11 +125,8 @@ function inferProvider(parsed: unknown): string {
   if (!root) return ''
   const direct = str(root.provider, 64).toLowerCase()
   if (direct) return direct
-  const auth = record(root.auth)
-  const domain = (auth ? str(auth.domain) : '') || str(root.domain)
-  if (/workbuddy\.ai/i.test(domain)) return 'workbuddy-intl'
-  if (/workbuddy\.cn|codebuddy\.cn/i.test(domain)) return 'workbuddy'
-  return ''
+  const edition = workbuddyCredentialEdition(root)
+  return edition === 'intl' ? 'workbuddy-intl' : edition === 'cn' ? 'workbuddy' : ''
 }
 
 /** 只读：按编号 / 文件名读取附件正文，支持分页 */

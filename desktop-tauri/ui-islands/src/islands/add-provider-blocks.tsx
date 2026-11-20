@@ -22,6 +22,7 @@
  */
 
 import * as React from 'react'
+import { workbuddyCredentialEdition } from '../../../ui-shared/workbuddy-credentials'
 import {
   Alert,
   AlertDescription,
@@ -942,14 +943,6 @@ function credentialFieldOf(
   return ''
 }
 
-/** 按文件内容推断归属：`auth.domain`（官方 .info）或顶层 `domain`（扁平形） */
-function editionFromFile(record: Record<string, unknown>): Edition | null {
-  const domain = credentialFieldOf(record, ['domain'], 'auth')
-  if (/workbuddy\.ai/i.test(domain)) return 'intl'
-  if (/workbuddy\.cn|codebuddy\.cn/i.test(domain)) return 'cn'
-  return null
-}
-
 /** WorkBuddy 块「添加方式」的选项 id。不进 ADD_METHODS：本块不走通用分派，选项固定这三项 */
 type WorkBuddyMethod = 'web' | 'file' | 'desktop'
 
@@ -994,7 +987,7 @@ function WorkBuddyFileImportSection({
           toast(t('不是有效的凭证文件：需要包含 accessToken 与 uid'), 'err')
           return
         }
-        const fromFile = accountExportEdition(record) ?? editionFromFile(record)
+        const fromFile = accountExportEdition(record) ?? workbuddyCredentialEdition(record)
         const landed = fromFile ?? edition
         if (fromFile && fromFile !== edition) {
           toast(

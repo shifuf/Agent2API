@@ -31,6 +31,10 @@ use super::{
 use super::responses::{image_url_of, tool_output_parts, ConvertError, ToolOutput};
 use super::tool_plan;
 
+#[cfg(test)]
+#[path = "responses_outbound_sync_tests.rs"]
+mod sync_tests;
+
 // ─── 请求：Chat → Responses ─────────────────────────────────
 
 /// Chat Completions 请求体 → Responses 请求体。
@@ -458,10 +462,11 @@ pub struct ChatFromResponsesStream {
     created: i64,
     started: bool,
     finished: bool,
-    /// 已宣告的工具：item_id / call_id → 槽位（chat 的 tool_calls index +
-    /// 是否已发过参数增量）
-    tools: BTreeMap<String, ToolSlot>,
-    next_tool_index: i64,
+    /// 同一工具的 item_id / call_id / output_index 都映射到唯一槽位。
+    tools: Vec<ToolSlot>,
+    tool_aliases: BTreeMap<String, usize>,
+    /// 无身份参数只在整个流恰有一个工具时可归属；后续出现第二个工具须失败。
+    anonymous_arguments: bool,
     /// 上游最近的 usage（Responses 口径；收尾时折成 chat 形态）
     usage: Option<Value>,
 }
@@ -469,8 +474,11 @@ pub struct ChatFromResponsesStream {
 /// 一个工具的 chat 侧状态（key 是上游给的 item_id / call_id）
 #[derive(Default)]
 struct ToolSlot {
-    index: i64,
     has_arguments: bool,
+    declared: bool,
+    pending_arguments: String,
+    arguments_done: bool,
+    call_id: String,
 }
 
 impl ChatFromResponsesStream {
@@ -482,8 +490,9 @@ impl ChatFromResponsesStream {
             created: crate::server::logging::now_ms() / 1000,
             started: false,
             finished: false,
-            tools: BTreeMap::new(),
-            next_tool_index: 0,
+            tools: Vec::new(),
+            tool_aliases: BTreeMap::new(),
+            anonymous_arguments: false,
             usage: None,
         }
     }
@@ -583,8 +592,7 @@ impl ChatFromResponsesStream {
                     return Vec::new();
                 }
                 let mut out = self.start();
-                let key = tool_key(event, item);
-                out.extend(self.ensure_tool(&key, item));
+                out.extend(self.ensure_tool(event, item));
                 out
             }
             "response.function_call_arguments.delta" => {
@@ -593,9 +601,8 @@ impl ChatFromResponsesStream {
                     return Vec::new();
                 }
                 let mut out = self.start();
-                let key = tool_key(event, event);
-                out.extend(self.ensure_tool(&key, event));
-                out.extend(self.push_arguments(&key, &delta));
+                out.extend(self.ensure_tool(event, event));
+                out.extend(self.push_arguments(event, event, &delta, false));
                 out
             }
             // 自由文本工具（custom）的输入增量：分片是裸文本，中途无法可靠
@@ -611,36 +618,27 @@ impl ChatFromResponsesStream {
                     return Vec::new();
                 }
                 let mut out = self.start();
-                let key = tool_key(event, event);
-                out.extend(self.ensure_tool(&key, event));
-                out.extend(self.push_arguments(&key, &delta));
+                out.extend(self.ensure_tool(event, event));
+                out.extend(self.push_arguments(event, event, &delta, false));
                 out
             }
             // 参数收尾：增量一个都没来过时（少数网关只发 .done）补完整参数
             "response.function_call_arguments.done" => {
-                let key = tool_key(event, event);
-                if self.has_arguments(&key) {
-                    return Vec::new();
-                }
                 let arguments = {
                     let raw = json_text(event.get("arguments").unwrap_or(&Value::Null));
                     if raw.is_empty() { "{}".to_string() } else { raw }
                 };
                 let mut out = self.start();
-                out.extend(self.ensure_tool(&key, event));
-                out.extend(self.push_arguments(&key, &arguments));
+                out.extend(self.ensure_tool(event, event));
+                out.extend(self.push_arguments(event, event, &arguments, true));
                 out
             }
             "response.custom_tool_call_input.done" => {
-                let key = tool_key(event, event);
-                if self.has_arguments(&key) {
-                    return Vec::new();
-                }
                 let input = json_text(event.get("input").unwrap_or(&Value::Null));
                 let arguments = super::freeform::wrap_freeform_input(&input);
                 let mut out = self.start();
-                out.extend(self.ensure_tool(&key, event));
-                out.extend(self.push_arguments(&key, &arguments));
+                out.extend(self.ensure_tool(event, event));
+                out.extend(self.push_arguments(event, event, &arguments, true));
                 out
             }
             // 项收尾：与上面 .done 同口径的补漏（两端都可能先到）
@@ -657,29 +655,35 @@ impl ChatFromResponsesStream {
                     }
                     _ => return Vec::new(),
                 };
-                let key = tool_key(event, item);
-                if self.has_arguments(&key) {
-                    return Vec::new();
-                }
                 let mut out = self.start();
-                out.extend(self.ensure_tool(&key, item));
-                out.extend(self.push_arguments(&key, &arguments));
+                out.extend(self.ensure_tool(event, item));
+                out.extend(self.push_arguments(event, item, &arguments, true));
                 out
             }
             // 上游错误（事件流里的失败）：折成 chat 错误帧 + [DONE]
-            "error" | "response.failed" => self.fail(event),
+            "error" | "response.failed" | "response.cancelled" | "response.canceled" => self.fail(event),
             // 终态：收尾（usage 已在开头收过）
-            "response.completed" | "response.done" => self.complete(None),
-            "response.incomplete" => {
-                let reason = event
-                    .pointer("/response/incomplete_details/reason")
-                    .map(string_value)
-                    .unwrap_or_default();
-                let reason = if reason.is_empty() { "length".to_string() } else { reason };
-                self.complete(Some(&reason))
+            "response.completed" | "response.done" => {
+                match event.pointer("/response/status").and_then(Value::as_str) {
+                    Some("failed" | "cancelled" | "canceled") => self.fail(event),
+                    Some("incomplete") => self.incomplete(event),
+                    _ => self.complete(None),
+                }
             }
+            "response.incomplete" => self.incomplete(event),
             _ => Vec::new(),
         }
+    }
+
+    fn incomplete(&mut self, event: &Value) -> Vec<bytes::Bytes> {
+        let reason = event.pointer("/response/incomplete_details/reason")
+            .or_else(|| event.pointer("/incomplete_details/reason"))
+            .and_then(Value::as_str).unwrap_or_default();
+        let reason = match reason {
+            "max_output_tokens" | "" => "length",
+            other => other,
+        };
+        self.complete(Some(reason))
     }
 
     /// 首帧（role assistant）：与官方 bridge 同款 —— 空响应或只有工具的流
@@ -696,47 +700,100 @@ impl ChatFromResponsesStream {
     }
 
     /// 宣告一个工具（若未宣告过）：chat 的 tool_calls 首帧带 id / name / 空参数
-    fn ensure_tool(&mut self, key: &str, item: &Value) -> Vec<bytes::Bytes> {
-        if self.tools.contains_key(key) {
+    fn ensure_tool(&mut self, event: &Value, item: &Value) -> Vec<bytes::Bytes> {
+        let keys = tool_keys(event, item);
+        let mut existing = None;
+        for index in keys.iter().filter_map(|key| self.tool_aliases.get(key).copied()) {
+            if existing.is_some_and(|prior| prior != index) {
+                return self.fail(&json!({"error":{"message":"上游 Responses 工具调用标识冲突"}}));
+            }
+            existing = Some(index);
+        }
+        if keys.len() == 1 && keys[0] == "anonymous" {
+            self.anonymous_arguments = true;
+            if self.tools.len() == 1 {
+                existing = Some(0);
+            } else if self.tools.len() > 1 {
+                return self.fail(&json!({"error":{"message":"上游 Responses 工具参数缺少唯一调用标识"}}));
+            }
+        } else if existing.is_none() && self.tools.len() == 1
+            && !self.tools[0].declared && self.tool_aliases.len() == 1
+            && self.tool_aliases.contains_key("anonymous") {
+            // 参数先于唯一声明到达：为原槽位补身份，不创建无名称的孤儿调用。
+            existing = Some(0);
+        }
+        if existing.is_none() && !self.tools.is_empty() && self.anonymous_arguments {
+            return self.fail(&json!({"error":{"message":"上游 Responses 多工具参数缺少唯一调用标识"}}));
+        }
+        let index = existing.unwrap_or_else(|| {
+            let index = self.tools.len();
+            self.tools.push(ToolSlot::default());
+            index
+        });
+        for key in keys {
+            self.tool_aliases.insert(key, index);
+        }
+        let slot = &mut self.tools[index];
+        let call_id = string_field(item, "call_id");
+        if !call_id.is_empty() {
+            slot.call_id = call_id;
+        } else if slot.call_id.is_empty() {
+            slot.call_id = item.get("id").or_else(|| event.get("item_id"))
+                .and_then(Value::as_str).unwrap_or_default().to_string();
+        }
+        let name = string_field(item, "name");
+        if name.is_empty() || slot.declared {
             return Vec::new();
         }
-        let index = self.next_tool_index;
-        self.next_tool_index += 1;
-        self.tools.insert(key.to_string(), ToolSlot { index, has_arguments: false });
-        let call_id = {
-            let raw = string_field(item, "call_id");
-            if raw.is_empty() {
-                let id = string_field(item, "id");
-                if id.is_empty() { random_id("call") } else { id }
-            } else {
-                raw
-            }
-        };
-        let name = string_field(item, "name");
-        vec![self.delta_frame(json!({
+        slot.declared = true;
+        let call_id = if slot.call_id.is_empty() { random_id("call") } else { slot.call_id.clone() };
+        let pending = std::mem::take(&mut slot.pending_arguments);
+        let mut frames = vec![self.delta_frame(json!({
             "tool_calls": [{
                 "index": index,
                 "id": call_id,
                 "type": "function",
                 "function": { "name": name, "arguments": "" },
             }],
-        }))]
+        }))];
+        if !pending.is_empty() {
+            frames.push(self.delta_frame(json!({ "tool_calls": [{ "index": index, "function": { "arguments": pending } }] })));
+        }
+        frames
     }
 
     /// 追加一段工具参数（槽位不存在时静默跳过 —— 没宣告过就没有 index 可挂）
-    fn push_arguments(&mut self, key: &str, delta: &str) -> Vec<bytes::Bytes> {
-        let Some(slot) = self.tools.get_mut(key) else {
+    fn push_arguments(&mut self, event: &Value, item: &Value, delta: &str, snapshot: bool) -> Vec<bytes::Bytes> {
+        if self.finished { return Vec::new(); }
+        let Some(index) = self.tool_index(event, item) else {
             return Vec::new();
         };
+        let slot = &mut self.tools[index];
+        if slot.arguments_done { return Vec::new(); }
+        if snapshot && slot.has_arguments {
+            slot.arguments_done = true;
+            return Vec::new();
+        }
         slot.has_arguments = true;
-        let index = slot.index;
+        slot.arguments_done = snapshot;
+        if !slot.declared {
+            if slot.pending_arguments.len().saturating_add(delta.len()) > 8 * 1024 * 1024 {
+                return self.fail(&json!({"error":{"message":"上游 Responses 工具参数超过缓冲上限"}}));
+            }
+            slot.pending_arguments.push_str(delta);
+            return Vec::new();
+        }
         vec![self.delta_frame(json!({
             "tool_calls": [{ "index": index, "function": { "arguments": delta } }],
         }))]
     }
 
-    fn has_arguments(&self, key: &str) -> bool {
-        self.tools.get(key).map(|slot| slot.has_arguments).unwrap_or(false)
+    fn tool_index(&self, event: &Value, item: &Value) -> Option<usize> {
+        let keys = tool_keys(event, item);
+        if keys.len() == 1 && keys[0] == "anonymous" && self.tools.len() == 1 {
+            return Some(0);
+        }
+        keys.iter().find_map(|key| self.tool_aliases.get(key).copied())
     }
 
     /// 收尾：finish_reason 帧 + usage 帧 + [DONE]（只做一次）
@@ -746,6 +803,15 @@ impl ChatFromResponsesStream {
         }
         self.finished = true;
         let mut out = self.start();
+        // 兼容缺少名称声明的网关，收尾仍保留已经接收的参数。
+        let pending: Vec<(usize, String)> = self.tools.iter_mut().enumerate()
+            .filter_map(|(index, slot)| {
+                if slot.pending_arguments.is_empty() { None }
+                else { Some((index, std::mem::take(&mut slot.pending_arguments))) }
+            }).collect();
+        for (index, arguments) in pending {
+            out.push(self.delta_frame(json!({"tool_calls":[{"index":index,"function":{"arguments":arguments}}]})));
+        }
         let finish_reason = match incomplete_reason {
             Some(reason) => reason.to_string(),
             // Responses 没有 chat 的 finish_reason，按输出形态推导：
@@ -786,18 +852,10 @@ impl ChatFromResponsesStream {
             .get("error")
             .filter(|error| is_truthy(error))
             .or_else(|| event.pointer("/response/error").filter(|error| is_truthy(error)));
-        let message = match error {
-            Some(error) => {
-                let text = string_field(error, "message");
-                if text.is_empty() { string_value(error) } else { text }
-            }
-            None => string_value(event),
-        };
-        let message = if message.trim().is_empty() {
-            "上游流式返回错误".to_string()
-        } else {
-            message
-        };
+        let message = error.and_then(|error| error.get("message").and_then(Value::as_str).or_else(|| error.as_str()))
+            .or_else(|| event.get("message").and_then(Value::as_str))
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or("上游流式返回错误");
         vec![
             chat_frame(&json!({
                 "error": { "message": message, "type": "upstream_error" },
@@ -833,17 +891,28 @@ impl ChatFromResponsesStream {
 ///
 /// 同一次调用的各个事件（added / delta / done）必须映射到同一个键，
 /// 上游保证这几个字段在各事件里一致（官方与参考实现都按这个优先链取值）。
-fn tool_key(event: &Value, item: &Value) -> String {
-    for text in [
-        string_field(item, "call_id"),
-        string_field(item, "id"),
-        string_field(event, "item_id"),
+fn tool_keys(event: &Value, item: &Value) -> Vec<String> {
+    let mut keys = Vec::new();
+    for value in [
+        item.get("id").and_then(Value::as_str).map(|value| ("item", value)),
+        event.pointer("/item/id").and_then(Value::as_str).map(|value| ("item", value)),
+        event.get("item_id").and_then(Value::as_str).map(|value| ("item", value)),
+        item.get("call_id").and_then(Value::as_str).map(|value| ("call", value)),
+        event.get("call_id").and_then(Value::as_str).map(|value| ("call", value)),
     ] {
-        if !text.is_empty() {
-            return text;
+        if let Some((namespace, value)) = value.filter(|(_, value)| !value.is_empty()) {
+            let key = format!("{namespace}:{value}");
+            if !keys.contains(&key) { keys.push(key); }
         }
     }
-    event.get("output_index").map(string_value).unwrap_or_default()
+    for value in [event.get("output_index"), item.get("output_index")] {
+        if let Some(index) = value.and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok())) {
+            let key = format!("output:{index}");
+            if !keys.contains(&key) { keys.push(key); }
+        }
+    }
+    if keys.is_empty() { keys.push("anonymous".to_string()); }
+    keys
 }
 
 /// Responses 的 usage → chat 的 usage（字段名与明细结构按 chat 口径折）。

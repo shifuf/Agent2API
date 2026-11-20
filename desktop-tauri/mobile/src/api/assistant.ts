@@ -24,6 +24,7 @@ import type { ChatMessage } from '../../../ui-shared/assistant-history'
 import { parseAssistantMessages, assistantTitle } from '../../../ui-shared/assistant-history'
 export type { ChatMessage } from '../../../ui-shared/assistant-history'
 import { readAssistantStream, type ChatEvent, type ToolCall } from '../../../ui-shared/assistant-stream'
+import { newId } from '../../../ui-shared/ids'
 import { userContentWithFiles } from '../../../ui-shared/assistant-files'
 import { t } from '../i18n'
 import { serverIdentity, apiBase } from '../lib/servers'
@@ -177,7 +178,7 @@ export async function getAssistantSession(id: string): Promise<SessionDetail> {
 }
 
 export async function forkAssistantSession(id: string, messageId: string): Promise<SessionDetail> {
-  const data = await apiCall<{ session: SessionDetail }>(`/api/assistant/sessions/${encodeURIComponent(id)}/fork`, { method: 'POST', body: { id: crypto.randomUUID(), messageId } })
+  const data = await apiCall<{ session: SessionDetail }>(`/api/assistant/sessions/${encodeURIComponent(id)}/fork`, { method: 'POST', body: { id: newId(), messageId } })
   return { ...data.session, messages: parseAssistantMessages(data.session.messages) }
 }
 

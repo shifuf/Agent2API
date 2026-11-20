@@ -58,7 +58,7 @@ import { useDisplayClock } from '../../../ui-shared/use-display-clock'
 import { UsageWindowsCell, usageWindows } from './accounts-usage-windows'
 import { accountReloginText } from './accounts-authorization'
 import { credentialExpiryRowsOf, credentialExpiryText, type CredentialExpiryRow } from '../../../ui-shared/credential-expiry'
-import { creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
+import { balanceWalletOf, creditStatisticsWalletsOf, isSnapshotWallet, snapshotReadingsOf, usageAggregateOf, usageSupplementReadingsOf, usageUnitLabel, usageWarningsOf, usageWindowLabel, usageWindowView } from '../../../ui-shared/usage-readings'
 import { LimitDetailButton, limitRowsOf } from './accounts-limit-detail'
 import { upstreamCooldownOf, upstreamSuspendedReasonOf } from '../../../ui-shared/account-upstream-state'
 import { LimiterStatus } from './accounts-limiter-status'
@@ -864,7 +864,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
     // （`balance` + 自己的 `unit`），有可读的钱包就不再拼「—」。钱包也没有
     // （真读空了）才落回「—」，如实说没读到。
     const fallbackWallet = data.available == null
-      ? wallets.find(wallet => numberOrNull(wallet?.balance) !== null)
+      ? balanceWalletOf(wallets)
       : undefined
     const available = data.availableView
       ? String(data.availableView)
