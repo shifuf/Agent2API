@@ -705,6 +705,7 @@ struct ProtocolTranslateStream {
     pending: std::collections::VecDeque<bytes::Bytes>,
     /// 上游已结束（不再 poll 上游，把 pending 吐完即 None）
     upstream_done: bool,
+    telemetry: Arc<RequestTelemetry>,
     capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
 }
 
@@ -715,6 +716,13 @@ enum TranslateMachine {
 }
 
 impl TranslateMachine {
+    fn has_upstream_terminal(&self) -> bool {
+        match self {
+            Self::Responses(machine) => machine.has_upstream_terminal(),
+            Self::Anthropic(machine) => machine.has_upstream_terminal(),
+        }
+    }
+
     fn push(&mut self, chunk: &[u8]) -> Vec<bytes::Bytes> {
         match self {
             Self::Responses(machine) => machine.push(chunk),
@@ -763,6 +771,7 @@ impl ProtocolTranslateStream {
             },
             pending: std::collections::VecDeque::new(),
             upstream_done: false,
+            telemetry: telemetry.clone(),
             capture: telemetry.capture(),
         }
     }
@@ -791,6 +800,9 @@ impl futures::Stream for ProtocolTranslateStream {
                     for frame in self.machine.finish() {
                         self.pending.push_back(frame);
                     }
+                    // The parser already owns the complete event buffer. A
+                    // bounded model observer cannot decide completion here.
+                    self.telemetry.note_upstream_stream_end(self.machine.has_upstream_terminal());
                 }
                 std::task::Poll::Ready(Some(Ok(bytes))) => {
                     // 调试模式：采上游原始字节（在翻译之前，与 chat 路径同语义）
@@ -905,10 +917,11 @@ fn rewrite_body(body: &Value, provider_id: &str, requested: &str, source_test: b
 ///     message（`rotate::mark_account_limited` 会从文案里再解析一次，
 ///     见模块头的说明）；
 ///   - 其余 → 原样透传状态码与上游原文摘要。
+/// 各档都保留合法 Retry-After，供发送编排决定等待；不改变错误分类。
 fn classify_custom_error(status: u16, raw: &str, retry_after: Option<&str>) -> GatewayError {
     let raw = raw.trim();
     let raw = if raw.is_empty() { "上游错误" } else { raw };
-    match status {
+    let mut error = match status {
         401 | 403 => GatewayError::with_status(
             i32::from(status),
             format!("上游凭证被拒绝（HTTP {status}）: {raw}"),
@@ -931,7 +944,21 @@ fn classify_custom_error(status: u16, raw: &str, retry_after: Option<&str>) -> G
             i32::from(status),
             format!("上游返回 {status}: {raw}"),
         ),
+    };
+    error.retry_after_secs = retry_after.and_then(|text| retry_after_seconds_at(text, logging::now_ms()));
+    error
+}
+
+/// RFC 9110 §10.2.3: delay-seconds is non-negative digits; HTTP dates are
+/// rounded up so a retry never precedes the advertised recovery time.
+fn retry_after_seconds_at(retry_after: &str, now_ms: i64) -> Option<u64> {
+    let text = retry_after.trim();
+    if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return text.parse().ok();
     }
+    let reset_at = chrono::DateTime::parse_from_rfc2822(text).ok()?.timestamp_millis();
+    let milliseconds = reset_at.saturating_sub(now_ms).max(0) as u64;
+    Some(milliseconds / 1000 + u64::from(milliseconds % 1000 != 0))
 }
 
 /// `Retry-After` 头 → 恢复时间文案（UTC+8，`parse_quota_reset_at` 认的形态）。
@@ -940,9 +967,12 @@ fn classify_custom_error(status: u16, raw: &str, retry_after: Option<&str>) -> G
 /// 无法识别（负数、畸形日期）时给 None —— 调用方继续走文案解析的兜底。
 fn retry_after_reset_text(retry_after: &str) -> Option<String> {
     let text = retry_after.trim();
-    if let Ok(seconds) = text.parse::<i64>() {
+    if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = text.parse::<i64>().ok()?;
         if seconds > 0 {
-            return Some(reset_text_at(logging::now_ms() + seconds * 1000));
+            let reset_at = logging::now_ms().checked_add(seconds.checked_mul(1000)?)?;
+            let text = reset_text_at(reset_at);
+            return (!text.is_empty()).then_some(text);
         }
         return None;
     }
@@ -1019,4 +1049,47 @@ pub fn cooldown_model(provider_id: &str, requested: &str) -> String {
         return String::new();
     }
     custom_providers::wire_model_for(provider_id, requested).0
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_response_preserves_retry_after_seconds() {
+        let error = classify_custom_error(503, "temporarily busy", Some(" 1 "));
+        assert_eq!(error.status_code, 503);
+        assert_eq!(error.retry_after_secs, Some(1));
+    }
+
+    #[test]
+    fn retry_after_http_date_preserves_the_remaining_wait() {
+        let now = logging::now_ms();
+        let future = chrono::DateTime::from_timestamp_millis(now + 60_000).unwrap();
+        let header = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let error = classify_custom_error(503, "temporarily busy", Some(&header));
+        assert!(matches!(error.retry_after_secs, Some(59..=60)));
+        assert_eq!(classify_custom_error(503, "busy", Some("Fri, 31 Dec 1999 23:59:59 GMT")).retry_after_secs, Some(0));
+    }
+
+    #[test]
+    fn malformed_retry_after_does_not_change_error_classification() {
+        for header in ["", "-1", "+1", "1.5", "tomorrow", "18446744073709551616"] {
+            let error = classify_custom_error(503, "temporarily busy", Some(header));
+            assert_eq!(error.status_code, 503);
+            assert_eq!(error.retry_after_secs, None, "{header}");
+        }
+        let error = classify_custom_error(403, "invalid credential", None);
+        assert_eq!(error.status_code, 403);
+        assert!(error.message.contains("凭证被拒绝"));
+    }
+
+    #[test]
+    fn very_large_retry_after_cannot_overflow_quota_reset_formatting() {
+        let error = classify_custom_error(429, "rate window", Some("9223372036854775807"));
+        assert_eq!(error.status_code, 429);
+        assert_eq!(error.retry_after_secs, Some(9_223_372_036_854_775_807));
+        assert!(!error.message.contains("（）"));
+        assert_eq!(classify_custom_error(503, "busy", Some("0")).retry_after_secs, Some(0));
+    }
 }

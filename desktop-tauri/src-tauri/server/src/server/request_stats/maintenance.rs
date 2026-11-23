@@ -47,6 +47,7 @@ impl RequestStats {
                 sql::delete_matching(&tx, &plan)?
             };
             tx.commit()?;
+            if !raw_only { self.filters.invalidate(); }
             Ok(ClearResult {
                 deleted,
                 raw: raw.requests,

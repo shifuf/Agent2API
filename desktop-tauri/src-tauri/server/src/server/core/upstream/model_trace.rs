@@ -14,6 +14,7 @@ pub struct Observer {
     bytes: usize,
     skipped: bool,
     line_nonempty: bool,
+    ndjson_line: bool,
     skip_lf: bool,
 }
 
@@ -29,6 +30,7 @@ impl Observer {
                 self.skip_lf = byte == b'\r';
                 continue;
             }
+            if !self.line_nonempty { self.ndjson_line = byte == b'{'; }
             self.line_nonempty = true;
             self.bytes = self.bytes.saturating_add(1);
             if self.bytes > MAX_EVENT {
@@ -44,29 +46,35 @@ impl Observer {
             self.event(telemetry);
             self.bytes = 0;
         } else if self.skipped {
-            if !self.line_nonempty { self.skipped = false; self.bytes = 0; }
+            if self.ndjson_line || !self.line_nonempty { self.skipped = false; self.bytes = 0; }
         } else if let Some(data) = line.strip_prefix(b"data:") {
             self.data.extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
             self.data.push(b'\n');
         } else if line.starts_with(b"{") {
-            if let Ok(value) = serde_json::from_slice::<Value>(line) { telemetry.observe_response_model(&value, "upstream"); }
+            if let Ok(value) = serde_json::from_slice::<Value>(line) { self.value(&value, telemetry); }
             self.bytes = 0;
         }
         self.line.clear();
         self.line_nonempty = false;
+        self.ndjson_line = false;
     }
 
     fn event(&mut self, telemetry: &RequestTelemetry) {
         if let Ok(value) = serde_json::from_slice::<Value>(&self.data) {
-            telemetry.observe_response_model(&value, "upstream");
+            self.value(&value, telemetry);
         }
         self.data.clear();
     }
 
+    fn value(&mut self, value: &Value, telemetry: &RequestTelemetry) {
+        telemetry.observe_response_model(value, "upstream");
+    }
+
     fn finish(&mut self, telemetry: &RequestTelemetry) {
-        if self.skipped { return; }
-        if !self.line.is_empty() { self.line(telemetry); }
-        self.event(telemetry);
+        if !self.skipped {
+            if !self.line.is_empty() { self.line(telemetry); }
+            self.event(telemetry);
+        }
     }
 }
 
@@ -132,5 +140,16 @@ mod tests {
         let mut observer = Observer::default();
         observer.feed(b"data: {\"model\":\"cr-model\"}\r\r", &telemetry);
         assert_eq!(telemetry.snapshot().attempts_detail[0].response_models, vec!["cr-model"]);
+    }
+
+    #[test]
+    fn review_oversized_ndjson_line_does_not_hide_later_model_evidence() {
+        let telemetry = RequestTelemetry::new();
+        telemetry.note_attempt_started("custom", "a");
+        let mut observer = Observer::default();
+        observer.feed(format!("{{\"content\":\"{}\"}}\n", "x".repeat(MAX_EVENT + 100)).as_bytes(), &telemetry);
+        observer.feed(b"{\"model\":\"after-large-line\"}\n", &telemetry);
+        observer.finish(&telemetry);
+        assert_eq!(telemetry.snapshot().attempts_detail[0].response_models, vec!["after-large-line"]);
     }
 }

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{truncate_chars, LogPhase, RequestTelemetry, TelemetrySnapshot};
+use super::{truncate_chars, ActiveAttempt, LogPhase, RequestTelemetry, TelemetrySnapshot};
 
 pub const MAX_ATTEMPT_DETAILS: usize = 24;
 pub const MAX_ATTEMPT_ERROR_CHARS: usize = 200;
@@ -101,10 +101,13 @@ impl RequestTelemetry {
     }
 
     pub fn note_attempt_started(&self, provider: &str, account: &str) {
+        self.upstream_stream_end.store(0, std::sync::atomic::Ordering::Release);
         let mut guard = self.lock();
-        if guard.attempts_detail.len() >= MAX_ATTEMPT_DETAILS { return; }
         let account_id = guard.account_id.clone();
         let candidate_id = guard.route.as_ref().and_then(|route| route.get("pickedCandidate")).and_then(Value::as_str).unwrap_or(&account_id).to_string();
+        let started_at = crate::server::logging::now_ms();
+        *self.active_attempt.lock().unwrap_or_else(|error| error.into_inner()) = Some(ActiveAttempt { candidate_id: candidate_id.clone(), started_at });
+        if guard.attempts_detail.len() >= MAX_ATTEMPT_DETAILS { return; }
         let member_id = crate::server::core::routing_groups::member_key(&candidate_id).unwrap_or("").to_string();
         let reason = guard.route.as_ref()
             .and_then(|route| route.get("ordered")).and_then(Value::as_array)
@@ -115,7 +118,7 @@ impl RequestTelemetry {
         guard.attempts_detail.push(AttemptDetail {
             provider: provider.to_string(), account: truncate_chars(account, MAX_ATTEMPT_ACCOUNT_CHARS),
             account_id, candidate_id, member_id, model: String::new(), reasoning: String::new(), reason, sticky_hit,
-            started_at: Some(crate::server::logging::now_ms()), response_at: None, finished_at: None,
+            started_at: Some(started_at), response_at: None, finished_at: None,
             status: None, error: None, retries: Vec::new(), notice: None, body_bytes: None,
             response_models: Vec::new(), response_model_source: String::new(),
         });

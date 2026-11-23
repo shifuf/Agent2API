@@ -515,7 +515,7 @@ pub(super) async fn forward_with_providers(
     if ctx.routing.group.is_none() {
         let started = std::time::Instant::now();
         let outcome = attempt_queue(service, &ctx, &provider_ids, slot, connections).await?;
-        return super::route_content::deliver(outcome, ctx.telemetry.clone(), started, None, None, ctx.stream).await;
+        return super::route_content::deliver(outcome, ctx.telemetry.clone(), started, None, None, ctx.stream, None).await;
     }
     let client_stream = ctx.stream;
     ctx.stream = true;
@@ -525,23 +525,33 @@ pub(super) async fn forward_with_providers(
     let sticky_generation = service.route.sticky_generation();
     let conv_key = ctx.routing.conversation_key(ctx.client_headers, ctx.body);
     let mut rounds = 0usize;
+    let sticky_faults = ctx.routing.sticky_faults();
+    let max_rounds = if sticky_faults {
+        let channels: std::collections::HashSet<_> = ctx.routing.group_projection.accounts.iter().map(|account|
+            crate::server::core::routing_groups::member_key(&crate::server::core::routing_groups::attempt_key(account)).unwrap_or("").to_string()).collect();
+        channels.len().saturating_mul(2).saturating_add(1).max(3)
+    } else { MAX_ROUTE_ATTEMPTS };
     loop {
         rounds += 1;
         let attempt_started = std::time::Instant::now();
         let previous_attempts = ctx.telemetry.snapshot().attempts_detail.len();
+        ctx.telemetry.clear_active_attempt();
+        *ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()) = None;
         let result = super::route_content::during_send(attempt_queue(service, &ctx, &provider_ids, slot, connections),
             &ctx.routing, ctx.telemetry, patience_until).await;
         let snapshot = ctx.telemetry.snapshot();
-        let candidate_elapsed = snapshot.attempts_detail.last().and_then(|attempt| attempt.started_at)
+        let lease = ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()).take();
+        let active_attempt = ctx.telemetry.active_attempt();
+        let candidate_elapsed = active_attempt.as_ref().map(|attempt| attempt.started_at)
             .map(|at| logging::now_ms().saturating_sub(at).max(0) as u64).unwrap_or(0);
         let candidate_started = std::time::Instant::now().checked_sub(std::time::Duration::from_millis(candidate_elapsed)).unwrap_or(attempt_started);
-        let candidate_id = snapshot.attempts_detail.last().map(|attempt| attempt.candidate_id.clone()).unwrap_or_default();
+        let candidate_id = active_attempt.map(|attempt| attempt.candidate_id).unwrap_or_default();
         let candidate = ctx.routing.group_projection.accounts.iter().find(|account| crate::server::core::routing_groups::attempt_key(account) == candidate_id);
         let first_seconds = candidate.and_then(|account| account.get("routingFirstToken")).and_then(Value::as_u64).unwrap_or(0);
         let patience = candidate.and_then(|account| account.get("routingPatience")).and_then(Value::as_i64)
             .map(|seconds| match seconds { n if n < 0 => 0, 0 => 60_000, n => n.min(240) as u64 * 1000 }).unwrap_or(patience);
         let has_alternative = super::route_content::has_alternative(ctx.telemetry, &ctx.routing.excluded);
-        let deadline = if has_alternative && ctx.routing.settings.sticky != config::StickyMode::Strict {
+        let deadline = if sticky_faults || (has_alternative && ctx.routing.settings.sticky != config::StickyMode::Strict) {
             (first_seconds > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(first_seconds.saturating_mul(1000).saturating_sub(candidate_elapsed)))
         } else { None };
         let deadline = match (deadline, patience_until) { (Some(a), Some(b)) => Some(a.min(b)), (None, b) => b, (a, None) => a };
@@ -551,24 +561,44 @@ pub(super) async fn forward_with_providers(
         };
         match result {
             Ok(outcome) => {
-                if !snapshot.account_id.is_empty() {
-                    if ctx.routing.settings.breaker_enabled { service.route.breaker_success(&snapshot.account_id, ctx.routing.settings.breaker_success_threshold); }
-                    service.route.backoff_clear(&snapshot.account_id); service.route.sink_clear(&snapshot.account_id);
-                    service.route.sticky_bind(&conv_key, &model, &candidate_id,
-                        super::route_state::RouteState::conversation_source(ctx.client_headers, ctx.body), logging::now_ms(),
-                        ctx.routing.sticky_ttl(), sticky_generation);
-                    if let Some(candidate) = candidate {
-                        super::route_affinity::bind(service, &ctx.routing, &conv_key, candidate,
-                            super::route_state::RouteState::conversation_source(ctx.client_headers, ctx.body), sticky_generation);
-                    }
-                }
+                let completion = super::route_completion::RouteCompletion::new(service, &ctx.routing, &conv_key, &model,
+                    &candidate_id, &snapshot.account_id, candidate,
+                    super::route_state::RouteState::conversation_source(ctx.client_headers, ctx.body), sticky_generation, lease);
                 return super::route_content::deliver(outcome, ctx.telemetry.clone(), candidate_started,
-                    Some(candidate_started.elapsed().as_secs_f64() * 1000.0), held_slot, client_stream).await;
+                    Some(candidate_started.elapsed().as_secs_f64() * 1000.0), held_slot, client_stream, Some(completion)).await;
             }
             Err(error) => {
                 if ctx.telemetry.cancel_token().is_some_and(|token| token.is_cancelled()) { return Err(error); }
                 ctx.telemetry.finish_last_attempt(Some(error.status_code as i64), Some(&error.message));
-                if !super::route_content::transient(&error) || rounds >= 32 || ctx.routing.settings.sticky == config::StickyMode::Strict { return Err(error); }
+                if sticky_faults && super::route_content::channel_fault(&error) {
+                    if let Some(lease) = &lease {
+                        if let Some(failure) = ctx.routing.with_current_configuration(||
+                            service.route.channel_failure(lease, ctx.routing.settings.breaker_timeout_seconds, logging::now_ms())) {
+                            if !super::route_content::transient(&error) || rounds >= max_rounds { return Err(error); }
+                            if failure.frozen_until.is_some() {
+                                debug_assert!(failure.failures >= 2);
+                                ctx.routing.retry_candidate = None;
+                                ctx.telemetry.clear_uncommitted_error();
+                                continue;
+                            }
+                            if !direct_switch_status(i64::from(error.status_code)) {
+                                ctx.routing.retry_candidate = Some(lease.candidate.clone());
+                                let wait = Duration::from_millis(error.retry_after_secs.unwrap_or(0).saturating_mul(1000)
+                                    .max(config::retry_settings().delay_ms()));
+                                if !wait.is_zero() {
+                                    ctx.telemetry.note_attempt_retry("粘滞渠道首次失败，等待后重试当前渠道", Some(error.status_code as i64), wait.as_millis().min(u64::MAX as u128) as u64);
+                                    if let Some(cancel) = ctx.telemetry.cancel_token() {
+                                        tokio::select! { _ = tokio::time::sleep(wait) => {}, _ = cancel.cancelled() => return Err(cancellation::cancelled_error()) }
+                                    } else { tokio::time::sleep(wait).await; }
+                                }
+                                ctx.telemetry.clear_uncommitted_error();
+                                continue;
+                            }
+                        }
+                    }
+                }
+                ctx.routing.retry_candidate = None;
+                if !super::route_content::transient(&error) || rounds >= max_rounds || ctx.routing.settings.sticky == config::StickyMode::Strict { return Err(error); }
                 for attempt in snapshot.attempts_detail.iter().skip(previous_attempts) {
                     if !attempt.candidate_id.is_empty() && !ctx.routing.excluded.contains(&attempt.candidate_id) { ctx.routing.excluded.push(attempt.candidate_id.clone()); }
                 }
@@ -707,8 +737,10 @@ async fn attempt_queue(
     // 结果是「能换几个账号」根本没人管 —— 某家囤了 9 个账号时一次请求会一路
     // 试到第 10 个，而用户填的那个数字要等跨家才生效。
     let settings = config::retry_settings();
-    let mut budget = RetryBudget::new(settings.resend_budget());
-    let switch_total = settings.switch_budget();
+    // Sticky channel retries are owned by the outer response lifecycle, so
+    // inner resend/switch budgets cannot silently spend the two-failure rule.
+    let mut budget = RetryBudget::new(if ctx.routing.sticky_faults() { 0 } else { settings.resend_budget() });
+    let switch_total = if ctx.routing.sticky_faults() { 0 } else { settings.switch_budget() };
     let mut switches_left = switch_total;
     // ── 系统提示词的降级标记（对应参考项目的 `degradedApplied`）────────
     // `true` = **降级期已生效**：进入本请求时降级期已经开着（状态机在别的请求
@@ -748,6 +780,10 @@ async fn attempt_queue(
         if ctx.telemetry.is_cancelled() {
             return Err(cancellation::cancelled_error());
         }
+        // A new candidate has no send deadline until its actual attempt starts.
+        // Same-account token refreshes stay in the inner loop and retain theirs.
+        ctx.telemetry.clear_active_attempt();
+        *ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()) = None;
         let mut target = rotate::select_target_account(
             service,
             provider_ids,
@@ -778,6 +814,12 @@ async fn attempt_queue(
         // （429 降级、401 刷新后换号、会话式失败顺延三条路径都经过这里）。
         connections.rebind(target.account_id.clone());
         let attempt_key = target.attempt_key().unwrap_or_default();
+        if ctx.routing.sticky_faults() {
+            let now = logging::now_ms();
+            let lease = service.route.health.begin(&ctx.routing.scope, &attempt_key, now)
+                .map_err(|until| rotate::cooling_error(until, now))?;
+            *ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()) = Some(lease);
+        }
         let selected_model = target.account.as_ref().and_then(crate::server::core::routing_groups::candidate_model)
             .map(str::to_string).unwrap_or_else(|| model.clone());
         let selected_sink = super::route_affinity::sink_enabled(target.account.as_ref(), ctx.routing.settings.sink);

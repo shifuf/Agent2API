@@ -89,6 +89,10 @@ mod source_report;
 mod source_backfill;
 mod lifecycle;
 mod sql;
+mod filters_cache;
+
+#[cfg(test)]
+mod tests;
 
 pub use source::{ApiKeyIdentity, RequestSource};
 pub fn request_date_bounds(start: NaiveDate, end: NaiveDate) -> Option<(i64, i64)> {
@@ -219,6 +223,7 @@ pub struct RequestStats {
     maintenance_writes: AtomicU64,
     /// 上次做保留期裁剪的毫秒时间戳；低流量时用它兜底。
     last_maintenance_ms: AtomicI64,
+    filters: filters_cache::FilterOptionsCache,
 }
 
 impl RequestStats {
@@ -258,6 +263,7 @@ impl RequestStats {
             vacuum: Arc::new(VacuumStatus::new()),
             maintenance_writes: AtomicU64::new(0),
             last_maintenance_ms: AtomicI64::new(0),
+            filters: filters_cache::FilterOptionsCache::default(),
         }
     }
 
@@ -288,6 +294,10 @@ impl RequestStats {
         } else {
             false
         }
+    }
+
+    fn filter_revision(&self) -> u64 {
+        self.db.as_ref().map_or(0, Db::request_revision)
     }
 
     /// 库文件路径（`stats()` 的 `file` / `dailyFile` 与排障用）。
@@ -398,6 +408,7 @@ impl RequestStats {
         let maintain = self.should_maintain();
         let guard = self.guard();
         let _ = self.with_conn_mut(&guard, |conn| {
+            let revision = self.filter_revision();
             let tx = conn.transaction()?;
             if !record.id.is_empty() && sql::terminal_record_exists(&tx, &record.id)? {
                 return tx.commit();
@@ -448,7 +459,10 @@ impl RequestStats {
                     }
                 }
             }
-            tx.commit()
+            tx.commit()?;
+            if maintain { self.filters.invalidate(); }
+            else { self.filters.note_written(&record.model, &record.upstream_model, &record.provider, Some(&record.source), revision, self.filter_revision()); }
+            Ok(())
         });
     }
 
@@ -500,6 +514,7 @@ impl RequestStats {
         let maintain = self.should_maintain();
         let guard = self.guard();
         let _ = self.with_conn_mut(&guard, |conn| {
+            let revision = self.filter_revision();
             let tx = conn.transaction()?;
             sql::insert_started_request(
                 &tx,
@@ -518,7 +533,10 @@ impl RequestStats {
                 sql::delete_expired_requests(&tx, bounds.requests_ms)?;
                 retention::trim_requests(&tx, bounds.request_count)?;
             }
-            tx.commit()
+            tx.commit()?;
+            if maintain { self.filters.invalidate(); }
+            else { self.filters.note_written(model, "", "", Some(source), revision, self.filter_revision()); }
+            Ok(())
         });
     }
 
@@ -565,7 +583,12 @@ impl RequestStats {
             return;
         }
         let guard = self.guard();
-        let _ = self.with_conn_mut(&guard, |conn| sql::update_running_progress(conn, id, progress));
+        let _ = self.with_conn_mut(&guard, |conn| {
+            let revision = self.filter_revision();
+            let updated = sql::update_running_progress(conn, id, progress)?;
+            self.filters.note_written("", &progress.upstream_model, &progress.provider, None, revision, self.filter_revision());
+            Ok(updated)
+        });
     }
 
     /// 仅调试模式开启时保存完整下游正文，读写与明细查询分离。
@@ -738,15 +761,14 @@ impl RequestStats {
     /// 前端据此只保留「全部」选项，筛选器退化成不可用但界面不报错；
     /// 与 `query_requests` 的空表降级同一取向（少一个功能好过整页失败）。
     pub fn filter_options(&self) -> Value {
-        let loaded = {
+        let now = std::time::Instant::now();
+        let loaded = self.filters.read_fast(now, self.filter_revision()).or_else(|| {
             let guard = self.guard();
-            self.with_conn(&guard, |conn| {
-                let (models, providers) = sql::select_filter_options(conn, MAX_FILTER_OPTIONS)?;
-                let sources = sql::source_filter_options(conn, MAX_FILTER_OPTIONS)?;
-                Ok((models, providers, sources))
-            })
-        };
-        let (models, providers, mut sources) = loaded.unwrap_or((Vec::new(), Vec::new(), json!({})));
+            self.with_conn(&guard, |conn| self.filters.read_or_compute(conn, now, self.filter_revision()))
+        });
+        let filters_cache::FilterData { models, providers, mut sources } = loaded.unwrap_or(filters_cache::FilterData {
+            models: Vec::new(), providers: Vec::new(), sources: json!({}),
+        });
         if let Some(clients) = sources["clients"].as_array_mut() {
             for client in clients {
                 client["label"] = json!(crate::server::core::client::display_name(
@@ -782,7 +804,9 @@ impl RequestStats {
             sql::delete_expired_requests(&tx, bounds.requests_ms)?;
             retention::trim_requests(&tx, bounds.request_count)?;
             daily::delete_daily_before(&tx, &bounds.daily_key)?;
-            tx.commit()
+            tx.commit()?;
+            self.filters.invalidate();
+            Ok(())
         });
         // 显式裁剪（启动 / 改保留期）之后重置节拍：下一次记账从新的一批开始。
         self.maintenance_writes.store(0, Ordering::Relaxed);

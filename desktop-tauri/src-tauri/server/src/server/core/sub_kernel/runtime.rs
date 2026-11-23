@@ -51,6 +51,8 @@ use crate::server::logging;
 mod dependencies;
 #[path = "runtime_groups.rs"]
 pub mod groups;
+#[path = "runtime_dns.rs"]
+mod dns;
 
 /// 控制端口候选范围（避开 Clash Verge 默认的 7897 与常见 9090）
 const CONTROLLER_PORT_BASE: u16 = 19090;
@@ -183,6 +185,18 @@ fn is_information_node(name: &str) -> bool {
     if name.is_empty() {
         return true;
     }
+    if matches!(name,
+        "禁止注册机，脚本，批量请求，会封号" | "禁止注册机,脚本,批量请求,会封号"
+    ) {
+        return true;
+    }
+    if let Some((label, address)) = name.split_once('：').or_else(|| name.split_once(':')) {
+        if matches!(label.trim(), "域名" | "网址")
+            && (address.trim().starts_with("https://") || address.trim().starts_with("http://"))
+        {
+            return true;
+        }
+    }
     // 纯文本前缀：机场用它们展示账户状态，后面跟具体数值
     const PREFIXES: &[&str] = &[
         "剩余流量",
@@ -288,6 +302,13 @@ fn read_provider_entries(providers: &[ProviderInput], field: &str) -> HashMap<St
         let Some(items) = parsed.get(field).and_then(Yaml::as_sequence) else {
             continue;
         };
+        // Only remove references to notice nodes actually declared in this source.
+        // A missing real dialer/member must still fail closed in dependencies::inline.
+        let ignored: HashSet<&str> = parsed.get("proxies").and_then(Yaml::as_sequence)
+            .into_iter().flatten()
+            .filter_map(|item| item.get("name").and_then(Yaml::as_str))
+            .filter(|name| is_information_node(name))
+            .collect();
         for item in items {
             let Some(name) = item.get("name").and_then(Yaml::as_str) else {
                 continue;
@@ -299,9 +320,14 @@ fn read_provider_entries(providers: &[ProviderInput], field: &str) -> HashMap<St
             }
             // YAML → JSON：配置是 json! 拼出来再交给 serde_yaml 序列化的，定义也要
             // 走同一形态；带 YAML 特有标量（时间戳等）的条目转不过去，跳过即可
-            let Ok(definition) = serde_json::to_value(item) else {
+            let Ok(mut definition) = serde_json::to_value(item) else {
                 continue;
             };
+            if field == "proxy-groups" {
+                if let Some(members) = definition.get_mut("proxies").and_then(Value::as_array_mut) {
+                    members.retain(|member| !member.as_str().is_some_and(|name| ignored.contains(name)));
+                }
+            }
             defs.insert(node_key(&provider.id, name), definition);
         }
     }
@@ -553,7 +579,7 @@ fn build_config(
             "proxy": TEST_GROUP_NAME,
         }));
     }
-    let config = json!({
+    let mut config = json!({
         "mode": "rule",
         "log-level": "warning",
         "ipv6": false,
@@ -566,6 +592,9 @@ fn build_config(
         "rules": ["MATCH,DIRECT"],
         "listeners": listener_list,
     });
+    if let Some(bootstrap) = dns::load(providers) {
+        config["dns"] = bootstrap;
+    }
     serde_yaml::to_string(&config).map_err(|error| format!("编码内核配置失败: {error}"))
 }
 

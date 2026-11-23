@@ -86,6 +86,7 @@ pub(super) struct RouteState {
     /// 用空串键，全局一条。
     cursors: Mutex<HashMap<String, usize>>,
     sticky: super::route_sticky::StickySessions,
+    pub(super) health: super::route_health::RouteHealth,
     /// 失败退避：账号 id → 休息记录
     backoff: Mutex<HashMap<String, BackoffEntry>>,
     /// 限流垫底：账号 id → 沉底时刻（还有额度时被 429 的；超 [`SINK_TTL_MS`] 自动失效）
@@ -347,6 +348,13 @@ impl RouteState {
 
     pub(super) fn sticky_clear(&self, id: Option<&str>, model: Option<&str>) -> usize {
         self.sticky.clear(id, model)
+    }
+
+    pub(super) fn channel_failure(&self, lease: &super::route_health::ChannelLease,
+        timeout_seconds: i64, now: i64) -> super::route_health::ChannelFailure {
+        self.health.failure(lease, timeout_seconds, now, || {
+            self.sticky.forget_channel(&lease.scope, &lease.candidate);
+        })
     }
 
     pub(super) fn conversation_source(headers: &HeaderMap, body: &serde_json::Value) -> &'static str {

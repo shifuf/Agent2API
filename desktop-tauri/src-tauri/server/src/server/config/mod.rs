@@ -104,6 +104,7 @@ pub use routing_profiles::{
     KEY_ROUTING_PROFILES,
 };
 pub(crate) use routing_profiles::from_raw as routing_profiles_from_raw;
+pub(crate) use routing_profiles::with_routing_snapshot;
 pub use types::*;
 pub use update_policy::{
     set_update_channels, update_beta, update_channels, UpdateChannels, UpdateChannelsPatch,

@@ -87,13 +87,14 @@ pub async fn list(input: Option<&Value>) -> Result<Value, String> {
         let source = std::fs::read_to_string(crate::server::core::sub_kernel::kernel_dir()
             .join("providers").join(format!("sub_{}.yaml", provider.id))).unwrap_or_default();
         let parsed: Value = serde_yaml::from_str(&source).unwrap_or_default();
-        for definition in parsed["proxy-groups"].as_array().into_iter().flatten() {
-            let name = text(definition, "name");
+        for source_definition in parsed["proxy-groups"].as_array().into_iter().flatten() {
+            let name = text(source_definition, "name");
             if name.is_empty() { continue; }
             if let Some(input) = input.as_ref() {
                 if text(input, "providerId") != provider.id || text(input, "group") != name { continue; }
             }
             let key = node_key(&provider.id, name);
+            let Some(definition) = groups.get(&key) else { continue };
             let alias = alias_of_key(&key);
             let status = &live["proxies"][&alias];
             let selected = status["now"].as_str().map(|s| original(s, &provider.id, &nodes, &groups));

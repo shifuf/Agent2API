@@ -82,6 +82,7 @@ pub(super) fn import(
     let suppression = cloud_sync::auto_sync::SuppressionGuard::new();
     let safety = db.with_mut(|main| {
         db.invalidate_accounts();
+        db.invalidate_requests();
         let safety = safety::create(main, config_dir)?;
         set_phase(RestorePhase::Replacing);
         if let Err(error) = replace(&temp.conn, main) {
@@ -90,12 +91,14 @@ pub(super) fn import(
                 .map_err(|error| format!("打开安全备份失败: {error}"))
                 .and_then(|old| replace(&old, main));
             db.invalidate_accounts();
+            db.invalidate_requests();
             return match rollback {
                 Ok(()) => Err(format!("{error}；已自动还原替换前的数据，本机密钥未更换")),
                 Err(rollback_error) => Err(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
             };
         }
         db.invalidate_accounts();
+        db.invalidate_requests();
         Ok(safety)
     }).ok_or("数据库连接不可用，恢复未执行")??;
     db.invalidate_accounts();
@@ -147,4 +150,41 @@ fn replace(source: &Connection, target: &mut Connection) -> Result<(), String> {
     let backup =
         Backup::new(source, target).map_err(|error| format!("初始化数据库替换失败: {error}"))?;
     complete_backup(&backup, "恢复主数据库")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::request_stats::{ApiKeyIdentity, NewRequestEntry, RequestStats, Retention};
+
+    #[test]
+    fn review_restore_refreshes_warm_request_filter_dimensions_without_new_traffic() {
+        let _ = logging::process_started_at();
+        let directory = tempfile::tempdir().unwrap();
+        let db = Db::open(&directory.path().join("target.db")).unwrap();
+        let stats = RequestStats::with_db(Some(db.clone()), Retention::default);
+        stats.record(NewRequestEntry::new("before-restore", 200));
+        assert_eq!(stats.filter_options()["models"], json!(["before-restore"]));
+
+        let source = Db::open(&directory.path().join("source.db")).unwrap();
+        let source_stats = RequestStats::with_db(Some(source.clone()), Retention::default);
+        let mut entry = NewRequestEntry::new("restored-model", 200);
+        entry.provider = Some("restored-provider".into());
+        entry.source.client = "restored-client".into();
+        entry.source.api_key = ApiKeyIdentity {
+            source: "key".into(), id: "restored-key".into(), name: "Restored key".into(),
+        };
+        source_stats.record(entry);
+        let backup_file = directory.path().join("restore.sql");
+        let mut writer = std::fs::File::create(&backup_file).unwrap();
+        source.with(|conn| super::super::dump_sql_into(conn, &[], &mut writer)).unwrap().unwrap();
+        drop(writer);
+
+        super::super::import_from_file(&db, &backup_file, directory.path(), "").unwrap();
+        let options = stats.filter_options();
+        assert_eq!(options["models"], json!(["restored-model"]));
+        assert_eq!(options["providers"][0]["id"], "restored-provider");
+        assert!(options["clients"].as_array().unwrap().iter().any(|item| item["value"] == "restored-client"));
+        assert!(options["apiKeys"].as_array().unwrap().iter().any(|item| item["value"] == "key:restored-key"));
+    }
 }

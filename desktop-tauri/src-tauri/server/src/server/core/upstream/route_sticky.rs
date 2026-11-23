@@ -29,6 +29,9 @@ pub(super) struct StickySessions {
     table: Mutex<StickyTable>,
 }
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn entry_id(key: &str, model: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(model.trim().to_ascii_lowercase().as_bytes());
@@ -125,6 +128,20 @@ impl StickySessions {
                 && model.map_or(true, |model| entry.model.split('\0').next().unwrap_or(&entry.model).eq_ignore_ascii_case(model)))
         });
         table.generation = table.generation.wrapping_add(1);
+        before - table.entries.len()
+    }
+
+    pub(super) fn forget_channel(&self, scope: &str, candidate: &str) -> usize {
+        let channel = crate::server::core::routing_groups::member_key(candidate).unwrap_or(candidate);
+        let Ok(mut table) = self.table.lock() else { return 0; };
+        let before = table.entries.len();
+        table.entries.retain(|_, entry| {
+            let entry_scope = entry.model.split('\0').next().unwrap_or(&entry.model);
+            let entry_channel = crate::server::core::routing_groups::member_key(&entry.account_id).unwrap_or(&entry.account_id);
+            !entry_scope.eq_ignore_ascii_case(scope) || entry_channel != channel
+        });
+        // Fault leases guard old successes. Only explicit management clears
+        // advance the global generation and cancel unrelated bindings in flight.
         before - table.entries.len()
     }
 }

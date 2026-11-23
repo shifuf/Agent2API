@@ -528,6 +528,8 @@ pub struct ChatFromAnthropicStream {
     created: i64,
     started: bool,
     finished: bool,
+    /// Distinguish a real terminal from complete() called as an EOF fallback.
+    upstream_terminal: bool,
     /// tool_use 块（按上游 content_block 的 index 记）→ 是否已发过参数
     /// （一个分片都没来时，`content_block_stop` 要补一个空对象参数帧）
     tools: BTreeMap<i64, bool>,
@@ -548,6 +550,7 @@ impl ChatFromAnthropicStream {
             created: crate::server::logging::now_ms() / 1000,
             started: false,
             finished: false,
+            upstream_terminal: false,
             tools: BTreeMap::new(),
             input_tokens: 0,
             cache_read: 0,
@@ -562,7 +565,7 @@ impl ChatFromAnthropicStream {
         let mut out = Vec::new();
         for payload in self.buffer.push(chunk) {
             match payload {
-                None => out.extend(self.finish()),
+                None => { self.upstream_terminal = true; out.extend(self.finish()); },
                 Some(data) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&data) {
                         out.extend(self.consume(&value));
@@ -572,6 +575,9 @@ impl ChatFromAnthropicStream {
         }
         out
     }
+
+    /// A terminal parsed from the upstream, including one buffered until EOF.
+    pub(crate) fn has_upstream_terminal(&self) -> bool { self.upstream_terminal }
 
     /// 上游流结束（没有 `message_stop` 时的兜底收尾）
     pub fn finish(&mut self) -> Vec<bytes::Bytes> {
@@ -584,7 +590,7 @@ impl ChatFromAnthropicStream {
                 if let Ok(value) = serde_json::from_str::<Value>(&data) {
                     out.extend(self.consume(&value));
                 }
-            }
+            } else { self.upstream_terminal = true; }
         }
         out.extend(self.complete());
         out
@@ -596,6 +602,8 @@ impl ChatFromAnthropicStream {
             return Vec::new();
         }
         let kind = string_field(event, "type").to_lowercase();
+        self.upstream_terminal |= kind == "message_stop" || (kind == "message_delta"
+            && event.pointer("/delta/stop_reason").and_then(Value::as_str).is_some_and(|reason| !reason.trim().is_empty()));
         match kind.as_str() {
             "ping" => Vec::new(),
             "error" => self.fail(event),

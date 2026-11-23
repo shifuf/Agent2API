@@ -18,13 +18,32 @@ pub(crate) struct RequestRouting {
     pub turn_id: String,
     pub account_snapshot: Vec<Value>,
     pub classifier_stack: Vec<String>,
+    pub(super) retry_candidate: Option<String>,
+    pub(super) attempt_health: std::sync::Arc<std::sync::Mutex<Option<super::route_health::ChannelLease>>>,
     /// Shared by this request's clones: a fallback consumes a pool only on its
     /// first visit, while unvisited sibling pools retain their next position.
     pub(super) rotation_cursors: std::sync::Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    configuration_profiles: std::sync::Arc<config::RoutingProfiles>,
+    configuration_settings: config::RoutingSettings,
     positions: HashMap<String, usize>,
 }
 
 impl RequestRouting {
+    /// Settlement takes locks in configuration -> health -> affinity order.
+    /// Callbacks must only change memory and must not reacquire CONFIG.
+    pub(super) fn with_current_configuration<T>(&self, settle: impl FnOnce() -> T) -> Option<T> {
+        config::with_routing_snapshot(|profiles, settings| {
+            if std::sync::Arc::ptr_eq(profiles, &self.configuration_profiles) && settings == self.configuration_settings {
+                Some(settle())
+            } else { None }
+        }).flatten()
+    }
+
+    pub(super) fn sticky_faults(&self) -> bool {
+        self.group.is_some() && (self.settings.sticky != config::StickyMode::Off
+            || self.group_projection.accounts.iter().any(|account| account.get("routingStrategyPath").and_then(Value::as_array)
+                .is_some_and(|path| path.iter().any(|policy| policy.get("sticky").and_then(Value::as_str).is_some_and(|mode| mode != "off")))))
+    }
     pub fn conversation_key(&self, headers: &axum::http::HeaderMap, body: &Value) -> String {
         let base = super::route_state::RouteState::conversation_key(headers, body);
         if self.settings.sticky != config::StickyMode::Turn { return base; }
@@ -37,7 +56,8 @@ impl RequestRouting {
         else { self.settings.sticky.ttl_ms().unwrap_or(0) }
     }
     fn capture_with(model: &str, accounts: &[Value],
-        profiles: &config::RoutingProfiles, base: config::RoutingSettings) -> Self {
+        profiles: &config::RoutingProfiles, base: config::RoutingSettings,
+        configuration_profiles: std::sync::Arc<config::RoutingProfiles>) -> Self {
         let ordered = if let Some(profile) = profiles.model_profile(model) {
             crate::server::core::routing_scope::project_accounts(&accounts, profile)
         } else {
@@ -49,24 +69,24 @@ impl RequestRouting {
         Self { settings: profiles.settings_for(model, base), profile: profiles.effective(model).cloned(),
             scope: profiles.scope(model).to_string(), captured_at: crate::server::logging::now_ms(), group: None,
             group_projection: Default::default(), source_test: None, profiles: profiles.clone(), excluded: Vec::new(), rule_trace: Vec::new(), turn_id: String::new(),
-            account_snapshot: accounts.to_vec(), classifier_stack: Vec::new(), rotation_cursors: Default::default(), positions: ordered.iter().enumerate().filter_map(|(index, account)|
+            account_snapshot: accounts.to_vec(), classifier_stack: Vec::new(), retry_candidate: None, attempt_health: Default::default(), rotation_cursors: Default::default(), configuration_profiles, configuration_settings: base, positions: ordered.iter().enumerate().filter_map(|(index, account)|
                 routing::account_id(account).map(|id| (id.to_string(), index))).collect() }
     }
 
     pub fn capture_request(model: &str, store: &crate::server::core::account_store::store::AccountStore,
         body: &Value, scope: Option<&crate::server::core::key_scope::KeyScope>, ignore: bool,
         images: Option<crate::server::core::providers::images::ImageOperation>) -> Result<Self, crate::server::errors::GatewayError> {
-        let (profiles, base) = config::routing_snapshot();
+        let (configuration_profiles, base) = config::routing_snapshot();
         let snapshot = store.routing_snapshot();
         let accounts: Vec<Value> = snapshot.accounts.iter()
             .filter(|account| crate::server::core::account_store::store_view::account_visible(routing::provider_of(account)))
             .map(|account| account.as_ref().clone()).collect();
-        let profiles = crate::server::core::routing_discovery::effective_profiles(&profiles, &accounts);
+        let profiles = crate::server::core::routing_discovery::effective_profiles(&configuration_profiles, &accounts);
         if !ignore && body.get("_wb_route_group_id").and_then(Value::as_str).is_some_and(|id|
             !profiles.group_for_model(model).is_some_and(|group| group.id == id)) {
             return Err(crate::server::errors::GatewayError::with_status(409, "路由组已删除或入口已变更，请重新发起请求；未回退其他路由"));
         }
-        let mut routing = Self::capture_with(model, &accounts, &profiles, base);
+        let mut routing = Self::capture_with(model, &accounts, &profiles, base, configuration_profiles);
         routing.turn_id = turn_identity(body);
         if ignore { routing.source_test = Some(model.to_string()); }
         if !ignore {

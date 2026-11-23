@@ -85,8 +85,13 @@ pub mod schema;
 
 pub(crate) use revisions::AccountChanges;
 
+#[cfg(test)]
+mod tests;
+
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
@@ -122,6 +127,38 @@ struct DbInner {
     /// 库文件路径（打开时确定，之后不变）
     file: PathBuf,
     accounts: Arc<revisions::AccountRevisions>,
+    requests: Arc<AtomicU64>,
+}
+
+thread_local! {
+    static ENTERED_DATABASES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+// Check before locking: std::sync::Mutex cannot be entered twice on one thread.
+// The Arc identity also catches calls made through a cloned Db handle.
+struct DatabaseEntry(usize);
+
+impl DatabaseEntry {
+    fn enter(db: &Db) -> Option<Self> {
+        let identity = Arc::as_ptr(&db.inner) as usize;
+        ENTERED_DATABASES.with(|entered| {
+            let mut entered = entered.borrow_mut();
+            if entered.contains(&identity) { return None; }
+            entered.push(identity);
+            Some(Self(identity))
+        })
+    }
+}
+
+impl Drop for DatabaseEntry {
+    fn drop(&mut self) {
+        ENTERED_DATABASES.with(|entered| {
+            let mut entered = entered.borrow_mut();
+            if let Some(index) = entered.iter().rposition(|identity| *identity == self.0) {
+                entered.remove(index);
+            }
+        });
+    }
 }
 
 impl Db {
@@ -154,12 +191,14 @@ impl Db {
         apply_pragmas(&conn)?;
         schema::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
         let accounts = Arc::new(revisions::AccountRevisions::default());
-        install_cloud_sync_hook(&conn, accounts.clone());
+        let requests = Arc::new(AtomicU64::new(0));
+        install_cloud_sync_hook(&conn, accounts.clone(), requests.clone());
         Ok(Db {
             inner: Arc::new(DbInner {
                 conn: Mutex::new(conn),
                 file: path.to_path_buf(),
                 accounts,
+                requests,
             }),
         })
     }
@@ -186,6 +225,7 @@ impl Db {
     /// （真正的数据在库里）。两处判据不同正是因为**保护对象不同**：这里持的是
     /// 连接本身（状态可能停在事务中间），那里持的是空标记。
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> T) -> Option<T> {
+        let _entry = DatabaseEntry::enter(self)?;
         match self.inner.conn.lock() {
             Ok(conn) => Some(f(&conn)),
             Err(_) => None,
@@ -209,6 +249,7 @@ impl Db {
     /// 调用点：`AccountStore::with_conn_mut`（账号层的批量写与整份状态差异写 ——
     /// 批量改/删、`migrate_startup`、三家旧数据导入、导入合并）。
     pub fn with_mut<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> Option<T> {
+        let _entry = DatabaseEntry::enter(self)?;
         match self.inner.conn.lock() {
             Ok(mut conn) => Some(f(&mut conn)),
             Err(_) => None,
@@ -217,6 +258,15 @@ impl Db {
 
     pub(crate) fn account_revision(&self) -> u64 {
         self.inner.accounts.current()
+    }
+
+    pub(crate) fn request_revision(&self) -> u64 {
+        self.inner.requests.load(Ordering::Acquire)
+    }
+
+    /// SQLite Backup replaces pages without invoking the requests update hook.
+    pub(crate) fn invalidate_requests(&self) {
+        self.inner.requests.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn account_changes(&self, since: Option<u64>) -> AccountChanges {
@@ -306,10 +356,13 @@ fn apply_pragmas(conn: &Connection) -> Result<(), String> {
 /// 钩子只服务自动同步这一个可选功能。注册不上（旧版 SQLite 等）时最坏是
 /// 「自动同步不触发」，手动上传照样可用 —— 不该让整个网关起不来。
 /// 账号表同时记录行级失效信号；回调不读库，也不获取账号或快照的锁。
-fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRevisions>) {
+fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRevisions>, requests: Arc<AtomicU64>) {
     let result = conn.update_hook(Some(move |_action, _db: &str, table: &str, rowid: i64| {
         if table == "accounts" {
             accounts.changed(rowid);
+        }
+        if table == "requests" {
+            requests.fetch_add(1, Ordering::Release);
         }
         crate::server::core::cloud_sync::auto_sync::on_table_change(table);
     }));

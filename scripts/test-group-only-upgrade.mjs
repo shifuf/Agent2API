@@ -55,8 +55,9 @@ async function ok(...args) { const result = await request(...args); assert.equal
 async function start(binary, expectedStatus = 200) {
   child = spawn(binary, [], { windowsHide: true, cwd: directory, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, AGENT2API_PROXY_HOME: directory, AGENT2API_HOST: '127.0.0.1', AGENT2API_PROXY_PORT: String(port), AGENT2API_PROXY_API_KEY: admin, AGENT2API_ACCOUNT_KEY: '8'.repeat(64), AGENT2API_SELF_UPDATE: '0', AGENT2API_WINDOWS_UPDATE: '0', AGENT2API_PANEL_PORT: '', AGENT2API_ADMIN_USER: '', AGENT2API_ADMIN_PASSWORD: '', AGENT2API_ADMIN_PASSWORD_HASH: '', NODE_OPTIONS: `--require=${JSON.stringify(fixturePath)}` } })
   exited = once(child, 'exit')
-  for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { log = (log + chunk).slice(-100000) })
-  for (let i = 0; i < 160; i++) { if (child.exitCode !== null) throw new Error(`Server exited ${child.exitCode}`); try { const response = await request('/api/routing/groups'); if (response.status === expectedStatus && log.includes('upgrade-fixture」v1.0.0 已加载')) return } catch {} await delay(250) }
+  let bootLog = ''
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { log = (log + chunk).slice(-100000); bootLog = (bootLog + chunk).slice(-100000) })
+  for (let i = 0; i < 160; i++) { if (child.exitCode !== null) throw new Error(`Server exited ${child.exitCode}`); try { const response = await request('/api/routing/groups'); if (response.status === expectedStatus && bootLog.includes('upgrade-fixture」v1.0.0 已加载')) return } catch {} await delay(250) }
   throw new Error('Startup timed out')
 }
 async function stop() { if (child?.exitCode === null) { child.kill(); await exited } }

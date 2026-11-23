@@ -462,6 +462,8 @@ pub struct ChatFromResponsesStream {
     created: i64,
     started: bool,
     finished: bool,
+    /// Set only by parsed upstream events, never by the EOF compatibility close.
+    upstream_terminal: bool,
     /// 同一工具的 item_id / call_id / output_index 都映射到唯一槽位。
     tools: Vec<ToolSlot>,
     tool_aliases: BTreeMap<String, usize>,
@@ -490,6 +492,7 @@ impl ChatFromResponsesStream {
             created: crate::server::logging::now_ms() / 1000,
             started: false,
             finished: false,
+            upstream_terminal: false,
             tools: Vec::new(),
             tool_aliases: BTreeMap::new(),
             anonymous_arguments: false,
@@ -502,7 +505,7 @@ impl ChatFromResponsesStream {
         let mut out = Vec::new();
         for payload in self.buffer.push(chunk) {
             match payload {
-                None => out.extend(self.finish()),
+                None => { self.upstream_terminal = true; out.extend(self.finish()); },
                 Some(data) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&data) {
                         out.extend(self.consume(&value));
@@ -512,6 +515,9 @@ impl ChatFromResponsesStream {
         }
         out
     }
+
+    /// A terminal parsed from the upstream, including one buffered until EOF.
+    pub(crate) fn has_upstream_terminal(&self) -> bool { self.upstream_terminal }
 
     /// 上游流结束（没有终态事件时的兜底收尾）
     pub fn finish(&mut self) -> Vec<bytes::Bytes> {
@@ -525,7 +531,7 @@ impl ChatFromResponsesStream {
                 if let Ok(value) = serde_json::from_str::<Value>(&data) {
                     out.extend(self.consume(&value));
                 }
-            }
+            } else { self.upstream_terminal = true; }
         }
         out.extend(self.complete(None));
         out
@@ -546,6 +552,8 @@ impl ChatFromResponsesStream {
             self.usage = Some(usage.clone());
         }
         let kind = string_field(event, "type").to_lowercase();
+        self.upstream_terminal |= matches!(kind.as_str(), "response.completed" | "response.done"
+            | "response.failed" | "response.cancelled" | "response.canceled" | "response.incomplete");
         match kind.as_str() {
             "response.created" => {
                 if let Some(id) = event

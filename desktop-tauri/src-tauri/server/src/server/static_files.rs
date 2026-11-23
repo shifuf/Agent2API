@@ -13,10 +13,8 @@
 //!   · 注入的桥接脚本只在 index.html 上发生，其它原样透出。
 //!
 //! ── 缓存 ────────────────────────────────────────────────────
-//! 文件带 ETag（程序版本 + 修改时间 + 大小），`Cache-Control` 为 `no-cache`：
-//! 浏览器可以存下来，但每次使用前必须回源校验。文件没变时回 304、不传正文；
-//! 部署新 `ui/` 后 mtime 变化、ETag 随之变化，浏览器立刻拿到新版 —— 既不会
-//! 出现「发新版后页面引用了旧 js」，也不必每次打开都重下几 MB。
+//! HTML 与 sw.js 始终返回新正文并使用 no-store，页面中的本地资源附加版本指纹。
+//! 普通资源仍使用 ETag + no-cache，未变化时回 304；压缩版本按 Vary 分桶。
 //! 压缩由 `compression` 中间件统一处理，这里只声明 `Vary: Accept-Encoding`。
 
 use std::path::PathBuf;
@@ -26,6 +24,11 @@ use axum::http::{header, Request, Response, StatusCode};
 use axum::response::Response as AxumResponse;
 
 use crate::server::errors;
+
+mod cache;
+
+#[cfg(test)]
+mod tests;
 
 /// 可以缓存，但每次使用前都要回源校验（详见模块头的「缓存」段）。
 const CACHE_CONTROL: &str = "no-cache";
@@ -58,7 +61,7 @@ pub async fn serve(request: Request<Body>, ui_dir: PathBuf) -> AxumResponse {
     let Some(file_path) = resolve_file(&ui_dir, &path) else {
         return not_found(request).await;
     };
-    read_response(&file_path, if_none_match.as_deref()).await
+    read_response(&ui_dir, &file_path, if_none_match.as_deref()).await
 }
 
 /// 把 URL 路径解析到 `ui/` 内的具体文件（`None` = 不存在 / 非法）。
@@ -110,13 +113,16 @@ fn resolve_file(ui_dir: &PathBuf, url_path: &str) -> Option<PathBuf> {
 ///
 /// ETag 命中时直接回 304，不读文件正文 —— 这是「第二次打开面板不再重下
 /// 几 MB 资源」的关键路径。
-async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> AxumResponse {
+async fn read_response(ui_dir: &PathBuf, file_path: &PathBuf, if_none_match: Option<&str>) -> AxumResponse {
     let metadata = match tokio::fs::metadata(file_path).await {
         Ok(metadata) => metadata,
         Err(_) => return errors::not_found_response("GET", "static"),
     };
     let etag = etag_of(&metadata);
-    if if_none_match.is_some_and(|value| etag_matches(value, &etag)) {
+    let html = file_path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("html"));
+    let entrypoint = html || file_path.file_name().and_then(|name| name.to_str()) == Some("sw.js");
+    let cache_control = if entrypoint { "no-store" } else { CACHE_CONTROL };
+    if !entrypoint && if_none_match.is_some_and(|value| etag_matches(value, &etag)) {
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, &etag)
@@ -135,6 +141,20 @@ async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> Axum
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == "index.html");
+    // Rewrite only the file's HTML; the injected bridge contains JS templates.
+    let bytes = if html { cache::rewrite_html_assets(&bytes, &|candidates| {
+        let html_dir = file_path.parent().map(PathBuf::from).unwrap_or_else(|| ui_dir.clone());
+        for candidate in candidates {
+            let candidate = candidate.split(['?', '#']).next().unwrap_or("");
+            let resolved = if !candidate.starts_with('/') && html_dir != *ui_dir {
+                resolve_file(&html_dir, candidate).or_else(|| resolve_file(ui_dir, candidate))
+            } else { resolve_file(ui_dir, candidate) };
+            if let Some(asset) = resolved {
+                if let Ok(metadata) = std::fs::metadata(asset) { return version_stamp_of(&metadata); }
+            }
+        }
+        version_stamp_of(&metadata)
+    }) } else { bytes };
     let body = if is_index {
         inject_web_shim(&bytes)
     } else {
@@ -144,7 +164,7 @@ async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> Axum
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
-        .header(header::CACHE_CONTROL, CACHE_CONTROL)
+        .header(header::CACHE_CONTROL, cache_control)
         .header(header::ETAG, &etag)
         .header(header::VARY, VARY)
         .header(header::CONTENT_LENGTH, body.len())
@@ -159,6 +179,10 @@ async fn read_response(file_path: &PathBuf, if_none_match: Option<&str>) -> Axum
 /// 足以区分新旧。加上程序版本是为了覆盖 `index.html` 的桥接注入脚本 ——
 /// 那个脚本编在二进制里，升级后即使 html 文件没动，正文也可能变。
 fn etag_of(metadata: &std::fs::Metadata) -> String {
+    format!("W/\"{}\"", version_stamp_of(metadata))
+}
+
+fn version_stamp_of(metadata: &std::fs::Metadata) -> String {
     let modified = metadata
         .modified()
         .ok()
@@ -166,7 +190,7 @@ fn etag_of(metadata: &std::fs::Metadata) -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!(
-        "W/\"{}-{:x}-{:x}\"",
+        "{}-{:x}-{:x}",
         env!("CARGO_PKG_VERSION"),
         metadata.len(),
         modified

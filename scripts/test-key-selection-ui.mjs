@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { isolateUpdateNotice } from './fixtures/update-notice.mjs';
 
 // Real browser + API, with a fresh temporary database and synthetic credentials.
 // Build the UI/server beforehand; this script never accesses the installed data directory.
@@ -93,6 +94,7 @@ try {
   await api('/api/custom-providers/remove', { id: retired });
   browser = await chromium.launch({ ...(browserPath ? { executablePath: browserPath } : {}), headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN', permissions: ['clipboard-read', 'clipboard-write'] });
+  await isolateUpdateNotice(context);
   await context.addInitScript(key => {
     localStorage.setItem('agent2api.webKey', key);
     localStorage.setItem('agent2api.webKey.origin', key);

@@ -63,14 +63,14 @@ export function RoutingSettingsDialog({ workspace, onClose, protectionOnly = fal
             <FieldContent><FieldLabel htmlFor={`routing-${key}`}>{label}</FieldLabel><FieldDescription>{hint}</FieldDescription></FieldContent>
             <Switch id={`routing-${key}`} checked={draft[key]} disabled={busy} onCheckedChange={value => update(key, value)} />
           </Field>)}
-          {draft.routingBreakerEnabled ? <div className='grid grid-cols-3 gap-3'>
+          <div className={draft.routingBreakerEnabled ? 'grid grid-cols-3 gap-3' : 'grid grid-cols-1 gap-3'}>
             {([
               ['routingBreakerThreshold', t('失败阈值'), 1, 20],
-              ['routingBreakerTimeoutSeconds', t('熔断时长（秒）'), 10, 600],
+              ['routingBreakerTimeoutSeconds', t('熔断与粘滞冻结时长（秒）'), 10, 600],
               ['routingBreakerSuccessThreshold', t('恢复阈值'), 1, 10],
-            ] as const).map(([key, label, min, max]) => <Field key={key}><FieldLabel>{label}</FieldLabel><Input type='number' min={min} max={max} step={1}
+            ] as const).filter(([key]) => draft.routingBreakerEnabled || key === 'routingBreakerTimeoutSeconds').map(([key, label, min, max]) => <Field key={key}><FieldLabel>{label}</FieldLabel><Input type='number' min={min} max={max} step={1}
               disabled={busy} value={draft[key]} onChange={event => update(key, Number(event.currentTarget.value))} /></Field>)}
-          </div> : null}
+          </div>
         </DialogSection>
         {error ? <p role='alert' className='text-destructive text-xs'>{error}</p> : null}
       </DialogBody>

@@ -137,6 +137,14 @@ pub fn routing_snapshot() -> (Arc<RoutingProfiles>, super::RoutingSettings) {
         .unwrap_or_default()
 }
 
+/// Keep the configuration read lock until the synchronous routing settlement
+/// finishes, so a configuration write cannot cross its identity check.
+pub(crate) fn with_routing_snapshot<T>(settle: impl FnOnce(&Arc<RoutingProfiles>, super::RoutingSettings) -> T) -> Option<T> {
+    let guard = CONFIG.read().ok()?;
+    let config = guard.as_ref()?;
+    Some(settle(&config.routing_profiles, config.routing))
+}
+
 pub fn settings_for_model(model: &str) -> super::RoutingSettings {
     CONFIG.read().ok().and_then(|guard| guard.as_ref().map(|config| config.routing_profiles.settings_for(model, config.routing)))
         .unwrap_or_default()

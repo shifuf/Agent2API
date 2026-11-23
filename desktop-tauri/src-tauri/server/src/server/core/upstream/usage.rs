@@ -567,6 +567,12 @@ struct LiveWrite {
     stamp: LiveStamp,
 }
 
+#[derive(Clone)]
+pub(super) struct ActiveAttempt {
+    pub candidate_id: String,
+    pub started_at: i64,
+}
+
 /// usage 上报槽：转发链路往里写，记账点在收尾时读。
 ///
 /// 为什么用共享槽位而不是把数据一路 return 出来：流式转发的收尾发生在
@@ -574,6 +580,11 @@ struct LiveWrite {
 /// 只能靠一个双方都能拿到的句柄传话。槽位只在一条请求内共享，不存在争用。
 pub struct RequestTelemetry {
     inner: Mutex<TelemetrySnapshot>,
+    /// Sending state is independent of the bounded, public attempt history.
+    active_attempt: Mutex<Option<ActiveAttempt>>,
+    /// 0 = unknown, 1 = raw EOF without terminal, 2 = raw terminal observed.
+    /// Kept outside the public snapshot and read before committing channel health.
+    upstream_stream_end: std::sync::atomic::AtomicU8,
     /// 调试模式的原始报文采集器（`core::debug_traffic`；None = 未开启调试模式）。
     ///
     /// 挂在这里而不是层层传参：流式路径的采集发生在 `ForwardStream::poll_next`
@@ -624,9 +635,29 @@ impl RequestTelemetry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(TelemetrySnapshot::default()),
+            active_attempt: Mutex::new(None),
+            upstream_stream_end: std::sync::atomic::AtomicU8::new(0),
             capture: Mutex::new(None),
             live: Mutex::new(LiveWrite::default()),
             cancel: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn note_upstream_stream_end(&self, complete: bool) {
+        self.upstream_stream_end.store(if complete { 2 } else { 1 }, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(super) fn active_attempt(&self) -> Option<ActiveAttempt> {
+        self.active_attempt.lock().unwrap_or_else(|error| error.into_inner()).clone()
+    }
+
+    pub(super) fn clear_active_attempt(&self) {
+        *self.active_attempt.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    }
+
+    pub(super) fn upstream_stream_complete(&self) -> Option<bool> {
+        match self.upstream_stream_end.load(std::sync::atomic::Ordering::Acquire) {
+            1 => Some(false), 2 => Some(true), _ => None,
         }
     }
 

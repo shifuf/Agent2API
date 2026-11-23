@@ -165,6 +165,18 @@ fn select_target_account_sync(
     request_routing: &super::route_context::RequestRouting,
 ) -> Result<RouteTarget, GatewayError> {
     let mut accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
+    if accounts.is_empty() && request_routing.sticky_faults() {
+        let eligible = request_routing.accounts(accounts_in_providers(service, providers, pinned));
+        if let Some(until) = eligible.iter().filter_map(|account| service.route.health.frozen_until(
+            &request_routing.scope, &crate::server::core::routing_groups::attempt_key(account), logging::now_ms())).min() {
+            return Err(cooling_error(until, logging::now_ms()));
+        }
+    }
+    if let Some(candidate) = &request_routing.retry_candidate {
+        if accounts.iter().any(|account| crate::server::core::routing_groups::attempt_key(account) == *candidate) {
+            accounts.retain(|account| crate::server::core::routing_groups::attempt_key(account) == *candidate);
+        }
+    }
     super::route_affinity::decorate(service, request_routing, conv_key, &mut accounts, tried_ids)?;
     if accounts.is_empty() && request_routing.group.is_some() {
         let reasons: Vec<_> = request_routing.group_projection.blocked.iter().take(3)
@@ -556,11 +568,17 @@ fn scoped_accounts(
     }).filter(|account| {
         pinned.is_some() || request_routing.is_some_and(|routing| routing.settings.sticky == config::StickyMode::Strict) || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
             .is_some_and(|until| until > logging::now_ms())
-    }).collect();
+    }).filter(|account| !request_routing.is_some_and(|routing| routing.sticky_faults()
+        && service.route.health.frozen_until(&routing.scope, &crate::server::core::routing_groups::attempt_key(account), logging::now_ms()).is_some())).collect();
     let routable: Vec<Value> = accounts.iter()
         .filter(|account| !readiness::gated(provider_of(account)))
         .cloned().collect();
     if routable.is_empty() { accounts } else { routable }
+}
+
+pub(super) fn cooling_error(until: i64, now: i64) -> GatewayError {
+    GatewayError::with_status(503, "当前路由的渠道连续失败后已冻结，请等待恢复或检查上游")
+        .with_code("route_cooling_down").with_retry_after_seconds((until.saturating_sub(now).max(1) as u64).div_ceil(1_000))
 }
 
 /// 组装选路结果；代理解析失败时把提示**带进选路结果**（本次回退直连）。

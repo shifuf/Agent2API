@@ -37,6 +37,7 @@ export function RoutingGroupOptions({ group, choices, groups, expandedMembers, d
       {group.strategy === 'manual' ? <RoutingOption label={t('手动指定成员')} full><select aria-label={t('手动指定成员')} value={group.pick || ''} onChange={event => change({ pick: event.currentTarget.value })}>
         <option value=''>{t('第一个成员')}</option>{selectableMembers.map(member => <option key={member.id} value={member.id}>{labelMember(member)}{member.included ? '' : ` · ${t('已停用')}`}</option>)}</select></RoutingOption> : null}
     </div>
+    {group.sticky !== 'off' ? <p className='routing-config-note'>{t('开启粘滞后，渠道连续失败两次会解除绑定、冻结并切换；冻结使用全局熔断时长（默认 60 秒），到期恢复。已返回内容的请求只影响后续选路。')}</p> : null}
     <details className='routing-magpie-details'><summary>{t('超时与故障回退')}</summary><div className='routing-magpie-fields'>
       <RoutingOption label={t('首内容超时（秒）')}><Input type='number' min={0} max={3600} value={group.firstToken || 0} onChange={event => change({ firstToken: Number(event.currentTarget.value) })} /></RoutingOption>
       <RoutingOption label={t('短暂失败等待（秒）')}><Input type='number' min={-1} max={240} value={group.patience ?? -1} onChange={event => change({ patience: Number(event.currentTarget.value) })} /></RoutingOption>

@@ -6,6 +6,7 @@ import net from 'node:net'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
+import { isolateUpdateNotice } from './fixtures/update-notice.mjs'
 
 // Real HTTP and browser behavior, using only disposable accounts and synthetic secrets.
 const root = path.resolve(import.meta.dirname, '..')
@@ -93,6 +94,7 @@ try {
     const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright')
     browser = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true })
     const context = await browser.newContext({ locale: 'zh-CN', viewport: { width: 1440, height: 1000 }, permissions: ['clipboard-read', 'clipboard-write'] })
+    await isolateUpdateNotice(context)
     await context.addInitScript(key => { localStorage.setItem('agent2api.webKey', key); localStorage.setItem('agent2api.webKey.origin', key) }, admin)
     const page = await context.newPage()
     let reads = 0

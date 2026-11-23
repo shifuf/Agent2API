@@ -275,14 +275,16 @@ try {
     const reset = await save({ ...stored, firstToken: 0, rules: [] }); const cleared = reset.groups.find(row => row.group.id === legacy.id).group
     assert.equal(cleared.firstToken, 0); assert.deepEqual(cleared.rules, [])
   })
-  await step('strict affinity reports a bound-account failure without sending to another account', async () => {
+  await step('strict affinity releases its bound account after two failures and selects the next account', async () => {
     const strict = group('strict', { sticky: 'strict' }); await save(strict)
     const headers = { 'x-session-id': 'strict-session' }
     const answer = content(await chat(strict.model, {}, adminKey, headers)); const selected = answer.split(':')[0]
     failure = selected; const before = calls.length
     const failed = await request('/v1/chat/completions', { model: strict.model, messages: [{ role: 'user', content: 'next' }] }, adminKey, 'POST', headers)
-    failure = ''; assert(failed.status >= 400); assert(calls.slice(before).length > 0)
-    assert(calls.slice(before).every(call => call.source === selected))
+    failure = ''; assert.equal(failed.status, 200)
+    const attempts = calls.slice(before).map(call => call.source)
+    assert.deepEqual(attempts.slice(0, 2), [selected, selected]); assert.equal(attempts.length, 3)
+    assert.notEqual(attempts[2], selected)
   })
   console.log(`PASS ${results.length} routing integration scenarios`)
 } catch (error) { console.error(error); process.exitCode = 1 }

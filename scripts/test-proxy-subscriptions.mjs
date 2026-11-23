@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
+import dgram from 'node:dgram'
 import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
@@ -26,6 +27,7 @@ const frontAuth = []
 const proxyCalls = []
 let remoteNodes = []
 let remoteGroups = []
+let dnsSocket, dnsQueries = 0
 
 function track(socket) {
   sockets.add(socket)
@@ -95,6 +97,19 @@ async function toggle(id, enabled) {
   await ok('/api/subscriptions/save', { ...current, enabled })
 }
 
+async function kernelState() {
+  const state = await ok('/api/subscriptions/kernel')
+  assert.ok(Number.isInteger(state.pendingOperations), 'Kernel readiness must include active and queued worker operations')
+  return state
+}
+
+async function kernelIdle(label) {
+  return until(label, async () => {
+    const state = await kernelState()
+    return state.running && state.pendingOperations === 0 ? state : false
+  })
+}
+
 try {
   const origin = await listen(async (req, res) => {
     if (req.url === '/speed') { res.end(Buffer.alloc(6 * 1024 * 1024, 65)); return }
@@ -125,6 +140,36 @@ try {
   })
   const originPort = origin.address().port
   const originUrl = `http://127.0.0.1:${originPort}`
+  // The real proxy hostname exists only in this subscription's DNS resolver.
+  // Falling back to the host resolver must make this test fail.
+  dnsSocket = dgram.createSocket('udp4')
+  dnsSocket.on('message', (packet, peer) => {
+    if (packet.length < 17 || packet.readUInt16BE(4) !== 1) return
+    let offset = 12
+    const labels = []
+    while (offset < packet.length && packet[offset] !== 0) {
+      const length = packet[offset++]
+      if (length > 63 || offset + length > packet.length) return
+      labels.push(packet.subarray(offset, offset + length).toString())
+      offset += length
+    }
+    if (offset + 5 > packet.length) return
+    const type = packet.readUInt16BE(offset + 1)
+    const question = packet.subarray(12, offset + 5)
+    const matches = labels.join('.') === 'gateway-node.fixture.test'
+    if (matches) dnsQueries++
+    const header = Buffer.alloc(12)
+    packet.copy(header, 0, 0, 2)
+    header.writeUInt16BE(matches ? 0x8180 : 0x8183, 2)
+    header.writeUInt16BE(1, 4)
+    const answer = matches && type === 1 ? Buffer.from([
+      0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 127, 0, 0, 1,
+    ]) : Buffer.alloc(0)
+    header.writeUInt16BE(answer.length ? 1 : 0, 6)
+    dnsSocket.send(Buffer.concat([header, question, answer]), peer.port, peer.address)
+  })
+  dnsSocket.bind(0, '127.0.0.1')
+  await once(dnsSocket, 'listening')
   // Only this one local origin is forwarded. Mihomo's automatic HTTPS health
   // checks are rejected here, so they cannot contact their public destination.
   const proxy = await listen((req, res) => {
@@ -217,15 +262,6 @@ try {
   await rejected('/api/subscriptions/add', { name: 'bad base64', contentBase64: 'not@base64' })
   await rejected('/api/subscriptions/refresh', { id: 'missing-subscription' }, 404)
 
-  if (kernelSource) {
-    await ok('/api/subscriptions/kernel/import', { path: path.resolve(kernelSource), dir: path.join(temp, 'test-kernel') })
-    await until('local kernel import', async () => {
-      const state = await ok('/api/subscriptions/kernel')
-      assert.ok(!state.import?.error, `Kernel import failed: ${state.import?.error}`)
-      return state.installed && !state.installBusy && !state.import?.active
-    })
-  }
-
   const remoteInput = { name: 'Local HTTP subscription', url: `${originUrl}/subscription.yaml` }
   const remote = (await ok('/api/subscriptions/add', remoteInput)).items.find(item => item.url === remoteInput.url)
   assert.ok(remote)
@@ -241,6 +277,50 @@ try {
   await toggle(local.id, true)
   assert.equal((await subscription(local.id)).kind, 'local', 'Editing without re-upload must preserve local content/kind')
 
+  // Full subscriptions often put account notices in the selectable group too.
+  // Removing notice nodes must preserve the group and its real member order.
+  const notices = [
+    '剩余流量：10 GB', '套餐到期：长期有效',
+    '禁止注册机，脚本，批量请求，会封号', '域名：https://subscription.example',
+  ]
+  const noticeContent = Buffer.from(JSON.stringify({
+    proxies: [
+      ...notices.map(name => ({ name, type: 'http', server: '127.0.0.1', port: 1 })),
+      node('notice-exit-a'), node('notice-exit-b'),
+    ],
+    'proxy-groups': [{ name: 'notice-selection', type: 'select',
+      proxies: [...notices, 'notice-exit-b', 'notice-exit-a'] }],
+  })).toString('base64')
+  const noticeInput = { name: 'Account notices', fileName: 'notices.yaml', contentBase64: noticeContent }
+  const notice = (await ok('/api/subscriptions/add', noticeInput)).items.find(item => item.name === noticeInput.name)
+  assert.ok(notice)
+
+  const resolver = `127.0.0.1:${dnsSocket.address().port}`
+  const dnsListenerReserve = dgram.createSocket('udp4')
+  dnsListenerReserve.bind(0, '127.0.0.1')
+  await once(dnsListenerReserve, 'listening')
+  const dnsListenerPort = dnsListenerReserve.address().port
+  await new Promise(resolve => dnsListenerReserve.close(resolve))
+  const dnsInput = { name: 'Subscription DNS', fileName: 'dns.yaml', contentBase64: Buffer.from(JSON.stringify({
+    dns: { enable: true, listen: `0.0.0.0:${dnsListenerPort}`, nameserver: [resolver],
+      'default-nameserver': ['127.0.0.1'], 'proxy-server-nameserver': [resolver] },
+    proxies: [node('dns-exit', 'gateway-node.fixture.test')],
+    'proxy-groups': [{ name: 'dns-selection', type: 'select', proxies: ['dns-exit'] }],
+  })).toString('base64') }
+  const dnsSubscription = (await ok('/api/subscriptions/add', dnsInput)).items.find(item => item.name === dnsInput.name)
+  assert.ok(dnsSubscription)
+
+  // Prepare the fixtures before import so one completed worker operation loads
+  // them all. A pool snapshot from an earlier queued restart is not readiness.
+  if (kernelSource) {
+    await ok('/api/subscriptions/kernel/import', { path: path.resolve(kernelSource), dir: path.join(temp, 'test-kernel') })
+    await until('local kernel import', async () => {
+      const state = await kernelState()
+      assert.ok(!state.import?.error, `Kernel import failed: ${state.import?.error}`)
+      return state.installed && !state.installBusy && !state.import?.active && state.pendingOperations === 0
+    })
+  }
+
   if (!kernelSource) {
     await toggle(remote.id, false)
     await rejected('/api/subscriptions/refresh', { id: remote.id })
@@ -253,6 +333,39 @@ try {
     await until('HTTP subscription nodes', async () => (await poolNode(remote.id, 'stable-node')) && (await poolNode(remote.id, 'unused-node')))
     await until('local YAML node', () => poolNode(local.id, 'local-imported-node'))
     assert.ok(subscriptionCalls > 0, 'The gateway kernel must fetch the local HTTP subscription')
+    await until('notice subscription nodes', () => poolNode(notice.id, 'notice-exit-a'))
+    const noticeGroup = (await ok('/api/subscriptions/groups/members', {
+      providerId: notice.id, group: 'notice-selection',
+    })).groups[0]
+    assert.equal(noticeGroup.available, true, 'Filtering account notices must not discard a usable subscription group')
+    assert.deepEqual(noticeGroup.members.map(member => member.name), ['notice-exit-b', 'notice-exit-a'])
+    assert.equal(noticeGroup.count, 2)
+    for (const name of notices) assert.equal(await poolNode(notice.id, name), undefined, 'Account notices must not become proxy choices')
+    await ok('/api/subscriptions/groups/select', {
+      providerId: notice.id, group: 'notice-selection', node: 'notice-exit-a',
+    })
+    await rejected('/api/subscriptions/groups/select', {
+      providerId: notice.id, group: 'notice-selection', node: notices[0],
+    })
+    await until('DNS subscription nodes', () => poolNode(dnsSubscription.id, 'dns-exit'))
+    const dnsTest = await ok('/api/subscriptions/groups/test', {
+      providerId: dnsSubscription.id, group: 'dns-selection', node: 'dns-exit',
+      kind: 'delay', id: 'subscription-dns-test', url: `${originUrl}/`,
+    })
+    assert.equal(dnsTest.success, true, 'Subscription DNS must resolve the selected proxy hostname')
+    assert.ok(dnsQueries > 0, 'The kernel must query the subscription resolver')
+    const listenerProbe = dgram.createSocket('udp4')
+    let probeListening = false
+    try {
+      listenerProbe.bind(dnsListenerPort, '127.0.0.1')
+      await once(listenerProbe, 'listening')
+      probeListening = true
+    } finally {
+      if (probeListening) await new Promise(resolve => listenerProbe.close(resolve))
+    }
+    await ok('/api/subscriptions/remove', { id: dnsSubscription.id })
+    await ok('/api/subscriptions/remove', { id: notice.id })
+    await kernelIdle('fixture removal completed')
     const selected = await poolNode(remote.id, 'stable-node')
     const channel = await ok('/api/custom-providers', { name: 'Subscription account', baseUrl: `${originUrl}/v1`,
       protocol: 'chat_completions', keyGroups: [{ id: 'group-local', name: 'Local key', apiKeys: ['local-upstream-key'],
@@ -267,7 +380,8 @@ try {
           model: 'wire-local', included: true, accountScope: 'selected', accounts: [accountId] }] } }, 'PUT')
     const readyNode = () => until('referenced node listener', async () => {
       const current = await poolNode(remote.id, 'stable-node')
-      return current?.enabled && current.port && (await ok('/api/subscriptions/kernel')).running ? current : false
+      const state = await kernelState()
+      return current?.enabled && current.port && state.running && state.pendingOperations === 0 ? current : false
     })
     const chatBody = { model: 'subscription-smoke', stream: false, messages: [{ role: 'user', content: 'ping' }] }
     async function chatThrough(expectedPassword) {
@@ -287,8 +401,8 @@ try {
     await chatThrough('old-password')
     const chainNode = await poolNode(local.id, 'local-imported-node')
     await ok(`/api/accounts/${accountId}`, { proxy: { source: 'pool', proxyId: chainNode.id } }, 'PATCH')
-    await until('chain listener', async () => (await poolNode(local.id, 'local-imported-node'))?.port
-      && (await ok('/api/subscriptions/kernel')).running)
+    await kernelIdle('chain listener rebuild completed')
+    assert.ok((await poolNode(local.id, 'local-imported-node'))?.port)
     const chainBefore = chainCalls
     await chatThrough('old-password')
     assert.ok(chainCalls > chainBefore, 'Full YAML dialer group must actually tunnel through the front proxy')
@@ -297,8 +411,8 @@ try {
     const groupNode = await poolNode(local.id, 'exit-group')
     assert.ok(groupNode, 'Exit group is a stable pool target')
     await ok(`/api/accounts/${accountId}`, { proxy: { source: 'pool', proxyId: groupNode.id } }, 'PATCH')
-    await until('group listener', async () => (await poolNode(local.id, 'exit-group'))?.port
-      && (await ok('/api/subscriptions/kernel')).running)
+    await kernelIdle('group listener rebuild completed')
+    assert.ok((await poolNode(local.id, 'exit-group'))?.port)
     const choose = (node) => ok('/api/subscriptions/groups/select', { ...groupInput, node })
     await choose('second-exit')
     await chatThrough('second-password')
@@ -323,9 +437,9 @@ try {
     await ok('/api/subscriptions/kernel/restart', {})
     await until('restored group selection', async () => {
       const group = (await ok('/api/subscriptions/groups/members', groupInput)).groups[0]
-      const state = await ok('/api/subscriptions/kernel')
+      const state = await kernelState()
       const pid = JSON.parse(await readFile(path.join(state.kernelDir, 'kernel-state.json'), 'utf8')).pid
-      return group.available && group.selected === 'second-exit' && pid !== runtimeBeforeRestart && state.running
+      return group.available && group.selected === 'second-exit' && pid !== runtimeBeforeRestart && state.running && state.pendingOperations === 0
     })
     await chatThrough('second-password')
     assert.equal((await ok('/api/subscriptions/groups/members', { providerId: local.id, group: 'front-group' })).groups[0].selected, 'second-front')
@@ -359,10 +473,10 @@ try {
     const pidBefore = JSON.parse(await readFile(path.join(kernelBefore.kernelDir, 'kernel-state.json'), 'utf8')).pid
     await ok('/api/subscriptions/refresh', { id: remote.id })
     await until('same-name server/password refresh', async () => {
-      const state = await ok('/api/subscriptions/kernel')
+      const state = await kernelState()
       const config = await readFile(path.join(state.kernelDir, 'config.yaml'), 'utf8').catch(() => '')
       const runtime = await readFile(path.join(state.kernelDir, 'kernel-state.json'), 'utf8').then(JSON.parse).catch(() => ({}))
-      return subscriptionCalls > fetchedBefore && state.running && runtime.pid && runtime.pid !== pidBefore
+      return subscriptionCalls > fetchedBefore && state.running && state.pendingOperations === 0 && runtime.pid && runtime.pid !== pidBefore
         && config.includes('server: localhost') && config.includes('password: new-password')
     })
     assert.equal((await readyNode()).id, selected.id)
@@ -394,17 +508,25 @@ try {
   throw error
 } finally {
   if (child && child.exitCode === null && child.signalCode === null && !spawnError) {
+    // Import preparation can still enqueue its command after the handler returns.
+    // Drain that preparation before placing the final stop behind all work.
+    for (let attempt = 0; attempt < 180; attempt++) {
+      const status = await request('/api/subscriptions/kernel').catch(() => null)
+      if (!status || (!status.body.installBusy && !status.body.import?.active)) break
+      await delay(300)
+    }
     // Let the managed worker stop its child before terminating the gateway.
     await request('/api/subscriptions/kernel/stop', {}).catch(() => {})
     for (let attempt = 0; attempt < 180; attempt++) {
       const status = await request('/api/subscriptions/kernel').catch(() => null)
-      if (!status || (!status.body.running && status.body.halted)) break
+      if (!status || (!status.body.running && status.body.halted && !status.body.pendingOperations)) break
       await delay(300)
     }
     child.kill()
   }
   if (childExit) await childExit
   for (const socket of sockets) socket.destroy()
+  if (dnsSocket) await new Promise(resolve => dnsSocket.close(resolve))
   await Promise.all(servers.filter(server => server.listening).map(server => new Promise(resolve => server.close(resolve))))
   assert.ok(path.resolve(temp).startsWith(path.resolve(os.tmpdir()) + path.sep))
   await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })

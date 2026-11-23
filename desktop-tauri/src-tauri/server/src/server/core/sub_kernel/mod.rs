@@ -32,6 +32,7 @@
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
@@ -242,13 +243,26 @@ enum Command {
     Stop { clear_pool: bool },
 }
 
-static SENDER: OnceLock<mpsc::UnboundedSender<Command>> = OnceLock::new();
+// A live controller/allocated port is not a completed restart. Count commands
+// from enqueue through execution, including failures and a dropped receiver.
+static PENDING_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
+struct PendingOperation;
+impl PendingOperation {
+    fn new() -> Self {
+        PENDING_OPERATIONS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+impl Drop for PendingOperation {
+    fn drop(&mut self) { PENDING_OPERATIONS.fetch_sub(1, Ordering::AcqRel); }
+}
+static SENDER: OnceLock<mpsc::UnboundedSender<(Command, PendingOperation)>> = OnceLock::new();
 
 /// 投递命令；worker 未启动时静默丢弃（bootstrap 顺序保证先 spawn，
 /// 这里只防极端时序 —— 丢了命令的代价是「这次操作没生效」，不是崩）。
 fn send(command: Command) {
     if let Some(sender) = SENDER.get() {
-        let _ = sender.send(command);
+        let _ = sender.send((command, PendingOperation::new()));
     }
 }
 
@@ -263,12 +277,12 @@ fn send(command: Command) {
 pub fn spawn_worker() {
     layout::migrate_legacy();
     layout::cleanup_residue();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<(Command, PendingOperation)>();
     if SENDER.set(tx).is_err() {
         return;
     }
     crate::spawn_task(async move {
-        while let Some(command) = rx.recv().await {
+        while let Some((command, _pending)) = rx.recv().await {
             // 单 worker 串行：每条命令跑完（含内核重启与节点同步）才收下一条
             execute(command).await;
         }
@@ -478,7 +492,7 @@ pub fn request_import(source: import::Source, dir: PathBuf, replace: bool, provi
     patch_status(|snapshot| {
         snapshot.import = ImportProgress { id: id.clone(), active: true, state: "queued", ..Default::default() };
     });
-    if sender.send(Command::Import(import::Job { source, dir, replace, providers, permit })).is_err() {
+    if sender.send((Command::Import(import::Job { source, dir, replace, providers, permit }), PendingOperation::new())).is_err() {
         patch_status(|snapshot| {
             snapshot.import.active = false;
             snapshot.import.state = "error";
@@ -609,6 +623,7 @@ pub fn status_json() -> Value {
                 "saved": snapshot.import.saved,
             },
             "running": running,
+            "pendingOperations": PENDING_OPERATIONS.load(Ordering::Acquire),
             "controllerPort": controller_port,
             "listenerCount": listener_count,
             // 统一测试口（「网络代理」页的节点测试全走它；见 runtime::select_test_node）

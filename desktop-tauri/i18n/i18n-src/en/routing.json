@@ -873,5 +873,7 @@
   "对外模型 ID 已被路由组「{name}」占用": "This public model ID is already used by route group “{name}”.",
   "仅列出与当前路由接口一致的上游模型和路由组。": "Only upstream models and groups using the same API as this route are listed.",
   "全局网关设置": "Global gateway settings",
-  "这里调整的是账号组的全局消耗规则；当前路由组的账号顺序保持不变。": "These settings control global usage rules for the account group; account order in this route group stays the same."
+  "这里调整的是账号组的全局消耗规则；当前路由组的账号顺序保持不变。": "These settings control global usage rules for the account group; account order in this route group stays the same.",
+  "开启粘滞后，渠道连续失败两次会解除绑定、冻结并切换；冻结使用全局熔断时长（默认 60 秒），到期恢复。已返回内容的请求只影响后续选路。": "With affinity enabled, two consecutive channel failures release the binding, freeze the channel and select another member. Freezing uses the global circuit-breaker duration (60 seconds by default); the channel returns when it expires. Failures after content is sent affect subsequent requests.",
+  "熔断与粘滞冻结时长（秒）": "Circuit-breaker and affinity freeze duration (seconds)"
 }

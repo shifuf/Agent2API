@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
+import { isolateUpdateNotice } from './fixtures/update-notice.mjs';
 
 const args = process.argv.slice(2);
 const option = name => args[args.indexOf(name) + 1] && args.includes(name) ? args[args.indexOf(name) + 1] : '';
@@ -100,6 +101,7 @@ const step = async (name, action) => {
 };
 const newContext = async mobile => {
   const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 1000 }, isMobile: mobile, hasTouch: mobile, locale: 'zh-CN' });
+  await isolateUpdateNotice(context);
   await context.addInitScript(key => { localStorage.setItem('agent2api.webKey', key); localStorage.setItem('agent2api.webKey.origin', key); }, key);
   const page = await context.newPage();
   page.setDefaultTimeout(15000);

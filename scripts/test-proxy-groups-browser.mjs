@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { isolateUpdateNotice } from './fixtures/update-notice.mjs'
 
 // Invoked by test-proxy-subscriptions with an isolated server and synthetic nodes.
 export async function checkGroupBrowser(base, adminKey, outputDir) {
@@ -8,6 +9,7 @@ export async function checkGroupBrowser(base, adminKey, outputDir) {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE || 'C:/Program Files/Google/Chrome/Application/chrome.exe' })
   try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' })
+    await isolateUpdateNotice(context)
     await context.addInitScript(key => {
       localStorage.setItem('agent2api.webKey', key)
       localStorage.setItem('agent2api.webKey.origin', key)

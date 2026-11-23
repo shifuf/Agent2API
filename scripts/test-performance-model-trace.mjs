@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { isolateUpdateNotice } from './fixtures/update-notice.mjs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
@@ -78,6 +79,7 @@ try {
   const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright')
   browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE || 'C:/Program Files/Google/Chrome/Application/chrome.exe' })
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' })
+  await isolateUpdateNotice(context)
   await context.addInitScript(key => {
     localStorage.setItem('agent2api.webKey', key); localStorage.setItem('agent2api.webKey.origin', key)
     localStorage.setItem('workbuddy-desktop-settings-cat', 'system')
