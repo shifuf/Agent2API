@@ -12,11 +12,12 @@ pub(crate) fn try_update_raw<T>(
     let mut raw = previous.raw.clone();
     let result = mutate(&mut raw)?;
     if raw == previous.raw { return Ok(result); }
-    let next = super::build(raw);
+    let mut next = super::build(raw);
     if !save_raw(&next.raw) { return Err("配置迁移未能写入数据库，原配置已保留".into()); }
     let changed = synced_fingerprint(&previous.raw) != synced_fingerprint(&next.raw);
     let catalog_changed = crate::server::core::providers::catalog::config_changed(&previous, &next);
     let mut config = CONFIG.write().unwrap_or_else(|error| error.into_inner());
+    super::model_key_source::install_epoch(config.as_ref(), &mut next, false);
     if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
     *config = Some(next);
     drop(config);
@@ -63,6 +64,7 @@ pub(crate) fn try_update_raw_field<T, E>(
     let mut config = CONFIG
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    super::model_key_source::install_epoch(config.as_ref(), &mut next, false);
     if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
     *config = Some(next);
     drop(config);

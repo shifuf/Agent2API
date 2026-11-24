@@ -34,6 +34,9 @@ fn normalize_time(value: Option<&Value>) -> Option<String> {
 
 /// 用户明确保存的值优先；缺失字段采用已加载插件的默认值。
 pub fn settings() -> (bool, Vec<String>) {
+    if let Some(task) = plugin_host::wasm::tasks::legacy_definition(PROVIDER, SCHEDULE_ID) {
+        return (task.enabled, task.times);
+    }
     let declared = schedules::definition(PROVIDER, SCHEDULE_ID);
     let raw = config::current()
         .raw()
@@ -73,6 +76,10 @@ pub fn settings() -> (bool, Vec<String>) {
 /// 与 `auto_checkin` 的 `write_state` 同构：合并写回，config.json 的其它字段
 /// 原样保留。
 pub fn configure(patch: &Value) -> Result<Value, String> {
+    if plugin_host::wasm::tasks::legacy_definition(PROVIDER, SCHEDULE_ID).is_some() {
+        plugin_host::wasm::tasks::configure(PROVIDER, SCHEDULE_ID, patch)?;
+        return Ok(state());
+    }
     let (_, previous_times) = settings();
     let mut current = config::current()
         .raw()
@@ -154,7 +161,9 @@ pub fn state() -> Value {
     } else {
         Vec::new()
     };
-    let pause_reason = schedules::pause_reason(PROVIDER, SCHEDULE_ID);
+    let pause_reason = if plugin_host::wasm::tasks::legacy_definition(PROVIDER, SCHEDULE_ID).is_some() {
+        None
+    } else { schedules::pause_reason(PROVIDER, SCHEDULE_ID) };
     json!({
         "enabled": enabled,
         "available": pause_reason.is_none(),
@@ -177,6 +186,9 @@ fn running_flag() -> &'static AtomicBool {
 }
 
 pub fn is_running() -> bool {
+    if plugin_host::wasm::tasks::legacy_definition(PROVIDER, SCHEDULE_ID).is_some() {
+        return plugin_host::wasm::tasks::operation_running(PROVIDER, SCHEDULE_ID);
+    }
     running_flag().load(Ordering::SeqCst)
 }
 
@@ -208,6 +220,13 @@ pub enum RunOutcome {
 
 /// 跑一轮巡检；去重按计划时刻落，手动执行不占用定时轮次。
 pub async fn run_once(store: &AccountStore, reason: &str, plan_time: Option<&str>) -> RunOutcome {
+    if plugin_host::wasm::tasks::legacy_definition(PROVIDER, SCHEDULE_ID).is_some() {
+        return match plugin_host::wasm::tasks::run(store, PROVIDER, SCHEDULE_ID, plan_time.is_none()).await {
+            Ok(value) if value["skipped"] == true => RunOutcome::Busy,
+            Ok(value) => RunOutcome::Completed(value),
+            Err(error) => RunOutcome::Failed(GatewayError::with_status(502, error)),
+        };
+    }
     if let Some(message) = schedules::pause_reason(PROVIDER, SCHEDULE_ID) {
         return RunOutcome::Skipped(message);
     }
@@ -314,6 +333,8 @@ fn record_run(summary: Value, plan_time: Option<&str>) {
 
 /// 当天该跑的时刻里还有没跑过的 → Some(那一条)，否则 None。
 fn due_time(now: chrono::DateTime<chrono::FixedOffset>) -> Option<String> {
+    // The tasks.v1 scheduler owns this calendar and its durable account leases.
+    if plugin_host::wasm::has_capability(PROVIDER, "tasks.v1") { return None; }
     let (enabled, times) = settings();
     if !enabled || schedules::pause_reason(PROVIDER, SCHEDULE_ID).is_some() {
         return None;

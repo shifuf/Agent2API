@@ -48,6 +48,7 @@
 //! 一律在闭包之外打（`now_ms` 只读时钟，不算 IO）。
 
 mod storage;
+pub(crate) mod calendar;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -323,13 +324,41 @@ pub struct RunGuard {
 }
 
 impl RunGuard {
+    /// A task operation may outlive the HTTP request that started it. Progress
+    /// belongs only to the currently held lease, including across processes.
+    pub(crate) fn store_progress(&self, value: Value) -> Result<(), String> {
+        let mut owned = false;
+        change(&self.key, |state| {
+            if state.owner == self.owner && state.running() {
+                state.value = Some(value);
+                owned = true;
+            }
+        })?;
+        if owned { Ok(()) } else { Err("任务执行权已失效，未继续发送请求".into()) }
+    }
+
+    pub(crate) fn is_current(&self) -> Result<bool, String> {
+        let state = read(&self.key)?;
+        Ok(state.owner == self.owner && state.running())
+    }
+
     pub fn finish(
-        mut self,
+        self,
         success: bool,
         summary: String,
         value: Option<Value>,
         retry_at: i64,
         interval_ms: i64,
+    ) -> Result<TaskState, String> {
+        self.finish_scheduled(success, summary, value, retry_at, interval_ms, None)
+    }
+
+    /// The caller computes a calendar slot from the latest saved definition
+    /// while holding its configuration read guard. Failure retry remains owned
+    /// by the existing task-state backoff; next_slot never clears it.
+    pub(crate) fn finish_scheduled(
+        mut self, success: bool, summary: String, value: Option<Value>, retry_at: i64,
+        interval_ms: i64, next_slot: Option<i64>,
     ) -> Result<TaskState, String> {
         self.heartbeat.abort();
         let result = change(&self.key, |state| {
@@ -355,7 +384,7 @@ impl RunGuard {
             if let Some(value) = value {
                 state.value = Some(value);
             }
-            state.next_run_at = now.saturating_add(interval_ms).max(state.retry_at);
+            state.next_run_at = next_slot.unwrap_or_else(|| now.saturating_add(interval_ms)).max(state.retry_at);
             state.owner.clear();
             state.lease_until = 0;
         });

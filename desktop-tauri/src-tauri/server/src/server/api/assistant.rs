@@ -307,6 +307,7 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
         }
     }
     let telemetry = Arc::new(RequestTelemetry::with_id());
+    telemetry.install_model_key_source(access.key_source.clone());
     let telemetry_id = telemetry.snapshot().id;
     // 进行中行：与真实请求同一时点。`is_test = true` —— 报表排除、请求日志标记
     // （与模型测试同一口径，见模块头）；下游模型名记用户点名的那个对外名
@@ -344,10 +345,16 @@ pub async fn chat(State(state): State<ServerState>, headers: HeaderMap, body: By
             ignore_model_gate: false,
             proxy_override: None,
         })
-        .await;
+        .await.and_then(|outcome| {
+            if let ForwardOutcome::Completion { body } = &outcome {
+                crate::server::core::upstream::internal_output::verify_completion(body, &telemetry)?;
+            }
+            Ok(outcome)
+        });
 
     match outcome {
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
+            let source = pipeline::catpaw_output::observe_stream(source, &telemetry);
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             let context = RecordContext {
                 stats: state.request_stats(),

@@ -463,7 +463,7 @@
   "所有提供商都有这个字段": "Every provider has this field",
   "手动添加": "Manual entry",
   "打开批量操作弹窗，并预选这一组的账号（改代理等动作在弹窗里挑参数）": "Opens the bulk-operations dialog with this group's accounts preselected (pick parameters like the proxy inside the dialog)",
-  "打开筛选": "",
+  "打开筛选": "Open filters",
   "执行中…": "Running…",
   "执行（{action}）": "Run ({action})",
   "扫码 / 粘贴令牌 / 导入登录态需在桌面端完成": "",

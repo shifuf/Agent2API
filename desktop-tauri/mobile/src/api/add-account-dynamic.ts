@@ -12,18 +12,30 @@ export type DynamicLoginStart = {
   authUrl?: string
   instructions?: string
   manualCallback?: boolean
+  managedLogin?: boolean
+  interactiveLogin?: boolean
+  methodIndex?: number
+  remainingMs?: number
+  timeoutMs?: number
+  expiresAt?: number
   callbackInput?: 'url' | 'code'
   localOnly?: boolean
   pollIntervalMs?: number
 }
 
 export type DynamicLoginWait = {
+  managedLogin?: boolean
+  provider?: string
+  flow?: string
+  methodIndex?: number
+  phase?: string
+  saved?: boolean | null
   pending?: boolean
   done?: boolean
   error?: string
   instructions?: string
   hint?: string
-  session?: { accountUid?: string; accountId?: string; nickname?: string; provider?: string } | null
+  session?: { accountUid?: string; accountId?: string; nickname?: string; provider?: string; proxySaved?: boolean; warning?: string } | null
 }
 
 export type LoginInput = { provider: string; methodIndex: number; inputs: Record<string, string>; proxy?: unknown }
@@ -59,6 +71,9 @@ export function submitDynamicCallback(state: string, callbackUrl: string): Promi
 }
 
 export function dynamicLoginError(error: unknown): string {
+  if (error instanceof Error && /^(?:invalid|conflicting|missing)_managed_/.test(error.message)) {
+    return t('网关未返回有效的托管登录保存回执，请重新查询本次状态。')
+  }
   return error instanceof Error ? t(error.message) : t('未知错误')
 }
 

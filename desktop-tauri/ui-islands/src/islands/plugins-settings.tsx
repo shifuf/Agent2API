@@ -93,7 +93,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
             {pane === 'check' ? <div>
               <div className='settings-dlg-pane-head'>
                 <h3>{t('检查计划')}</h3>
-                <p>{t('默认跟随软件的自动检查和间隔。关闭后暂停日常自动更新和下载，但仍会补齐已安装官方插件的最低版本。')}</p>
+                <p>{t('默认跟随软件的自动检查和间隔。关闭后暂停自动检查、更新和下载，已安装的兼容插件继续运行。')}</p>
               </div>
               <div className='settings-dlg-fields'>
                 <Select value={settings?.checkMode || 'follow'} disabled={busy || !settings}
@@ -129,7 +129,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
             {pane === 'channel' ? <div>
               <div className='settings-dlg-pane-head'>
                 <h3>{t('更新通道')}</h3>
-                <p>{t('默认跟随软件的正式版和 beta 关注选择；单独设置只影响日常更新，最低版本补齐按当前软件版本选择配套包。')}</p>
+                <p>{t('默认跟随软件的正式版和 beta 关注选择，也可单独选择插件更新通道。')}</p>
               </div>
               <div className='settings-dlg-fields'>
                 <Select value={settings?.channelMode || 'follow'} disabled={busy || !settings}
@@ -163,7 +163,7 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
                       onCheckedChange={value => void save({ autoUpdate: value === true })} aria-label={t('自动更新插件')} />
                   </div>
                   <p className='mt-1.5 text-[12px] text-subtle'>
-                    {t('检测到更新后自动下载、校验并安装已启用的官方签名插件。关闭此项不影响最低版本补齐；未签名或第三方插件仍需手动更新。')}
+                    {t('检测到更新后自动下载、校验并安装已启用的官方签名插件；其他插件请从市场或文件手动更新。')}
                   </p>
                 </div>
                 <div className='h-px bg-hairline' />
@@ -175,11 +175,11 @@ export function PluginSettingsDialog({ open, onClose, onChanged }: {
                       aria-label={t('自动下载官方插件')} />
                   </div>
                   <p className='mt-1.5 text-[12px] text-subtle'>
-                    {t('发现未安装的官方插件时自动下载并安装，仅接受当前平台且通过官方签名校验的包；开启期间卸载的官方插件也会重新安装。')}
+                    {t('发现未安装的官方插件时自动下载并安装，仅接受当前平台或跨平台 Wasm 且通过官方签名校验的包；开启期间卸载的官方插件也会重新安装。')}
                   </p>
                 </div>
                 <p className='text-[12px] text-subtle'>
-                  {t('默认跟随软件的自动检查和间隔。关闭后暂停日常自动更新和下载，但仍会补齐已安装官方插件的最低版本。')}
+                  {t('默认跟随软件的自动检查和间隔。关闭后暂停自动检查、更新和下载，已安装的兼容插件继续运行。')}
                 </p>
               </div>
             </div> : null}

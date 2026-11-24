@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { Badge, Button, Progress, Switch, Label, Card as UiCard } from '@ui'
-import { errorMessage, formatSize, formatTime, platformLabel, pluginDescription, pluginName } from './plugins-shared'
+import { errorMessage, formatSize, formatTime, platformLabel, pluginDescription, pluginName, selectPluginPlatform } from './plugins-shared'
 import type { HostState, PackSummary, PluginOperation, PluginUpdate, StorePlugin } from './plugins-types'
 import { t } from '../i18n'
 
@@ -53,7 +53,7 @@ export function StorePluginCard({ item, target, operation, disabled, onInstall, 
   onInstall: () => void
   onNotes: () => void
 }) {
-  const platform = item.platforms.find(platform => platform.target === target)
+  const platform = selectPluginPlatform(item.platforms, target)
   const installable = Boolean(item.version && platform && !item.error)
   return <Card>
     <CardHead id={item.id} name={item.name} version={item.version} icon={item.icon}>
@@ -65,7 +65,7 @@ export function StorePluginCard({ item, target, operation, disabled, onInstall, 
       {pluginDescription(item.id, item.description)}
     </p>
     <div className='flex flex-wrap gap-3 px-4 pt-3 text-[11px] text-muted-foreground'>
-      <span>{platformLabel(target)}</span><span>{formatSize(platform?.size || 0) || t('当前平台暂无包')}</span>
+      <span>{platformLabel(platform?.target || target)}</span><span>{formatSize(platform?.size || 0) || t('当前平台暂无包')}</span>
     </div>
     {item.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(item.reason)}</p> : null}
     {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
@@ -135,6 +135,7 @@ export function InstalledPluginCard({ pack, store, host, update, operation, disa
     {update?.error && !required ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(update.reason)}</p> : null}
     {operation?.error ? <p className='px-4 pt-2 text-[12px] text-destructive'>{errorMessage(operation.error)}</p> : null}
     {packHost?.lastError ? <p className='px-4 pt-2 text-[12px] text-destructive'>{packHost.lastError}</p> : null}
+    {pack.compatibilityError ? <p className='px-4 pt-2 text-[12px] text-destructive'>{pack.compatibilityError}</p> : null}
     {operation?.hostError ? <p className='px-4 pt-2 text-[12px] text-warning'>{operation.hostError}</p> : null}
     {operation?.active ? <OperationProgress operation={operation} /> : <div className='mt-auto flex flex-wrap items-center gap-2 px-4 pb-4 pt-3.5'>
       <Label className='flex items-center gap-1.5 text-[12px] text-subtle'>

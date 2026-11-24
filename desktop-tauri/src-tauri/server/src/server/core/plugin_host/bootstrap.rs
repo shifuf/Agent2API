@@ -362,13 +362,18 @@ fn plugin_settings_key(provider: &str, key: &str) -> String {
 /// 什么都不用做。
 pub async fn start(store: AccountStore) -> Option<Arc<Host>> {
     let registry_file = PackRegistry::load();
-    let owners = super::ownership::owners(&registry_file);
+    let mut failed = std::collections::BTreeSet::new();
     let mut first = None;
-    for pack in registry_file.packs.iter().filter(|pack| pack.enabled) {
+    // 独立新包先完成真实握手，失败后重新计算归属，再启动兼容旧包。
+    for pack in super::ownership::startup_packs(&registry_file) {
+        let owners = super::ownership::owners_excluding(&registry_file, None, &failed);
+        if !owners.values().any(|owner| owner == &pack.id) { continue; }
         if let Some(host) = start_pack(store.clone(), pack, &owners).await {
             if first.is_none() {
                 first = Some(host);
             }
+        } else {
+            failed.insert(pack.id.clone());
         }
     }
     if first.is_some() {
@@ -391,13 +396,13 @@ pub(super) async fn start_pack(
     pack: &install::InstalledPack,
     owners: &std::collections::BTreeMap<String, String>,
 ) -> Option<Arc<Host>> {
+    if let Some(reason) = super::compatibility::pack_error(pack) {
+        logging::log("Plugin", &format!("插件包「{}」不可用：{reason}", pack.id));
+        return None;
+    }
     // 入口路径与清单都在版本目录里。清单读不出来不致命 —— 入口路径注册表里
     // 也有一份（`InstalledPack::entry`），但**必须**复核协议版本，否则一个
     // 旧版插件会在握手时被当成新版用。
-    if let Some(reason) = super::compatibility::version_error(&pack.id, &pack.version) {
-        logging::log("[Plugin]", &reason);
-        return None;
-    }
     let dir = install::plugins_dir().join(&pack.id).join(&pack.version);
     let manifest = match install::read_manifest(&dir) {
         Ok(manifest) => {
@@ -419,8 +424,16 @@ pub(super) async fn start_pack(
     // 也选对文件；注册表那条是清单读不到时的退路。
     let entry = manifest
         .as_ref()
-        .and_then(|manifest| install::entry_for_target(manifest, &super::rpc::target_triple()))
+        .and_then(|manifest| install::target_for_manifest(manifest, &super::rpc::target_triple())
+            .and_then(|target| install::entry_for_target(manifest, &target)))
         .unwrap_or_else(|| pack.entry.clone());
+    let wasm = match manifest.as_ref().map(|manifest| super::wasm::manifest::read(&dir, manifest)).transpose() {
+        Ok(options) => options.flatten(),
+        Err(reason) => {
+            logging::log("Plugin", &format!("插件包「{}」权限清单不可用：{reason}", pack.id));
+            return None;
+        }
+    };
     let exe = dir.join(&entry);
     if !exe.exists() {
         logging::log(
@@ -429,9 +442,11 @@ pub(super) async fn start_pack(
         );
         return None;
     }
-    if let Err(reason) = super::packages::ensure_entry_executable(&exe) {
-        logging::log("Plugin", &format!("插件包「{}」不可用：{reason}", pack.id));
-        return None;
+    if wasm.is_none() {
+        if let Err(reason) = super::packages::ensure_entry_executable(&exe) {
+            logging::log("Plugin", &format!("插件包「{}」不可用：{reason}", pack.id));
+            return None;
+        }
     }
 
     let options = HostOptions {
@@ -439,6 +454,7 @@ pub(super) async fn start_pack(
         data_dir: install::plugins_dir().join(&pack.id).display().to_string(),
         init_timeout: Duration::from_secs(30),
         loopback_port: loopback_port(),
+        wasm,
         ..HostOptions::new(exe)
     };
     // 包范围由网关安装清单与当前所有权决定；不能仅信任插件 init 自报任意 ID。
@@ -452,11 +468,6 @@ pub(super) async fn start_pack(
     super::runtime::install_pack(&pack.id, super::ownership::category(&dir), host.clone());
     match host.ensure().await {
         Ok(providers) => {
-            let enabled_ids: Vec<String> = providers.iter().map(|info| info.id.0.clone())
-                .filter(|id| !crate::server::core::providers::availability::is_suspended(id)
-                    && owners.get(id).map(String::as_str) == Some(pack.id.as_str())
-                    && pack.providers.get(id).copied().unwrap_or(true)).collect();
-            super::runtime::set_providers(&pack.id, enabled_ids);
             let mut loaded = Vec::new();
             let mut adapters = Vec::new();
             let mut restored = Vec::new();
@@ -474,6 +485,13 @@ pub(super) async fn start_pack(
                 if !pack.providers.get(&id).copied().unwrap_or(true) {
                     logging::log("Plugin", &format!("提供商 {id} 已被用户停用，跳过"));
                     continue;
+                }
+                if host.options.wasm.as_ref().is_some_and(|options| options.allows("tasks.v1")) {
+                    if let Err(error) = super::wasm::tasks::load(&host, &id).await {
+                        logging::log("Plugin", &format!("插件任务「{id}」申报无效：{error}"));
+                        host.shutdown().await;
+                        return None;
+                    }
                 }
                 if !info.admin_panels.is_empty() {
                     super::schedules::load(&host, &id).await;
@@ -550,7 +568,7 @@ pub fn set_loopback_port(port: u16) {
 }
 
 /// 取网关监听端口（未写入时为 `0`，插件据此走「拿不到回调地址」分支）。
-fn loopback_port() -> u16 {
+pub(super) fn loopback_port() -> u16 {
     LOOPBACK_PORT.get().copied().unwrap_or(0)
 }
 
@@ -578,7 +596,8 @@ fn plugin_kind(id: &str) -> ProviderKind {
 pub fn spawn(store: AccountStore) {
     crate::spawn_task(async move {
         let _guard = super::operations::mutation_guard().await;
-        let _ = start(store).await;
+        let _ = start(store.clone()).await;
+        super::wasm::tasks::spawn(store);
         super::catalog::spawn();
     });
 }

@@ -40,6 +40,18 @@ export type ReleasePlatform = {
   size: number
   url: string
   current: boolean
+  requireSigned?: boolean
+}
+
+export const WASM_PLUGIN_TARGET = 'wasm32-unknown-unknown'
+
+export function isPluginTargetCompatible(target: string, current: string): boolean {
+  return target === current || target === WASM_PLUGIN_TARGET
+}
+
+export function selectPluginPlatform(platforms: ReleasePlatform[] | undefined, current: string): ReleasePlatform | undefined {
+  return platforms?.find(platform => platform.target === current)
+    || platforms?.find(platform => platform.target === WASM_PLUGIN_TARGET)
 }
 
 export type StorePlugin = {

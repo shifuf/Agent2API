@@ -12,6 +12,7 @@
  */
 
 import { isSuspendedProvider } from '../../../ui-shared/provider-availability'
+import { managedLoginWaitRecord, readManagedLoginWait, managedLoginWaitMessage, type ManagedLoginWaitOwner } from '../../../ui-shared/plugin-managed-state'
 import { t } from '../i18n'
 
 /* ─── window 上的共享桥（窄类型 + 转型读取）────────────── */
@@ -51,6 +52,12 @@ export type LoginProgress = {
   provider?: string
   state?: string
   manualCallback?: boolean
+  managedLogin?: boolean
+  interactiveLogin?: boolean
+  methodIndex?: number
+  remainingMs?: number
+  expiresAt?: number
+  timeoutMs?: number
   callbackInput?: 'url' | 'code'
   instructions?: string
   hint?: string
@@ -143,6 +150,7 @@ export type SharedWindow = {
     onLoginState?: (callback: (progress: LoginProgress) => void) => (() => void) | void
     onLoginProgress?: (callback: (progress: LoginProgress) => void) => (() => void) | void
     cancelLogin?(): Promise<unknown>
+    openReleasePage?: (url: string) => Promise<unknown>
   }
   wbApp?: {
     toast?: (message: string, kind?: 'err' | 'ok' | 'warn') => void
@@ -276,7 +284,8 @@ export function accountCountOf(providerId: string): number {
 /* ─── 提交与收尾 ─────────────────────────────── */
 
 /** 统一管理 API 入口，兼容原始 data 与 success/data 信封，不把失败信封当成功。 */
-export async function accountRequest(method: string, path: string, body?: unknown): Promise<unknown> {
+export async function accountRequest(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<unknown> {
+  if (options?.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
   const internals = shared().__TAURI_INTERNALS__
   if (!internals || typeof internals.invoke !== 'function') {
     throw new Error(t('桌面运行时不可用（Tauri 未初始化）'))
@@ -284,6 +293,7 @@ export async function accountRequest(method: string, path: string, body?: unknow
   const result = await internals.invoke('api_request', {
     request: { method, path, body: body === undefined ? null : body },
   })
+  if (options?.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
   if (result && typeof result === 'object') {
     const record = result as Record<string, unknown>
     if (record.success === false) throw result
@@ -313,7 +323,16 @@ function publicAccount(value: unknown): AccountRecord | undefined {
   return account.id || account.uid || account.userId ? account : undefined
 }
 
-export function normalizeLoginResult(value: unknown): LoginResult {
+export function normalizeLoginResult(value: unknown, owner?: ManagedLoginWaitOwner): LoginResult {
+  if (managedLoginWaitRecord(value)) {
+    let receipt
+    try { receipt = readManagedLoginWait(value, owner) }
+    catch { throw new Error(t('网关未返回有效的托管登录保存回执，请重新查询本次状态。')) }
+    if (receipt.phase === 'canceled') return { ok: false, canceled: true }
+    if (receipt.phase !== 'saved' || !receipt.session) throw new Error(managedLoginWaitMessage(receipt, t))
+    return { ok: true, canceled: false, session: { ...receipt.session },
+      proxySaved: receipt.session.proxySaved, warning: receipt.session.warning }
+  }
   let record = resultRecord(value)
   if (record?.success === false) throw value
   if (record?.success === true && Object.hasOwn(record, 'data')) record = resultRecord(record.data)
@@ -388,7 +407,7 @@ export async function startLogin(
       if (!bridge?.startLogin) throw new Error(t('共享登录桥不可用，请重新打开面板'))
       result = await bridge.startLogin(edition, mode, provider, socialRestore, options)
     }
-    const normalized = normalizeLoginResult(result)
+    const normalized = normalizeLoginResult(result, dynamic ? { provider, methodIndex: options?.methodIndex } : undefined)
     if (dynamic && !normalized.canceled) {
       const accountId = normalized.account?.id || normalized.session?.accountUid || normalized.session?.accountId
       const resultProvider = normalized.account?.provider || normalized.session?.provider

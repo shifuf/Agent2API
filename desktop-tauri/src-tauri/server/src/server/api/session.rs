@@ -157,6 +157,10 @@ struct LoginMethodMetadata {
     /// 用户多做一个没有意义的选择。只对 oauth 方式有效。
     #[serde(default)]
     embedded_only: bool,
+    #[serde(default)]
+    managed_login: bool,
+    #[serde(default)]
+    interactive_login: bool,
 }
 
 #[derive(Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
@@ -257,6 +261,15 @@ async fn read_login_methods(
         .map_err(|_| GatewayError::with_status(502, "插件返回的登录方式元数据无法解析"))?;
     let mut indices = std::collections::HashSet::new();
     for method in &mut metadata.methods {
+        method.managed_login = matches!(method.kind, LoginMethodType::Oauth)
+            && adapter.supports_managed_login(method.method_index);
+        method.interactive_login = matches!(method.kind, LoginMethodType::Oauth)
+            && adapter.supports_login_interaction();
+        if method.managed_login {
+            method.manual_callback = false;
+            method.callback_input = LoginCallbackInput::Url;
+            method.embedded_only = false;
+        }
         // JSON number 要能被网页端精确表示；索引保留插件原值，绝不按显示顺序编号。
         if method.method_index > 9_007_199_254_740_991 || !indices.insert(method.method_index) {
             return Err(GatewayError::with_status(502, "插件登录方式索引无效或重复"));
@@ -441,7 +454,7 @@ fn login_start_response(
 ///
 /// 网关已经没有任何一家的登录实现 —— 这一段的分流只有「插件」与「没装插件」
 /// 两种结果，不再有内置换码的分支。
-pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Response {
+pub async fn login_start(State(state): State<ServerState>, headers: axum::http::HeaderMap, body: Bytes) -> Response {
     // 请求里的 `edition` 不再参与地区判定：拆家后界面上两张卡片各发各的
     // provider id，那是权威（`edition` 只是前端回显字段，见下面 Qoder /
     // ZCode 两个分支的说明）。解析失败不是错误（Node 版 `catch { edition = null }`）。
@@ -480,6 +493,17 @@ pub async fn login_start(State(state): State<ServerState>, body: Bytes) -> Respo
         let mut options = json!({ "methodIndex": index, "inputs": inputs });
         if let Some(selection) = &proxy {
             options["proxy"] = selection.resolved.clone();
+        }
+        if method.managed_login {
+            // 当前壳保留既有登录捕获；托管插件由自身回环接收器处理外部浏览器。
+            options["mode"] = json!("external");
+            return match crate::server::core::login::managed::start(
+                &state, adapter, index, options, proxy,
+                crate::server::access::login_source::Source::capture(&headers),
+            ) {
+                Ok(value) => ok_json(value),
+                Err(error) => management_error(error.status_code, error.message),
+            };
         }
         let instructions = [metadata.instructions.as_deref(), method.instructions.as_deref()]
             .into_iter().flatten().filter(|text| !text.trim().is_empty())
@@ -615,6 +639,7 @@ async fn start_plugin_web_login(
     };
     let SelectedLogin { adapter, proxy, options, local_only, manual_callback, callback_input, instructions } = selected;
     let label = adapter.label();
+    let interactive = adapter.supports_login_interaction();
     let method_index = options.get("methodIndex").and_then(Value::as_u64);
     let mut start = match adapter.build_login_flow_with_options(options).await {
         Ok(Some(start)) => start,
@@ -674,6 +699,7 @@ async fn start_plugin_web_login(
     let mut response = login_start_response(&start, &provider, edition, manual_callback, callback_input);
     if let Some(index) = method_index { response["methodIndex"] = json!(index); }
     if method_index.is_some() { response["localOnly"] = json!(local_only); }
+    if interactive { response["interactiveLogin"] = json!(true); }
     // 所有返回字段均来自已校验的元数据与 LoginStart，不把 options / inputs 回显。
     ok_json(response)
 }
@@ -759,18 +785,24 @@ pub(crate) fn spawn_plugin_login_poll(
 /// 轮询登录结果（三种响应：pending / done+error / done+session）
 pub async fn login_wait(
     State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let task_state = params.get("state").cloned().unwrap_or_default();
     let Some(task) = state.login().tasks().get(&task_state) else {
         return management_error(404, "登录任务不存在或已过期");
     };
+    if task.snapshot().managed {
+        if let Err(error) = crate::server::core::login::managed::check_source(&task, &headers) {
+            return management_error(error.status_code, error.message);
+        }
+    }
     ok_json(task.snapshot().to_wait_response())
 }
 
 // ─── POST /api/session/login/cancel ─────────────────────────
 
-pub async fn login_cancel(State(state): State<ServerState>, body: Bytes) -> Response {
+pub async fn login_cancel(State(state): State<ServerState>, headers: axum::http::HeaderMap, body: Bytes) -> Response {
     let task_state = parse_body(&body)
         .ok()
         .and_then(|payload| {
@@ -780,6 +812,13 @@ pub async fn login_cancel(State(state): State<ServerState>, body: Bytes) -> Resp
                 .map(str::to_string)
         })
         .unwrap_or_default();
+    if let Some(task) = state.login().tasks().get(&task_state) {
+        if task.snapshot().managed {
+            if let Err(error) = crate::server::core::login::managed::check_source(&task, &headers) {
+                return management_error(error.status_code, error.message);
+            }
+        }
+    }
     // 走 LoginService 那一层（而不是 `tasks().cancel`）：AutoClaw 那条链借来的
     // 回调端口挂在它的待办表上，取消时得一起释放（见 `LoginService::cancel`）
     let canceled = state.login().cancel_async(&task_state).await;

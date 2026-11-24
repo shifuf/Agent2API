@@ -108,6 +108,7 @@ async fn run(
             source: access.source,
             started_at: logging::now_ms(),
             is_assistant: true,
+            key_source: Some(access.key_source),
         },
     )
     .await?;

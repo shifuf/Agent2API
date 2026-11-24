@@ -49,14 +49,19 @@ mod runtime;
 mod packages;
 mod pack_view;
 mod process;
+mod process_guard;
+pub(crate) mod provider_settings;
 mod registry;
 mod rpc;
 pub(crate) mod rpc_cache;
 pub mod schedules;
 pub mod settings;
+pub(crate) mod script;
 mod stream;
 mod switching;
 pub mod update;
+pub(crate) mod wasm;
+pub use wasm::owns as is_wasm_provider;
 
 #[cfg(test)]
 mod tests;
@@ -250,6 +255,7 @@ pub struct HostStatus {
 pub struct Host {
     /// 启动参数。
     options: HostOptions,
+    embedded: wasm::Embedded,
     activity: Arc<activity::Activity>,
     /// 当前代进程的写端；退出状态由 ProcessRun 独立持有。
     inner: Mutex<Option<Inner>>,
@@ -289,6 +295,7 @@ pub struct Host {
     last_error: StdMutex<Option<String>>,
     /// 已加载的 provider（`init` 之后填）。
     providers: StdMutex<Vec<proto::ProviderInfo>>,
+    provider_settings: StdMutex<std::collections::BTreeMap<String, provider_settings::Schema>>,
     /// 回调处理器（网关侧实现，见 [`GatewayCallbacks`]）。
     callbacks: Arc<dyn GatewayCallbacks>,
 }
@@ -355,6 +362,7 @@ impl Host {
     pub fn new(options: HostOptions, callbacks: Arc<dyn GatewayCallbacks>) -> Self {
         Self {
             options,
+            embedded: wasm::Embedded::default(),
             activity: Arc::new(activity::Activity::default()),
             inner: Mutex::new(None),
             lifecycle: StdMutex::new(()),
@@ -372,6 +380,7 @@ impl Host {
             running: AtomicBool::new(false),
             last_error: StdMutex::new(None),
             providers: StdMutex::new(Vec::new()),
+            provider_settings: StdMutex::new(Default::default()),
             callbacks,
         }
     }
@@ -532,6 +541,9 @@ impl Host {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, proto::WireError> {
+        if self.options.wasm.is_some() {
+            return self.call_wasm(method, params, timeout).await;
+        }
         let lease = if matches!(method, proto::methods::gateway::INIT | proto::methods::gateway::SHUTDOWN | proto::methods::gateway::ABORT) {
             None
         } else {
@@ -627,6 +639,12 @@ impl Host {
         method: &str,
         params: serde_json::Value,
     ) -> Result<StreamCall, String> {
+        if self.options.wasm.is_some() {
+            if method != proto::methods::gateway::CONVERSATION {
+                return Err("Wasm 流式入口必须是标准对话调用".into());
+            }
+            return self.open_wasm_stream(params).await;
+        }
         let lease = self.activity.acquire().ok_or_else(|| "插件正在切换或已关闭".to_string())?;
         self.ensure().await?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -677,6 +695,7 @@ impl Host {
 
     /// 消费端结束不代表插件已完成；登记与租约由终态应答或进程退出释放。
     pub fn close_stream(&self, id: i64) -> bool {
+        if self.options.wasm.is_some() { return self.abort_wasm(id); }
         if let Ok(mut guard) = self.streams.lock() {
             if let Some(stream) = guard.get_mut(&id) {
                 stream.closed = true;
@@ -688,6 +707,7 @@ impl Host {
 
     /// 取消一条在途的流式调用。
     pub async fn abort(&self, id: i64) {
+        if self.options.wasm.is_some() { self.abort_wasm(id); return; }
         let _ = self.call_coded(
             proto::methods::gateway::ABORT,
             serde_json::json!({ "id": id }),
@@ -697,6 +717,7 @@ impl Host {
 
     /// 归还背压额度。
     pub async fn credit(&self, id: i64, n: usize) {
+        if self.options.wasm.is_some() { self.credit_wasm(id, n); return; }
         let frame = proto::Frame {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             method: Some(proto::methods::gateway::CREDIT.to_string()),

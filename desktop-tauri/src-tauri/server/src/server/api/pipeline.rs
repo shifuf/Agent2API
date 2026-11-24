@@ -40,6 +40,7 @@ use crate::server::request_stats::{
 use crate::server::ServerState;
 
 mod raw;
+pub(in crate::server::api) mod catpaw_output;
 pub use raw::{capture_raw_body, capture_raw_json, raw_body_text};
 use raw::RawCapture;
 

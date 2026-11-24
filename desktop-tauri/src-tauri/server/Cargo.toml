@@ -41,6 +41,10 @@ path = "src/lib.rs"
 name = "agent2api-server"
 path = "src/bin/agent2api-server.rs"
 
+[[example]]
+name = "sticky-timing-gateway"
+path = "../../../scripts/fixtures/sticky-timing-gateway.rs"
+
 # ── 依赖清单 ─────────────────────────────────────────────────
 # 从桌面 crate 的依赖里摘出网关本体真正用到的部分（逐条理由见桌面
 # Cargo.toml 对应条目的注释，此处不重复）。刻意**没有**的：tauri 及
@@ -68,6 +72,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # ```
 # 不要改这一行 —— 那会让干净 clone 的构建依赖某个人的磁盘布局。
 agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2Providers", tag = "v3.4.0" }
+# Embedded provider packages use the stable v1 JSON ABI. No WASI or process/environment imports.
+wasmtime = { version = "=36.0.19", default-features = false, features = ["async", "cranelift", "runtime", "std"] }
+tar = "0.4"
 # Qoder 国际版签到的 UMID 组件安装（providers/qoder/risk.rs）：官方 qodercli
 # npm 包是 .tgz（gzip + tar），解出内嵌的 runtime-info 二进制。flate2 已在
 # 依赖树里（image 拉的），声明出来直接复用；tar 解析手写（几十行，见 risk.rs）

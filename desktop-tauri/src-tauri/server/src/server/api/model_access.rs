@@ -26,6 +26,7 @@ pub fn is_model_endpoint(path: &str) -> bool {
 pub struct ModelAccess {
     pub scope: Option<KeyScope>,
     pub source: RequestSource,
+    pub(crate) key_source: Result<std::sync::Arc<config::model_key_source::Source>, GatewayError>,
 }
 
 pub fn authenticate(headers: &HeaderMap, client: &str) -> Result<ModelAccess, GatewayError> {
@@ -42,6 +43,7 @@ pub fn authenticate(headers: &HeaderMap, client: &str) -> Result<ModelAccess, Ga
         GatewayError::with_status(401, "模型调用必须选择并携带 API Key，请先在「网关 Key」页创建并启用一把 Key")
             .with_code("model_api_key_required")
     })?;
+    let key_source = config::model_key_source::capture(headers);
     let snapshot = config::current();
     let (scope, identity) = if config::parse::env_api_key_value().as_deref() == Some(key) {
         (None, ApiKeyIdentity { source: "env".to_string(), ..Default::default() })
@@ -62,6 +64,7 @@ pub fn authenticate(headers: &HeaderMap, client: &str) -> Result<ModelAccess, Ga
     Ok(ModelAccess {
         scope,
         source: RequestSource { client: client.to_string(), api_key: identity, ..Default::default() },
+        key_source,
     })
 }
 

@@ -1,7 +1,7 @@
 import { Button, Progress, Switch , Card, Label, Collapsible, CollapsibleTrigger, CollapsibleContent } from '@ui'
 import { Badge } from '../../components/ui'
 import type { PackSummary, PluginOperation, PluginUpdate, StorePlugin } from '../../api/plugins'
-import { pluginErrorMessage } from '../../api/plugins'
+import { isPluginTargetCompatible, pluginErrorMessage, selectPluginPlatform, WASM_PLUGIN_TARGET } from '../../api/plugins'
 import { t } from '../../i18n'
 
 function PluginProgress({ operation }: { operation?: PluginOperation }) {
@@ -38,11 +38,12 @@ export function StorePluginCard({ item, target, busy, operation, onInstall }: {
   operation?: PluginOperation
   onInstall: () => void
 }) {
-  const asset = item.platforms?.find(platform => platform.target === target)
+  const asset = selectPluginPlatform(item.platforms, target)
   return <Card render={<article />} className='m-card m-card-pad'>
     <Head name={item.name || item.id} version={item.version} icon={item.icon} />
     <p className='m-ck-note'>{t(item.description)}</p>
     {item.official ? <Badge tone='brand'>{t('官方')}</Badge> : null}
+    {asset?.target === WASM_PLUGIN_TARGET ? <Badge tone='mute'>{t('跨平台 Wasm')}</Badge> : null}
     {item.reason ? <p className={item.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(item.reason)}</p> : null}
     <PluginProgress operation={operation} />
     {!operation?.active ? <div className='m-ck-actions'>
@@ -52,7 +53,7 @@ export function StorePluginCard({ item, target, busy, operation, onInstall }: {
   </Card>
 }
 
-export function PluginCard({ pack, target, busy, update, operation, onEnabled, onProvider, onUpdate, onRemove }: {
+export function PluginCard({ pack, target, busy, update, operation, onEnabled, onProvider, onUpdate, onRemove, onSettings }: {
   pack: PackSummary
   target: string
   busy: boolean
@@ -62,6 +63,7 @@ export function PluginCard({ pack, target, busy, update, operation, onEnabled, o
   onProvider: (id: string, enabled: boolean) => void
   onUpdate: () => void
   onRemove: () => void
+  onSettings: () => void
 }) {
   const required = pack.updateRequired === true
   const locked = busy || operation?.active === true
@@ -85,6 +87,7 @@ export function PluginCard({ pack, target, busy, update, operation, onEnabled, o
       </p> : null}
     </div> : null}
     {!pack.entryPresent ? <p className='m-ck-error'>{t('插件文件缺失，请重新安装插件包')}</p> : null}
+    {pack.compatibilityError ? <p className='m-ck-error'>{pack.compatibilityError}</p> : null}
     {pack.host?.lastError ? <p className='m-ck-error'>{pack.host.lastError}</p> : null}
     {update?.reason && !required ? <p className={update.error ? 'm-ck-error' : 'm-ck-note'}>{pluginErrorMessage(update.reason)}</p> : null}
     <PluginProgress operation={operation} />
@@ -93,10 +96,11 @@ export function PluginCard({ pack, target, busy, update, operation, onEnabled, o
         {t('启用')}<Switch checked={pack.enabled} disabled={locked} aria-label={t('启用插件 {name}', { name: pack.name })}
           onCheckedChange={onEnabled} />
       </Label>
+      <Button size='sm' variant='outline' disabled={locked} onClick={onSettings}>{t('设置')}</Button>
       <Button size='sm' variant='outline' disabled={locked} onClick={onRemove}>{t('卸载')}</Button>
       {required ? <Button size='sm' disabled={locked || update?.repairing === true} onClick={onUpdate}>
         {update?.repairing ? t('正在补齐插件…') : t('补齐插件')}
-      </Button> : update?.available ? <Button size='sm' disabled={locked || update.error || !update.asset || update.asset.target !== target} onClick={onUpdate}>
+      </Button> : update?.available ? <Button size='sm' disabled={locked || update.error || !update.asset || !isPluginTargetCompatible(update.asset.target, target)} onClick={onUpdate}>
         {t('更新到 v{version}', { version: update.latest || '' })}
       </Button> : null}
     </div>

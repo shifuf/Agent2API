@@ -377,6 +377,7 @@ export type PoolItem = ProxyUsage & {
   providerId?: string
   node?: string
   orphan?: boolean
+  bindingError?: string | null
   protocol: string
   host: string
   port: number | null
@@ -400,6 +401,10 @@ export type ProxySettings = { testUrl?: string; defaults?: { testUrl?: string } 
 
 export function fetchProxyPool(signal?: AbortSignal): Promise<PoolPayload> {
   return apiCall<PoolPayload>('/api/proxies/pool', { signal })
+}
+
+export function fetchProxyBindings(signal?: AbortSignal): Promise<import('../../../ui-shared/proxy-bindings').ProxyBindingPayload<PoolItem>> {
+  return apiCall('/api/proxies/bindings', { signal })
 }
 
 export function syncClashProxies(): Promise<PoolPayload> {

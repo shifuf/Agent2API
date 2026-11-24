@@ -1,5 +1,5 @@
 /** 动态登录入口；列表只从 session 实际运行时摘要派生，不登记第二份 provider。 */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, AlertDescription, AlertTitle, Badge, Button, Card, Input, Label, Select,
   SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SheetBody, SheetContent,
@@ -18,6 +18,9 @@ import {
   type CallbackInput, type MethodsState,
 } from '../../../ui-islands/src/islands/add-account-dynamic-fields'
 import { isAddAccountProviderHidden } from '../../../ui-shared/provider-availability'
+import { PluginLoginInteraction, type LoginRequest } from '../../../ui-shared/plugin-login-interaction'
+import { managedLoginSourceGeneration, managedLoginWaitMessage, readManagedLoginWait, type ManagedLoginScope } from '../../../ui-shared/plugin-managed-state'
+import { apiCall } from '../api/client'
 import { t } from '../i18n'
 
 export function DynamicProviderSheet({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
@@ -81,7 +84,11 @@ function DynamicForm({ provider, label, source, onAdded }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [progress, setProgress] = useState('')
-  const [flow, setFlow] = useState<{ state: string; url: string; manual: boolean; callbackInput: CallbackInput } | null>(null)
+  const [flow, setFlow] = useState<{
+    state: string; url: string; manual: boolean; callbackInput: CallbackInput; methodIndex: number
+    managed: boolean; interactive: boolean; deadline: number; sourceGeneration: number
+  } | null>(null)
+  const [interactionAvailable, setInteractionAvailable] = useState(false)
   const [hasCallback, setHasCallback] = useState(false)
   const [callbackBusy, setCallbackBusy] = useState(false)
   const [callbackError, setCallbackError] = useState('')
@@ -98,6 +105,19 @@ function DynamicForm({ provider, label, source, onAdded }: {
   const inputs = method ? values[method.id] || {} : {}
   const hasNamePrompt = Boolean(method?.prompts.some(prompt => prompt.key === 'name'))
   const locked = busy || Boolean(flow)
+  const loginRequest = useCallback<LoginRequest>(async <T,>(verb: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, options?: { signal?: AbortSignal }) => {
+    if (!mounted.current || serverIdentity() !== identity || options?.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
+    return await apiCall<T>(path, { method: verb, body, signal: options?.signal })
+  }, [identity])
+  const managedScope = useMemo<ManagedLoginScope | undefined>(() => flow?.managed ? {
+    provider, methodIndex: flow.methodIndex, key: `${identity}:${provider}:${flow.state}:${flow.sourceGeneration}`, deadline: flow.deadline,
+    current: () => mounted.current && flowRef.current === flow.state && serverIdentity() === identity
+      && managedLoginSourceGeneration() === flow.sourceGeneration,
+  } : undefined, [flow, provider, identity])
+  const openExternal = useCallback((url: string) => {
+    if (!mounted.current || serverIdentity() !== identity) throw new DOMException('请求已取消', 'AbortError')
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }, [identity])
 
   function clearCallback(): void {
     if (callbackInputRef.current) callbackInputRef.current.value = ''
@@ -151,8 +171,16 @@ function DynamicForm({ provider, label, source, onAdded }: {
     const poll = async () => {
       if (!live || !mounted.current || flowRef.current !== state || serverIdentity() !== identity) return
       try {
-        const reply = await waitDynamicLogin(state)
+        let reply = await waitDynamicLogin(state)
         if (!live || !mounted.current || flowRef.current !== state || serverIdentity() !== identity) return
+        if (flow.managed) {
+          if (managedLoginSourceGeneration() !== flow.sourceGeneration) throw new Error(t('管理会话已变化，请重新发起登录。'))
+          const receipt = readManagedLoginWait(reply, { provider, flow: state, methodIndex: flow.methodIndex })
+          if (receipt.phase === 'unconfirmed' || receipt.phase === 'failed') throw new Error(managedLoginWaitMessage(receipt, t))
+          if (receipt.phase === 'canceled') throw new Error(t('已取消登录等待'))
+          reply = { ...receipt }
+          if (receipt.phase === 'saving') setProgress(managedLoginWaitMessage(receipt, t))
+        } else if (reply.managedLogin === true) throw new Error(t('网关返回的登录步骤不属于当前方式，已停止本次交互。'))
         if (reply.error) throw new Error(reply.error)
         if (reply.done === true) {
           if (!reply.session || !(reply.session.accountUid || reply.session.accountId)
@@ -161,7 +189,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
           }
           flowRef.current = ''
           setFlow(null)
-          await finish()
+          await finish(reply.session.warning || '')
           return
         }
         if (reply.pending !== true) throw new Error(t('登录桥未返回已完成的账号或会话，请重试'))
@@ -223,6 +251,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
         return
       }
       if (method.type !== 'oauth') throw new Error(t('请先选择有效的 OAuth 登录方式'))
+      const sourceGeneration = managedLoginSourceGeneration()
       const started = await startDynamicLogin(input)
       const state = started.state || started.flow
       if (!state || typeof state !== 'string') throw new Error(t('登录桥未返回已完成的账号或会话，请重试'))
@@ -231,6 +260,16 @@ function DynamicForm({ provider, label, source, onAdded }: {
         return
       }
       const rawUrl = started.authUrl ?? started.url ?? ''
+      const managed = started.managedLogin === true
+      const interactive = started.interactiveLogin === true
+      if (typeof started.managedLogin !== 'undefined' && typeof started.managedLogin !== 'boolean'
+        || typeof started.interactiveLogin !== 'undefined' && typeof started.interactiveLogin !== 'boolean'
+        || managed !== Boolean(method.managedLogin) || interactive && !method.interactiveLogin
+        || managed && started.methodIndex !== method.methodIndex
+        || managedLoginSourceGeneration() !== sourceGeneration) {
+        await cancelDynamicLogin(state)
+        throw new Error(t('网关返回的登录步骤不属于当前方式，已停止本次交互。'))
+      }
       let callbackInput: CallbackInput
       try {
         callbackInput = parseCallbackInput(started.callbackInput === undefined ? method.callbackInput : started.callbackInput)
@@ -243,7 +282,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
       }
       const manual = started.manualCallback === true || method.manualCallback
       if ((started.provider && started.provider !== provider) || typeof rawUrl !== 'string'
-        || (!rawUrl && !(started.localOnly === true || method.localOnly || manual))) {
+        || (!rawUrl && !(started.localOnly === true || method.localOnly || manual || managed || interactive))) {
         await cancelDynamicLogin(state)
         throw new Error(t('登录授权地址无效，已取消本次等待。'))
       }
@@ -253,7 +292,10 @@ function DynamicForm({ provider, label, source, onAdded }: {
       }
       flowRef.current = state
       setProgress(loginText(started.instructions))
-      setFlow({ state, url: rawUrl, manual, callbackInput })
+      const remaining = typeof started.remainingMs === 'number' && Number.isFinite(started.remainingMs)
+        ? Math.max(0, Math.min(300000, started.remainingMs)) : 300000
+      setFlow({ state, url: rawUrl, manual, callbackInput, methodIndex: method.methodIndex!, managed, interactive,
+        deadline: performance.now() + remaining, sourceGeneration })
     } catch (failure) {
       if (mounted.current && serverIdentity() === identity) setError(dynamicLoginError(failure))
     } finally {
@@ -378,7 +420,9 @@ function DynamicForm({ provider, label, source, onAdded }: {
       <AlertDescription className='flex flex-col gap-2 whitespace-pre-wrap break-words'>
         {progress}
         {flow.url ? <Button variant='outline' onClick={() => window.open(flow.url, '_blank', 'noopener,noreferrer')}>{t('打开官方授权页')}</Button> : null}
-        {flow.manual ? <>
+        {flow.managed || flow.interactive ? <PluginLoginInteraction key={flow.state} flow={flow.state} provider={provider}
+          request={loginRequest} t={t} managed={managedScope} openExternal={openExternal} onAvailable={setInteractionAvailable} /> : null}
+        {flow.manual && !flow.managed && !interactionAvailable ? <>
           <Badge variant='outline'>{t('需要手动提交授权回调')}</Badge>
           <p>{flow.callbackInput === 'code'
             ? t('此方式需要原样提交授权码或令牌；输入会隐藏，不会当作 URL 或 API 凭证解析。提交后仍需等待网关确认。')
@@ -395,7 +439,7 @@ function DynamicForm({ provider, label, source, onAdded }: {
             {callbackBusy ? <Spinner /> : null}{t('提交授权回调')}</Button>
           {callbackNotice ? <p role='status'>{callbackNotice}</p> : null}
           {callbackError ? <Alert variant='destructive'><AlertDescription>{callbackError}</AlertDescription></Alert> : null}
-        </> : <p>{t('如官方页面跳回的是网关本机地址，请在桌面面板完成回调；手机端不会猜测未声明的回调输入。')}</p>}
+        </> : !flow.managed && !flow.interactive ? <p>{t('如官方页面跳回的是网关本机地址，请在桌面面板完成回调；手机端不会猜测未声明的回调输入。')}</p> : null}
         <Button variant='outline' disabled={canceling} onClick={() => void cancel()}>{t('取消等待')}</Button>
       </AlertDescription>
     </Alert> : null}

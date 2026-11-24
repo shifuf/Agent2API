@@ -231,8 +231,9 @@ pub fn list_packs() -> Vec<PackSummary> {
         .iter()
         .map(|pack| {
             let dir = plugins_dir().join(&pack.id).join(&pack.version);
-            let compatibility_error = super::compatibility::version_error(&pack.id, &pack.version);
-            let update_required = compatibility_error.is_some();
+            let compatibility_error = super::compatibility::pack_error(pack);
+            // 旧客户端仍读取这两个字段；不再以网关产品版本强制替换插件。
+            let update_required = false;
             let manifest = read_manifest(&dir).ok();
             let name = manifest
                 .as_ref()
@@ -268,9 +269,9 @@ pub fn list_packs() -> Vec<PackSummary> {
                 name,
                 description,
                 version: pack.version.clone(),
-                required_version: super::compatibility::minimum_version(&pack.id).map(str::to_string),
+                required_version: None,
                 update_required,
-                compatibility_error,
+                compatibility_error: compatibility_error.clone(),
                 enabled: pack.enabled,
                 signed: pack.signed,
                 installed_at: pack.installed_at,
@@ -288,7 +289,7 @@ pub fn list_packs() -> Vec<PackSummary> {
                 protocol,
                 homepage,
                 icon: pack_icon(&dir, manifest.as_ref()),
-                ui: if update_required { Vec::new() } else { pack_ui_pages(&pack.id, manifest.as_ref()) },
+                ui: if compatibility_error.is_some() { Vec::new() } else { pack_ui_pages(&pack.id, manifest.as_ref()) },
             }
         })
         .collect()
@@ -319,7 +320,7 @@ pub fn resolve_ui_file(pack_id: &str, rest: &str) -> Option<PathBuf> {
         .packs
         .iter()
         .find(|item| item.id == pack_id && item.enabled)?;
-    if super::compatibility::version_error(&pack.id, &pack.version).is_some() {
+    if super::compatibility::pack_error(pack).is_some() {
         return None;
     }
     let root = plugins_dir().join(&pack.id).join(&pack.version).join("ui");

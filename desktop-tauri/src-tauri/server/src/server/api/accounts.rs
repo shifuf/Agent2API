@@ -357,6 +357,11 @@ pub async fn proxies_entry(State(state): State<ServerState>, request: axum::extr
         .unwrap_or("")
         .trim_start_matches('/')
         .to_string();
+    // New batch bindings are a panel operation. Preserve the existing proxy APIs' Key
+    // compatibility, but never accept a gateway Key or an IP address as binding authority.
+    if rest == "bindings" && !crate::server::access::session_valid(request.headers()) {
+        return management_error(403, "账号代理绑定管理需要管理员或有效的本机会话登录");
+    }
     let body = match axum::body::to_bytes(request.into_body(), crate::server::http::MAX_BODY_SIZE)
         .await
     {
@@ -366,6 +371,8 @@ pub async fn proxies_entry(State(state): State<ServerState>, request: axum::extr
     match (method.as_str(), rest.as_str()) {
         ("GET", "") => super::proxies::list_proxies(&state).await,
         ("POST", "test") => super::proxies::test_proxy(&state, &body).await,
+        ("GET", "bindings") => super::proxies::bindings_list(&state).await,
+        ("POST", "bindings") => super::proxies::bindings_save(&state, &body).await,
         ("GET", "pool") => super::proxies::pool_list(&state).await,
         ("POST", "pool") => super::proxies::pool_create(&state, &body).await,
         ("POST", "pool/update") => super::proxies::pool_update(&state, &body).await,

@@ -81,9 +81,13 @@
 pub mod backup;
 pub mod migrate;
 mod revisions;
+mod credential_source;
+mod task_guard;
 pub mod schema;
 
 pub(crate) use revisions::AccountChanges;
+pub(crate) use credential_source::{CredentialSource, CredentialSourceError};
+pub(crate) use task_guard::{TaskTransaction, TaskTransactionError};
 
 #[cfg(test)]
 mod tests;
@@ -91,7 +95,7 @@ mod tests;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
@@ -128,6 +132,8 @@ struct DbInner {
     file: PathBuf,
     accounts: Arc<revisions::AccountRevisions>,
     requests: Arc<AtomicU64>,
+    source_epoch: Mutex<Arc<credential_source::Epoch>>,
+    task_guard_unusable: AtomicBool,
 }
 
 thread_local! {
@@ -199,6 +205,8 @@ impl Db {
                 file: path.to_path_buf(),
                 accounts,
                 requests,
+                source_epoch: Mutex::new(Arc::new(credential_source::Epoch)),
+                task_guard_unusable: AtomicBool::new(false),
             }),
         })
     }
@@ -227,7 +235,8 @@ impl Db {
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> T) -> Option<T> {
         let _entry = DatabaseEntry::enter(self)?;
         match self.inner.conn.lock() {
-            Ok(conn) => Some(f(&conn)),
+            Ok(conn) if !self.inner.task_guard_unusable.load(Ordering::Acquire) => Some(f(&conn)),
+            Ok(_) => None,
             Err(_) => None,
         }
     }
@@ -251,7 +260,8 @@ impl Db {
     pub fn with_mut<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> Option<T> {
         let _entry = DatabaseEntry::enter(self)?;
         match self.inner.conn.lock() {
-            Ok(mut conn) => Some(f(&mut conn)),
+            Ok(mut conn) if !self.inner.task_guard_unusable.load(Ordering::Acquire) => Some(f(&mut conn)),
+            Ok(_) => None,
             Err(_) => None,
         }
     }
@@ -274,6 +284,7 @@ impl Db {
     }
 
     pub(crate) fn invalidate_accounts(&self) {
+        self.revoke_credential_sources();
         self.inner.accounts.invalidate();
     }
 

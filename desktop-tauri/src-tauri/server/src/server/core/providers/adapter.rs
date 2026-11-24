@@ -1344,6 +1344,31 @@ pub trait ProviderAdapter: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    fn plugin_login_interaction<'a>(&'a self, _flow: &'a str) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(501, "此提供商不支持交互式登录")) })
+    }
+
+    fn plugin_login_submit<'a>(&'a self, _flow: &'a str, _input: Value) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<agent2api_provider_protocol::LoginPoll, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(501, "此提供商不支持交互式登录")) })
+    }
+
+    fn supports_login_interaction(&self) -> bool { false }
+
+    fn supports_managed_login(&self, _method_index: u64) -> bool { false }
+
+    fn managed_login_owner(&self) -> Option<std::sync::Arc<dyn ProviderAdapter>> { None }
+
+    fn prepare_managed_login(&self, _call: &crate::server::core::login::managed::Call) -> Result<(), GatewayError> {
+        Err(GatewayError::with_status(501, "此提供商不支持托管登录"))
+    }
+
+    fn managed_login_action<'a>(&'a self, _call: &'a crate::server::core::login::managed::Call)
+        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(501, "此提供商不支持托管登录")) })
+    }
+
     /// 本 provider 是否支持**余额 / 积分查询**（模块头扩展 8）。
     ///
     /// 默认 false。支持的家各有各的语义，下面举四家为例：

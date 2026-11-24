@@ -59,6 +59,9 @@ use crate::gateway;
 use crate::login_profile::LoginProfile;
 use crate::state::ActiveLogin;
 
+mod managed_wait;
+use managed_wait::{Outcome as PollOutcome, Owner as WaitOwner};
+
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -464,9 +467,10 @@ pub async fn submit_kuku_sms_code(
         let _ = window.eval(&format!("window.__kukuSmsCode = '{}';", code));
         tokio::time::sleep(POLL_INTERVAL).await;
         match poll_once(&active.state).await {
-            PollOutcome::Pending(_) => continue,
+            PollOutcome::Pending(_, _) => continue,
             PollOutcome::Done(_) => break,
-            PollOutcome::Failed(error) => return Err(error),
+            PollOutcome::Failed(error, _) => return Err(error),
+            PollOutcome::Canceled(_) => return Err("登录已被取消或过期，请重新发起".into()),
             PollOutcome::Unreachable(error) => {
                 if task_gone(&error) {
                     return Err("登录已被取消或过期，请重新发起".to_string());
@@ -1007,25 +1011,12 @@ fn emit_login_state(app: &AppHandle, state: LoginState) {
 /// 现在：任务已落定（done + error）就立刻结束等待并透出真实文案；
 /// 只有传输层错误（本地网关瞬时不可达）才继续重试 —— 那类错误下一拍自愈，
 /// 提前放弃反而会把一次正常的登录掐断。
-enum PollOutcome {
-    /// `{pending:true,hint?}`；缺少明确 done 的响应也按等待处理。
-    Pending(Option<String>),
-    /// `{done:true, …}` —— 携带任务载荷（`{account, warning…}`，登录收尾
-    /// 时透传给前端，例如 KukuAI 的「凭证已落库但未通过上游复核」警告）。
-    Done(serde_json::Value),
-    /// `{done:true, error:…}` —— 终态，文案原样给用户
-    Failed(String),
-    /// 读不到结果：本地网关的传输层错误（连接失败 / 非 2xx 信封）。
-    ///
-    /// 仍然带文案，因为其中一类**不是**「稍后会自愈」：用户取消或任务过期时
-    /// 后端把任务从表里删掉，`/wait` 回 404「登录任务不存在或已过期」。
-    /// 那种情况必须结束等待（见 `task_gone`），否则关掉弹窗后这个循环会一直
-    /// 转到 5 分钟超时 —— 表现为「取消后要等 5 分钟按钮才恢复」。
-    Unreachable(String),
-}
-
 /// 读一次后端登录状态。
 async fn poll_once(state: &str) -> PollOutcome {
+    poll_once_scoped(state, WaitOwner { flow: state, provider: None, method_index: None, managed: None }).await
+}
+
+async fn poll_once_scoped(state: &str, owner: WaitOwner<'_>) -> PollOutcome {
     let query = {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         query.append_pair("state", state);
@@ -1036,18 +1027,25 @@ async fn poll_once(state: &str) -> PollOutcome {
         Ok(value) => value,
         Err(error) => return PollOutcome::Unreachable(error),
     };
-    if value.get("pending").and_then(serde_json::Value::as_bool) == Some(true)
-        || value.get("pending").is_some_and(serde_json::Value::is_object)
-        || value.get("done").and_then(serde_json::Value::as_bool) != Some(true)
-    {
-        let hint = value.get("hint").or_else(|| value.pointer("/pending/hint"))
-            .and_then(serde_json::Value::as_str).map(str::to_string);
-        return PollOutcome::Pending(hint);
+    managed_wait::classify(value, owner)
+}
+
+#[derive(Clone, Copy)]
+struct LoginDeadline {
+    instant: tokio::time::Instant,
+    expires_at: u64,
+}
+
+impl LoginDeadline {
+    fn from_started(started: &Value) -> Result<Self, String> {
+        let received = tokio::time::Instant::now();
+        let now = crate::server::logging::now_ms().max(0) as u64;
+        let remaining = managed_wait::start_budget_ms(started, now, LOGIN_TIMEOUT.as_millis() as u64)?;
+        Ok(Self { instant: received + Duration::from_millis(remaining), expires_at: now.saturating_add(remaining) })
     }
-    if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
-        return PollOutcome::Failed(error.to_string());
+    fn remaining_ms(self) -> u64 {
+        self.instant.saturating_duration_since(tokio::time::Instant::now()).as_millis() as u64
     }
-    PollOutcome::Done(value)
 }
 
 /// 判断一条等待期错误是不是「任务已被后端清理」（取消 / 过期）。
@@ -1103,11 +1101,10 @@ pub async fn start_with_options(
         return start(app, edition, mode, provider, social_restore, proxy).await;
     }
     let options = options.unwrap_or(Value::Null);
-    if options.get("methodIndex").and_then(Value::as_u64)
-        .filter(|index| *index <= 9_007_199_254_740_991).is_none()
-    {
+    let Some(method_index) = options.get("methodIndex").and_then(Value::as_u64)
+        .filter(|index| *index <= 9_007_199_254_740_991) else {
         return Err("登录方式索引必须是非负安全整数".into());
-    }
+    };
     crate::startup::wait().await?;
     let id = if provider.trim().is_empty() { "workbuddy" } else { provider.trim() };
     // 动态入口只认当前已登记执行体（插件或本体 runtime provider），不让旧身份
@@ -1163,6 +1160,28 @@ pub async fn start_with_options(
             return Err("后端返回的登录链接格式无效".into());
         }
     };
+    let managed = started.get("managedLogin").and_then(Value::as_bool) == Some(true);
+    let flags_valid = ["managedLogin", "interactiveLogin"].iter().all(|key|
+        started.get(*key).is_none_or(Value::is_boolean));
+    let scope_valid = started.get("provider").is_none_or(|value| value.as_str() == Some(provider))
+        && started.get("methodIndex").is_none_or(|value| value.as_u64() == Some(method_index))
+        && started.get("flow").is_none_or(|value| value.as_str() == Some(flow))
+        && started.get("state").is_none_or(|value| value.as_str() == Some(flow));
+    if !flags_valid || !scope_valid || managed && (!auth_url.is_empty()
+        || started["provider"].as_str() != Some(provider) || started["methodIndex"].as_u64() != Some(method_index)
+        || started.get("remainingMs").is_none()) {
+        let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
+        clear_active_login(app, &reservation);
+        return Err("后端返回的登录范围与本次发起不一致".into());
+    }
+    let deadline = match LoginDeadline::from_started(&started) {
+        Ok(deadline) => deadline,
+        Err(error) => {
+            let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
+            clear_active_login(app, &reservation);
+            return Err(error);
+        }
+    };
     let only_external = started.get("externalBrowser").and_then(Value::as_bool) == Some(true);
     let mode_id = if auth_url.trim().is_empty() { "auto" }
         else if only_external || mode == "external" { "external" } else { "embedded" };
@@ -1188,8 +1207,8 @@ pub async fn start_with_options(
         if !instructions.is_empty() { instructions.push('\n'); }
         instructions.push_str("此登录方式只支持系统浏览器，已按提供商要求打开；不会伪装成内嵌窗口。");
     }
-    emit_login_progress(app, flow, &started, &instructions, None);
-    let result = run_dynamic_login(app, provider, flow, auth_url, mode_id, &started, &instructions).await;
+    emit_login_progress(app, flow, &started, &instructions, None, None, deadline);
+    let result = run_dynamic_login(app, provider, flow, auth_url, mode_id, &started, &instructions, method_index, deadline).await;
     if result.as_ref().map(|value| value.get("ok").and_then(Value::as_bool)) != Ok(Some(true)) {
         let _ = gateway::call("POST", "/api/session/login/cancel", Some(&json!({ "state": flow }))).await;
     }
@@ -1198,17 +1217,28 @@ pub async fn start_with_options(
 }
 
 /// 只推送公开进度，不把授权 URL、options.inputs 或回调正文放进事件/日志。
-fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instructions: &str, hint: Option<&str>) {
+fn emit_login_progress(app: &AppHandle, flow: &str, started: &Value, instructions: &str, hint: Option<&str>,
+    wait: Option<&Value>, deadline: LoginDeadline) {
     let Some(active) = current_login(app).filter(|active| active.state == flow) else { return; };
     let manual_callback = started.get("manualCallback").and_then(Value::as_bool) == Some(true);
     let callback_input = if manual_callback && started.get("callbackInput").and_then(Value::as_str) == Some("code") {
         "code"
     } else { "url" };
-    let progress = json!({
+    let mut progress = json!({
         "active": true, "provider": active.provider, "edition": active.edition, "mode": active.mode,
         "state": flow, "manualCallback": manual_callback, "callbackInput": callback_input,
+        "managedLogin": started["managedLogin"].as_bool() == Some(true),
+        "interactiveLogin": started["interactiveLogin"].as_bool() == Some(true),
+        "methodIndex": started.get("methodIndex"), "remainingMs": deadline.remaining_ms(),
+        "deadline": deadline.expires_at, "expiresAt": deadline.expires_at,
         "instructions": instructions, "hint": hint,
     });
+    if let Some(wait) = wait {
+        for key in ["phase", "saved", "pending", "done", "error", "session"] {
+            if let Some(value) = wait.get(key) { progress[key] = value.clone(); }
+        }
+        progress["flow"] = json!(flow);
+    }
     let _ = app.emit("login:progress", &progress);
     // 兼容仅订阅 onLoginState 的共享 UI 桥，新增字段不会改变旧状态结构。
     let _ = app.emit("login:state", &progress);
@@ -1334,7 +1364,7 @@ impl DynamicNavigation {
 /// 动态流程独立于旧 Cookie/自定义协议支路；空 URL 也有流程，只跳过开页。
 async fn run_dynamic_login(
     app: &AppHandle, provider: &str, flow: &str, auth_url: &str, mode: &str,
-    started: &Value, instructions: &str,
+    started: &Value, instructions: &str, method_index: u64, deadline: LoginDeadline,
 ) -> Result<Value, String> {
     let mut profile = None;
     let mut window = None;
@@ -1397,26 +1427,34 @@ async fn run_dynamic_login(
     // pollIntervalMs=0 只说明插件如何完成流程，不能关闭网关 /wait 轮询。
     let interval = Duration::from_millis(started.get("pollIntervalMs").and_then(Value::as_u64)
         .filter(|value| *value > 0).unwrap_or(2_000).clamp(1_000, 30_000));
-    let deadline = tokio::time::Instant::now() + LOGIN_TIMEOUT;
-    let mut last_hint = None;
+    let owner = WaitOwner { provider: Some(provider), flow, method_index: Some(method_index),
+        managed: Some(started["managedLogin"].as_bool() == Some(true)) };
     let result = loop {
         if !login_is_current(app, flow) { break Ok(json!({ "ok": false, "canceled": true })); }
-        if tokio::time::Instant::now() >= deadline { break Err("登录等待超时（5 分钟），请重试".into()); }
-        match poll_once(flow).await {
+        if tokio::time::Instant::now() >= deadline.instant { break Err("登录等待已过期，请重新发起".into()); }
+        let polled = match tokio::time::timeout_at(deadline.instant, poll_once_scoped(flow, owner)).await {
+            Ok(polled) => polled,
+            Err(_) => break Err("登录等待已过期，请重新发起".into()),
+        };
+        match polled {
             _ if !login_is_current(app, flow) => break Ok(json!({ "ok": false, "canceled": true })),
-            PollOutcome::Pending(hint) => {
-                if hint != last_hint {
-                    emit_login_progress(app, flow, started, instructions, hint.as_deref());
-                    last_hint = hint;
-                }
+            _ if tokio::time::Instant::now() >= deadline.instant => break Err("登录等待已过期，请重新发起".into()),
+            PollOutcome::Pending(hint, wait) => {
+                let instructions = wait.as_ref().and_then(|wait| wait["instructions"].as_str()).unwrap_or(instructions);
+                emit_login_progress(app, flow, started, instructions, hint.as_deref(), wait.as_ref(), deadline);
             }
             PollOutcome::Done(payload) => break Ok(json!({ "ok": true, "payload": payload, "external": mode == "external" })),
-            PollOutcome::Failed(error) => break Err(error),
+            PollOutcome::Failed(_, Some(payload)) => {
+                emit_login_progress(app, flow, started, instructions, None, Some(&payload), deadline);
+                break Ok(json!({ "ok": false, "payload": payload }));
+            }
+            PollOutcome::Failed(error, None) => break Err(error),
+            PollOutcome::Canceled(payload) => break Ok(json!({ "ok": false, "canceled": true, "payload": payload })),
             PollOutcome::Unreachable(error) if task_gone(&error) => break Ok(json!({ "ok": false, "canceled": true })),
             // 不记录 transport error 原文：它可能含带令牌的 URL。
             PollOutcome::Unreachable(_) => {}
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep_until((tokio::time::Instant::now() + interval).min(deadline.instant)).await;
     };
     if let Some(window) = window { let _ = window.destroy(); }
     drop(profile);
@@ -1932,16 +1970,17 @@ async fn open_external(
             return Ok(json!({ "ok": false, "canceled": true }));
         }
         match poll_once(login_state).await {
-            PollOutcome::Pending(_) => continue,
+            PollOutcome::Pending(_, _) => continue,
             PollOutcome::Done(payload) => {
                 return Ok(json!({ "ok": true, "external": true, "payload": payload }))
             }
-            PollOutcome::Failed(error) => {
+            PollOutcome::Failed(error, _) => {
                 // 任务已落定失败（后端写进任务的终态错误）：立刻透出真实原因，
                 // 不再把它盖成「等待超时」——小浣熊那条链上的「授权码已失效 /
                 // state 校验失败」都是这一类。
                 return Err(error);
             }
+            PollOutcome::Canceled(_) => return Ok(json!({ "ok": false, "canceled": true })),
             PollOutcome::Unreachable(error) => {
                 // 任务被后端清理（已取消 / 已过期，`/wait` 回 404）时直接结束，
                 // 不必等满 5 分钟；其余传输层错误下一拍可能自愈，继续等。
@@ -2350,7 +2389,7 @@ async fn run_embedded_with_proxy(
             }
         }
         match poll_once(login_state).await {
-            PollOutcome::Pending(_) => continue,
+            PollOutcome::Pending(_, _) => continue,
             // 任务载荷（`{account, warning…}`）随成功结果透传：前端据此
             // 在「账号已添加」之后补一条警告（例如 KukuAI 的凭证未通过
             // 上游复核 —— 账号未开通 KukuAI 时就是这条路）。
@@ -2358,7 +2397,8 @@ async fn run_embedded_with_proxy(
             // 任务已落定失败（state 校验失败 / 授权码已失效 / 换取凭证失败）：
             // 立刻透出真实文案。继续轮询只会把它盖成 5 分钟后的「等待超时」，
             // 用户看不到任何可行动的原因。
-            PollOutcome::Failed(error) => break Err(error),
+            PollOutcome::Failed(error, _) => break Err(error),
+            PollOutcome::Canceled(_) => break Ok(json!({ "ok": false, "canceled": true })),
             PollOutcome::Unreachable(error) => {
                 // 任务已被后端清理（用户取消 / 过期）→ 与关窗同一种结局
                 if task_gone(&error) {

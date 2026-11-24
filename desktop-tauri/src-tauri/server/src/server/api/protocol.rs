@@ -275,6 +275,15 @@ pub async fn responses_endpoint(
         source: source.clone(),
     };
 
+    let outcome = match pipeline::catpaw_output::converted_outcome(outcome, &context.telemetry,
+        &original, &requested_model, stream, true).await {
+        Ok(outcome) => outcome,
+        Err(response) => {
+            pipeline::record_entry(&RecordContext { status: i64::from(response.status().as_u16()), ..context }, None);
+            guard.complete();
+            return response;
+        }
+    };
     match outcome {
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
@@ -465,6 +474,15 @@ pub async fn messages_endpoint(
         source: source.clone(),
     };
 
+    let outcome = match pipeline::catpaw_output::converted_outcome(outcome, &context.telemetry,
+        &raw, &requested_model, stream, false).await {
+        Ok(outcome) => outcome,
+        Err(response) => {
+            pipeline::record_entry(&RecordContext { status: i64::from(response.status().as_u16()), ..context }, None);
+            guard.complete();
+            return response;
+        }
+    };
     match outcome {
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);

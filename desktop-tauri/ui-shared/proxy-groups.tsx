@@ -19,7 +19,9 @@ const message = (e: unknown): string => {
 }
 const visible = () => !document.hidden
 
-export function ProxyGroups({ request, t, active = visible }: { request: GroupRequest; t: Translate; active?: () => boolean }) {
+export function ProxyGroups({ request, t, active = visible, providerId, compact = false, onChanged }: {
+  request: GroupRequest; t: Translate; active?: () => boolean; providerId?: string; compact?: boolean; onChanged?: () => void
+}) {
   const [groups, setGroups] = useState<Group[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
@@ -35,10 +37,10 @@ export function ProxyGroups({ request, t, active = visible }: { request: GroupRe
       if (alive.current) {
         if (chainRevision.current && chainRevision.current !== data.revision) setRevision(r => r + 1)
         chainRevision.current = data.revision || ''
-        setGroups(data.groups); setError('')
+        setGroups(providerId ? data.groups.filter(group => group.providerId === providerId) : data.groups); setError('')
       }
     } catch (e) { if (alive.current) setError(message(e)) }
-  }, [request])
+  }, [request, providerId])
   const cancel = useCallback(async () => {
     stopped.current = true
     if (task.current) await request('POST', '/api/subscriptions/groups/cancel', { id: task.current }).catch(() => {})
@@ -57,7 +59,7 @@ export function ProxyGroups({ request, t, active = visible }: { request: GroupRe
     operation.current = true; setBusy(t('切换中…')); setError('')
     try {
       await request('POST', '/api/subscriptions/groups/select', { providerId: group.providerId, group: group.name, node: member.name })
-      if (alive.current) { setRevision(r => r + 1); await load() }
+      if (alive.current) { setRevision(r => r + 1); await load(); onChanged?.() }
     } catch (e) { if (alive.current) setError(message(e)) }
     finally { operation.current = false; if (alive.current) setBusy('') }
   }
@@ -82,9 +84,9 @@ export function ProxyGroups({ request, t, active = visible }: { request: GroupRe
     } finally { operation.current = false; task.current = ''; if (alive.current) setBusy('') }
   }
 
-  if (!groups.length && !error) return null
-  return <section className='space-y-3 p-3' aria-label={t('订阅代理组')}>
-    <div className='flex flex-wrap items-center gap-2'><strong>{t('订阅代理组')}</strong>
+  if (!groups.length && !error) return compact ? <p className='p-3 text-xs text-subtle'>{t('此订阅暂无可选代理组')}</p> : null
+  return <section className={compact ? 'space-y-3 py-3' : 'space-y-3 p-3'} aria-label={t('订阅代理组')}>
+    <div className='flex flex-wrap items-center gap-2'>{compact ? null : <strong>{t('订阅代理组')}</strong>}
       <span className='text-xs text-subtle'>{t('先选前置，再选落地；账号代理可选择落地组，后续新连接跟随组内选择。')}</span>
       <Button size='sm' variant='outline' disabled={!!busy} onClick={() => void load()}>{t('刷新')}</Button>
     </div>

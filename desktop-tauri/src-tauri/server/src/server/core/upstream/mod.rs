@@ -49,6 +49,7 @@ pub mod aggregate;
 pub mod cancellation;
 pub mod connections;
 pub mod continuation;
+pub(crate) mod internal_output;
 mod image_tasks;
 mod images;
 pub mod image_compress;
@@ -58,6 +59,7 @@ mod http_dns;
 mod network_fallback;
 pub mod refusal;
 pub mod request;
+pub(crate) mod replay_guard;
 mod payload;
 mod provider_loop;
 mod rotate;
@@ -402,6 +404,24 @@ impl UpstreamService {
         if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
             return Err(cancellation::cancelled_error());
         }
+        if request.telemetry.replay_guard().blocked() {
+            return Err(replay_guard::blocked_error());
+        }
+        let original_key_source = request.telemetry.capture_model_key_source(&request.client_headers)
+            .and_then(Result::ok);
+        if !request.ignore_model_gate && original_key_source.as_ref().is_some_and(|source| {
+            !source.allows_model(request.body.get("model").and_then(Value::as_str).unwrap_or(""))
+        }) {
+            return Err(GatewayError::with_status(404, "模型不在原始网关 Key 的可用模型列表里")
+                .with_code("model_not_found"));
+        }
+        crate::server::config::model_key_source::scope_optional(
+            original_key_source,
+            self.forward_scoped_request(request, images, preserve_system_prompt, cancel),
+        ).await
+    }
+
+    async fn forward_scoped_request(&self, request: ForwardRequest, images: Option<crate::server::core::providers::images::ImageOperation>, preserve_system_prompt: bool, cancel: Option<Arc<cancellation::CancelToken>>) -> Result<ForwardOutcome, GatewayError> {
         let route_model = request.body.get("model").and_then(Value::as_str).unwrap_or("").to_string();
         let route_store = self.store.clone();
         let route_body = request.body.clone();

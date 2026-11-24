@@ -14,6 +14,9 @@ import {
   type WebLoginController, type WebLoginView,
 } from './add-account-bridge'
 import { draftOfProxy, ProxyForm, readProxyDraft } from './accounts-proxy-form'
+import { PluginLoginInteraction, type LoginRequest } from '../../../ui-shared/plugin-login-interaction'
+import { managedLoginSourceGeneration, type ManagedLoginScope } from '../../../ui-shared/plugin-managed-state'
+import { ChatglmDesktopImport } from './add-chatglm-desktop'
 
 import {
   loginText, methodLabel, parseCallbackInput, parseMethods, promptEnabled, promptValue, readInputs,
@@ -28,6 +31,13 @@ const RESERVED_KEYS = new Set([
   'options', 'state', 'flow', 'callbackUrl', 'signal',
 ])
 const textOf = (value: unknown): string => typeof value === 'string' ? value : ''
+const loginRequest: LoginRequest = async <T,>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, options?: { signal?: AbortSignal }) =>
+  await accountRequest(method, path, body, options) as T
+const openLoginExternal = async (url: string): Promise<void> => {
+  const bridge = shared().workbuddyDesktop
+  if (!bridge?.openReleasePage) throw new Error(t('打开登录页面的浏览器入口不可用'))
+  await bridge.openReleasePage(url)
+}
 const objectOf = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : undefined
@@ -145,6 +155,9 @@ export function DynamicProviderBlock({
   const [saving, setSaving] = React.useState(false)
   const [error, setError] = React.useState('')
   const [progress, setProgress] = React.useState<LoginProgress>({})
+  const [interactionAvailable, setInteractionAvailable] = React.useState(false)
+  const managedScope = React.useRef<ManagedLoginScope | undefined>(undefined)
+  const loginSource = React.useRef(managedLoginSourceGeneration())
   const [hasCallback, setHasCallback] = React.useState(false)
   const [callbackBusy, setCallbackBusy] = React.useState(false)
   const [callbackError, setCallbackError] = React.useState('')
@@ -167,14 +180,16 @@ export function DynamicProviderBlock({
   selectedRef.current = method?.id
   const inputs = (method && values[method.id]) || {}
   const locked = saving || loginView.disabled
+  const onDesktopImportBusy = React.useCallback((value: boolean) => { savingRef.current = value; setSaving(value) }, [])
   const legacyBrowser = method?.type === 'oauth' && method.methodIndex === undefined
   const snapshot = React.useRef({ method, inputs, mode, proxyDraft })
   snapshot.current = { method, inputs, mode, proxyDraft }
   const callbackType = progress.callbackInput ?? method?.callbackInput ?? 'url'
   // 网页端的粘贴框归 web shim；本岛仅补原生桌面等待态，避免重复回调输入。
-  const manualWaiting = active && shared().workbuddyDesktop?.platform !== 'web'
+  const manualWaiting = active && (shared().workbuddyDesktop?.platform !== 'web' || progress.interactiveLogin === true)
     && loginView.waiting && method?.type === 'oauth' && !method.reason
     && progress.active === true && progress.provider === provider && Boolean(progress.state)
+    && !progress.managedLogin && !interactionAvailable
     && (progress.manualCallback === true || method.manualCallback)
 
   function clearCallback(preserveError = false): void {
@@ -256,10 +271,12 @@ export function DynamicProviderBlock({
           setError('')
           clearCallback()
           progressRef.current = {}
+          managedScope.current = undefined
+          loginSource.current = managedLoginSourceGeneration()
           setProgress({})
           const inputs = readInputs(current.method, current.inputs)
           // 插件申报 embeddedOnly 时一律走内嵌窗口（不信任残留的 mode 状态）。
-          const mode = current.method.embeddedOnly ? 'embedded' : current.mode
+          const mode = current.method.managedLogin ? 'external' : current.method.embeddedOnly ? 'embedded' : current.mode
           // 旧 browser 声明没有索引，只走已存在的默认网页登录入口。
           return startLogin(provider, undefined, mode, undefined,
             current.method.methodIndex === undefined ? undefined : {
@@ -276,6 +293,7 @@ export function DynamicProviderBlock({
     const receiveProgress = (next: LoginProgress): void => {
       if (!alive.current) return
       if (next.active === false || next.provider && next.provider !== provider) {
+        managedScope.current = undefined
         progressRef.current = {}
         setProgress({})
         clearCallback()
@@ -290,6 +308,14 @@ export function DynamicProviderBlock({
       if (!state) {
         // start 的预约态 / 旧 LoginState 查询不携带 flow，不能覆盖已收到的真实进度。
         if (!progressRef.current.state) setProgress({ active: true, provider })
+        return
+      }
+      if (next.managedLogin === true && (!current?.managedLogin || next.methodIndex !== current.methodIndex)) {
+        setCallbackError(t('网关返回的登录步骤不属于当前方式，已停止本次交互。'))
+        return
+      }
+      if (next.managedLogin === true && managedLoginSourceGeneration() !== loginSource.current) {
+        setCallbackError(t('管理会话已变化，请重新发起登录。'))
         return
       }
       let callbackInput: LoginProgress['callbackInput']
@@ -308,8 +334,21 @@ export function DynamicProviderBlock({
       // 只摘公开进度字段，不保存整个 payload 或凭证；flow 必须属于当前 provider。
       const safe: LoginProgress = {
         active: true, provider, state,
+        managedLogin: next.managedLogin === true, interactiveLogin: next.interactiveLogin === true,
+        methodIndex: next.methodIndex, remainingMs: next.remainingMs, expiresAt: next.expiresAt,
         manualCallback: next.manualCallback === true, callbackInput,
         instructions: loginText(next.instructions), hint: loginText(next.hint), userCode: textOf(next.userCode),
+      }
+      if (safe.managedLogin && safe.methodIndex !== undefined) {
+        const sourceGeneration = managedLoginSourceGeneration()
+        const remaining = typeof next.remainingMs === 'number' && Number.isFinite(next.remainingMs)
+          ? Math.max(0, Math.min(300000, next.remainingMs)) : 300000
+        const key = `${provider}:${state}:${safe.methodIndex}:${sourceGeneration}`
+        if (managedScope.current?.key !== key) {
+          managedScope.current = { provider, methodIndex: safe.methodIndex, key, deadline: performance.now() + remaining,
+            current: () => alive.current && progressRef.current.state === state && progressRef.current.provider === provider
+              && selectedRef.current === current?.id && managedLoginSourceGeneration() === sourceGeneration }
+        } else managedScope.current.deadline = Math.min(managedScope.current.deadline, performance.now() + remaining)
       }
       if (progressRef.current.state !== safe.state || progressRef.current.callbackInput !== safe.callbackInput) clearCallback()
       progressRef.current = safe
@@ -333,6 +372,7 @@ export function DynamicProviderBlock({
   async function finish(result: LoginResult): Promise<void> {
     clearCallback()
     progressRef.current = {}
+    managedScope.current = undefined
     if (!alive.current) { await shared().wbApp?.refresh?.(); return }
     setProgress({})
     setValues({})
@@ -396,6 +436,7 @@ export function DynamicProviderBlock({
   function selectMethod(value: string): void {
     clearCallback()
     progressRef.current = {}
+    managedScope.current = undefined
     setValues({})
     setCredentialJson('')
     setSelected(value)
@@ -563,7 +604,7 @@ export function DynamicProviderBlock({
       {legacyBrowser ? <p>{t('旧版浏览器登录暂不接收备注名和登录代理，请添加后在账号设置中调整。')}</p> : null}
       {method.type === 'oauth' && !legacyBrowser && !method.prompts.some(prompt => prompt.key === 'name')
         ? <p>{t('账号名由插件自动获取，添加后可修改。')}</p> : null}
-      {method.type === 'oauth' && !method.localOnly && !method.embeddedOnly && shared().workbuddyDesktop?.platform !== 'web' ? <>
+      {method.type === 'oauth' && !method.managedLogin && !method.localOnly && !method.embeddedOnly && shared().workbuddyDesktop?.platform !== 'web' ? <>
         <Label>{t('打开方式')}</Label>
         <SegmentedControl aria-label={t('网页登录的打开方式')} value={mode} disabled={locked}
           options={[{ value: 'external', label: t('系统浏览器') }, { value: 'embedded', label: t('内嵌窗口') }]}
@@ -580,6 +621,11 @@ export function DynamicProviderBlock({
         <Button disabled={locked || Boolean(method.reason)}
           onClick={() => void submit()}>{saving ? <Spinner /> : null}{saving ? t('添加中…') : t('添加账号')}</Button>
       </AddFoot> : null}
+      {active && loginView.waiting && progress.active && progress.provider === provider && progress.state
+        && (progress.managedLogin || progress.interactiveLogin) ? <PluginLoginInteraction
+          key={`${provider}:${progress.state}`} provider={provider} flow={progress.state} request={loginRequest} t={t}
+          managed={progress.managedLogin ? managedScope.current : undefined} openExternal={openLoginExternal}
+          onAvailable={setInteractionAvailable} /> : null}
       {manualWaiting ? <div className='flex flex-col gap-2'>
         <Label htmlFor={`${prefix}-callback`}>{callbackType === 'code'
           ? t('授权码或令牌（原样提交）') : t('完整回调地址（原样提交）')}</Label>
@@ -603,5 +649,7 @@ export function DynamicProviderBlock({
       </Alert> : null}
     </AddGroup> : null}
     {error && !methodAvailable ? <Alert variant='destructive'><AlertDescription>{error}</AlertDescription></Alert> : null}
+    {active && provider === 'chatglm' && shared().workbuddyDesktop?.platform === 'windows' ? <ChatglmDesktopImport
+      active={active} locked={locked} onBusy={onDesktopImportBusy} onSaved={finish} /> : null}
   </div>
 }

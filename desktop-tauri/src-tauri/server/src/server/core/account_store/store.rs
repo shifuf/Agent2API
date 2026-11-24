@@ -44,6 +44,8 @@ use crate::server::core::proxies::{
 };
 use crate::server::db::Db;
 
+mod row_gate;
+
 /// 账号存储错误（对应 Node 版 AccountStoreError，带状态码 → 路由层直接用）。
 #[derive(Clone, Debug)]
 pub struct AccountStoreError {
@@ -313,7 +315,7 @@ impl AccountStore {
         state: &AccountState,
         guard: &MutexGuard<'_, ()>,
     ) -> Result<(), AccountStoreError> {
-        self.save(state, guard)
+        self.with_conn_mut(guard, |conn| sql::save_imported_state(conn, state))
     }
 
     /// 供导入导出子模块复用：加锁后执行一个「读-改-写」周期

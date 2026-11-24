@@ -4,15 +4,23 @@ import { PageIntro, ErrorNote, Empty, SectionHead } from '../components/ui'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import {
   checkPluginUpdates, getPlugins, pluginErrorMessage, refreshPluginCatalog, setPluginEnabled, setPluginProvider,
-  startPluginInstall, uninstallPlugin, type PackSummary, type PluginMutation, type PluginsPayload,
+  selectPluginPlatform, startPluginInstall, uninstallPlugin, type PackSummary, type PluginMutation, type PluginsPayload,
 } from '../api/plugins'
 import { usePolling } from '../lib/usePolling'
 import { serverIdentity } from '../lib/servers'
 import { store, useStore } from '../state/store'
 import { PluginCard, StorePluginCard } from './plugins/PluginCards'
 import { PluginSettingsSheet } from './plugins/PluginSettingsSheet'
+import { PluginPackSheet } from './plugins/PluginPackSheet'
+import { PluginTasks } from '../../../ui-shared/plugin-tasks'
+import { apiCall } from '../api/client'
+import type { PluginRequest } from '../../../ui-shared/plugin-controls'
 import { t } from '../i18n'
 import '../styles/checkin.css'
+
+const pluginRequest: PluginRequest = (method, path, body) => apiCall(path, { method,
+  ...(body === undefined ? {} : { body }),
+})
 
 export function PluginsPage() {
   const { server } = useStore()
@@ -20,6 +28,7 @@ export function PluginsPage() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [settings, setSettings] = useState(false)
+  const [settingsPack, setSettingsPack] = useState<{ id: string; identity: string } | null>(null)
   const [remove, setRemove] = useState<PackSummary | null>(null)
   const locked = useRef(false)
   const signature = useRef('')
@@ -93,13 +102,17 @@ export function PluginsPage() {
   }
   const install = async (id: string, update: boolean) => {
     if (!payload?.target) return
-    const result = await run(`install:${id}`, () => startPluginInstall(id, payload.target, update))
+    const platform = update ? payload.updates.find(item => item.id === id)?.asset
+      : selectPluginPlatform(payload.catalog.plugins.find(item => item.id === id)?.platforms, payload.target)
+    if (!platform) return
+    const result = await run(`install:${id}`, () => startPluginInstall(id, platform.target, update))
     if (result) store.toast(t('下载任务已交给网关，关闭手机不影响安装'))
   }
 
   const packs = payload?.packs || []
   const catalog = payload?.catalog?.plugins || []
   const uninstalled = catalog.filter(item => !packs.some(pack => pack.id === item.id))
+  const selectedPack = settingsPack?.identity === identity ? packs.find(pack => pack.id === settingsPack.id) : undefined
   return (
     <div className='m-page' ref={pull.bindRef}>
       <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
@@ -113,6 +126,7 @@ export function PluginsPage() {
             <Button size='sm' variant='outline' disabled={Boolean(busy)} onClick={() => void refresh()}>{busy === 'catalog' ? t('读取中…') : t('刷新插件仓库')}</Button>
             <Button size='sm' variant='outline' disabled={Boolean(busy)} onClick={() => void check()}>{busy === 'check' ? t('检查中…') : t('检查更新')}</Button>
             <Button size='sm' variant='ghost' onClick={() => setSettings(true)}>{t('插件设置')}</Button>
+            <PluginTasks key={identity} request={pluginRequest} t={t} />
           </div>
         </Card>
       </div>
@@ -129,6 +143,7 @@ export function PluginsPage() {
           operation={payload?.operations?.find(operation => operation.id === pack.id)}
           onEnabled={enabled => void mutation(`enable:${pack.id}`, () => setPluginEnabled(pack.id, enabled))}
           onProvider={(provider, enabled) => void mutation(`provider:${provider}`, () => setPluginProvider(pack.id, provider, enabled))}
+          onSettings={() => setSettingsPack({ id: pack.id, identity })}
           onUpdate={() => void install(pack.id, true)} onRemove={() => setRemove(pack)} />)}
         {!packs.length ? <Card className='m-card'><Empty text={payload ? t('这台网关还没有安装插件') : t('正在读取插件列表…')} /></Card> : null}
       </div>
@@ -139,6 +154,7 @@ export function PluginsPage() {
         <p className='m-ck-note'>{t('协议版本')}：{payload.protocol}</p>
       </CollapsibleContent></Collapsible></div> : null}
       {settings ? <PluginSettingsSheet onClose={() => setSettings(false)} onChanged={load} /> : null}
+      {selectedPack ? <PluginPackSheet key={`${identity}:${selectedPack.id}`} pack={selectedPack} disabled={Boolean(busy)} onClose={() => setSettingsPack(null)} /> : null}
       <Sheet open={Boolean(remove)} onOpenChange={(open, details) => {
         if (open) return
         if (busy) { details.cancel(); return }

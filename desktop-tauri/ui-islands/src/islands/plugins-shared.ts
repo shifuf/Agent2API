@@ -1,6 +1,7 @@
 import { t } from '../i18n'
 import { githubErrorMessage } from '../../../ui-shared/updates'
 import type { PluginMutation } from './plugins-types'
+export { isPluginTargetCompatible, selectPluginPlatform } from '../../../ui-shared/plugins'
 
 export type PluginBridge = {
   __TAURI_INTERNALS__?: {
@@ -59,6 +60,7 @@ export function platformLabel(target: string): string {
     'aarch64-apple-darwin': t('macOS (Apple Silicon)'),
     'x86_64-unknown-linux-gnu': t('Linux (amd64)'),
     'aarch64-unknown-linux-gnu': t('Linux (arm64)'),
+    'wasm32-unknown-unknown': t('跨平台 Wasm'),
   }
   return labels[target] || target
 }

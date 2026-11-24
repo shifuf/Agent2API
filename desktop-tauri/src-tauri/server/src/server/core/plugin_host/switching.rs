@@ -22,6 +22,13 @@ impl ChangeScope {
                 packs.extend(new.get(provider).cloned());
             }
         }
+        let declared = before.packs.iter().chain(after.packs.iter())
+            .filter(|pack| pack.id == target)
+            .flat_map(ownership::declared_ids);
+        for provider in declared {
+            // 启动失败时实际执行体可能仍是兼容旧包，变更必须覆盖该宿主。
+            packs.extend(runtime::provider_pack(&provider));
+        }
         let providers: HashSet<String> = old.iter().chain(new.iter())
             .filter(|(_, pack)| packs.contains(*pack)).map(|(provider, _)| provider.clone()).collect();
         Self { packs: packs.into_iter().collect(), providers }
@@ -42,9 +49,12 @@ impl ChangeScope {
 
     pub async fn start(&self, store: &AccountStore) -> Result<(), String> {
         let registry = PackRegistry::load();
-        let owners = ownership::owners(&registry);
+        let mut failed = runtime::failed_ids();
+        failed.retain(|id| !self.packs.contains(id));
         let mut failures = Vec::new();
-        for pack in registry.packs.iter().filter(|pack| pack.enabled && self.packs.contains(&pack.id)) {
+        for pack in ownership::startup_packs(&registry).into_iter().filter(|pack| self.packs.contains(&pack.id)) {
+            let owners = ownership::owners_excluding(&registry, None, &failed);
+            if !owners.values().any(|owner| owner == &pack.id) { continue; }
             if runtime::host_for_pack(&pack.id).is_some_and(|host| host.ready()) { continue; }
             if runtime::host_for_pack(&pack.id).is_some_and(|host| host.current_run().is_some()) {
                 failures.push(format!("{} 的旧进程尚未确认退出", pack.id));
@@ -53,6 +63,7 @@ impl ChangeScope {
             let started = tokio::time::timeout(Duration::from_secs(60),
                 bootstrap::start_pack(store.clone(), pack, &owners)).await;
             if !matches!(started, Ok(Some(ref host)) if host.ready()) {
+                failed.insert(pack.id.clone());
                 let reason = runtime::host_for_pack(&pack.id).and_then(|host| host.status().last_error)
                     .unwrap_or_else(|| "启动失败或加载超时，请检查插件日志".to_string());
                 failures.push(format!("{}：{reason}", pack.id));

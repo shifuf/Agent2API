@@ -469,6 +469,7 @@ pub fn panel_router(state: ServerState) -> Router {
         // 理由见 api::proxies 的模块头），方法判定在 proxies_entry 里。
         .route("/api/proxies", any(api::accounts::proxies_entry))
         .route("/api/proxies/test", any(api::accounts::proxies_entry))
+        .route("/api/proxies/bindings", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/update", any(api::accounts::proxies_entry))
         .route("/api/proxies/pool/enable", any(api::accounts::proxies_entry))
@@ -714,6 +715,12 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/plugins/uninstall", post(api::plugins::uninstall))
         .route("/api/plugins/enable", post(api::plugins::set_enabled))
         .route("/api/plugins/provider", post(api::plugins::set_provider))
+        .route("/api/plugins/provider-settings", get(api::plugin_provider_settings::list).patch(api::plugin_provider_settings::configure))
+        .route("/api/plugins/helpers", get(api::plugin_helpers::list).patch(api::plugin_helpers::configure))
+        .route("/api/plugins/tasks", get(api::plugin_tasks::list).patch(api::plugin_tasks::configure))
+        .route("/api/plugins/tasks/run", post(api::plugin_tasks::run))
+        .route("/api/plugins/login", get(api::plugin_login::get).post(api::plugin_login::submit))
+        .route("/api/plugins/desktop-import/chatglm", get(api::plugin_desktop_import::status).post(api::plugin_desktop_import::action))
         // 应用内更新：查插件仓库的最新版 / 一键升级。同样挂 protected ——
         // 升级会下载并执行新二进制，敏感度与安装同级。
         .route("/api/plugins/update", get(api::plugins::check_update).post(api::plugins::run_update))

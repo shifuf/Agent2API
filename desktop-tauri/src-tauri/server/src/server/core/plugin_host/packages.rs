@@ -78,9 +78,7 @@ pub fn prepare(
         install::extract_zip(bytes, &staging)?;
         let manifest = install::read_manifest(&staging)?;
         install::validate_manifest(&manifest, proto::PROTOCOL_VERSION)?;
-        if let Some(reason) = super::compatibility::version_error(&manifest.id, &manifest.version) {
-            return Err(reason);
-        }
+        let wasm = super::wasm::manifest::read(&staging, &manifest)?;
         if manifest.id.is_empty()
             || !manifest
                 .id
@@ -104,7 +102,9 @@ pub fn prepare(
         {
             return Err("下载包的 id 或版本与所选发行版不一致，已拒绝安装".to_string());
         }
-        let target = super::host_target();
+        let current = super::host_target();
+        let target = install::target_for_manifest(&manifest, &current)
+            .ok_or_else(|| format!("插件包没有为当前平台（{current}）提供入口"))?;
         let entry = manifest
             .entry
             .get(&target)
@@ -120,7 +120,7 @@ pub fn prepare(
         if require_signed && signature != SignatureState::Verified {
             return Err("自动安装只接受通过官方签名校验的插件包，请手动安装未签名包".to_string());
         }
-        ensure_entry_executable(&staging.join(&entry))?;
+        if wasm.is_none() { ensure_entry_executable(&staging.join(&entry))?; }
         Ok(PreparedPack {
             staging: staging.clone(),
             manifest,

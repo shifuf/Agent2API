@@ -265,6 +265,7 @@
 .proxies-table .p-pick { width: 36px; }
 .proxies-table .p-addr { width: 24%; }
 .proxies-table .p-usage { width: 14%; }
+.proxies-table .p-bindings { width: 220px; }
 .proxies-table .p-state { width: 58px; }
 .proxies-table .p-test { width: 23%; }
 .proxies-table .p-act { width: 150px; }

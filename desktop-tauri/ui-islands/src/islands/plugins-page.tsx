@@ -10,7 +10,8 @@ import { InstalledPluginCard, StorePluginCard } from './plugins-cards'
 import { PluginNotesDialog, type PluginNotes } from './plugins-notes'
 import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
-import { api, bridge, errorMessage, pluginName, readBase64, toast } from './plugins-shared'
+import { PluginTasks } from '../../../ui-shared/plugin-tasks'
+import { api, bridge, errorMessage, pluginName, readBase64, selectPluginPlatform, toast } from './plugins-shared'
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState } from './plugins-types'
 import { t } from '../i18n'
 
@@ -147,8 +148,11 @@ function PluginsPage(): React.ReactElement {
 
   async function start(id: string, update: boolean): Promise<void> {
     await run(`start:${id}`, async () => {
+      const platform = update ? payload?.updates.find(item => item.id === id)?.asset
+        : selectPluginPlatform(payload?.catalog.plugins.find(item => item.id === id)?.platforms, payload?.target || '')
+      if (!platform) throw new Error(t('当前平台暂无包'))
       const result = await api<{ operation: PluginOperation }>('POST', update
-        ? '/api/plugins/update' : '/api/plugins/install-from-release', { id, target: payload?.target })
+        ? '/api/plugins/update' : '/api/plugins/install-from-release', { id, target: platform.target })
       setPayload(previous => previous ? {
         ...previous, operations: [...(previous.operations || []).filter(item => item.id !== id), result.operation],
       } : previous)
@@ -205,6 +209,7 @@ function PluginsPage(): React.ReactElement {
             {busy === 'check' || catalog?.checking ? t('检查中…') : t('检查更新')}
           </Button>
           <Button variant='outline' size='sm' onClick={() => setSettingsOpen(true)}>{t('插件设置')}</Button>
+          <PluginTasks request={api} t={t} />
           <Button variant='outline' size='sm' disabled={locked || active} onClick={pickFile}>{t('从文件安装…')}</Button>
         </div>
       </CardHeader>

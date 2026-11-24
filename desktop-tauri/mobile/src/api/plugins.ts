@@ -1,6 +1,7 @@
 import { apiCall } from './client'
 import { githubErrorMessage } from '../../../ui-shared/updates'
 import { t } from '../i18n'
+export { isPluginTargetCompatible, selectPluginPlatform, WASM_PLUGIN_TARGET } from '../../../ui-shared/plugins'
 import type {
   PluginMutation, PluginOperation, PluginSettings, PluginsPayload, PluginUpdate, ReleaseState,
 } from '../../../ui-shared/plugins'

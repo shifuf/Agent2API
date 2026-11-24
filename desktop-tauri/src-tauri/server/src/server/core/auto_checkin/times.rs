@@ -90,6 +90,7 @@ pub fn effective_time(schedule: &Schedule, provider: &str) -> String {
         .get(provider)
         .filter(|time| !time.is_empty())
         .cloned()
+        .or_else(|| crate::server::core::plugin_host::wasm::tasks::checkin_time(provider))
         .or_else(|| provider_time(provider).map(str::to_string))
         .unwrap_or_else(|| schedule.time.clone())
 }

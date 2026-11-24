@@ -67,7 +67,7 @@ use crate::server::logging;
 ///
 /// 客户端级默认头**不会覆盖**请求级头（reqwest 只在 HeaderMap 空缺时插入），
 /// 所以 banner 的 `whitelistHeaders` 里那个真正的 WorkBuddy UA 依然生效。
-const DEFAULT_USER_AGENT: &str = "undici";
+pub(crate) const DEFAULT_USER_AGENT: &str = "undici";
 
 /// Client 缓存上限（对照 Node 版 MAX_DISPATCHERS）
 const MAX_CLIENTS: usize = 24;

@@ -268,6 +268,7 @@ export function storeServerAuth(
   refresh: string,
   expiresIn?: number,
 ): void {
+  const previous = readServerAuth(id)?.access
   const seconds = Number(expiresIn)
   const expiresAt = Number.isFinite(seconds) && seconds > 0 ? Date.now() + seconds * 1000 : 0
   try {
@@ -275,6 +276,7 @@ export function storeServerAuth(
   } catch {
     /* 同上 */
   }
+  if (previous !== access && id === activeServerId()) window.dispatchEvent(new Event('wb:management-session-changed'))
 }
 
 export function clearServerAuth(id: string): void {
@@ -283,4 +285,5 @@ export function clearServerAuth(id: string): void {
   } catch {
     /* 无害 */
   }
+  if (id === activeServerId()) window.dispatchEvent(new Event('wb:management-session-changed'))
 }

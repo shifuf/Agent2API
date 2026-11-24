@@ -71,6 +71,7 @@ pub(crate) mod compact_routes;
 pub(crate) mod client_identification;
 mod github_access;
 mod mutations;
+pub(crate) mod model_key_source;
 pub(crate) use mutations::{try_update_raw_field, try_update_raw};
 pub(crate) mod parse;
 pub(crate) mod routing_groups;
@@ -120,6 +121,7 @@ use parse::*;
 /// 写盘时一起回写。
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeConfig {
+    model_key_epoch: std::sync::Arc<model_key_source::Epoch>,
     /// 顶层旧字段 `apiKey` 的**磁盘原值**（从本轮改造起可能是 `enc1:` 信封）。
     /// 唯一读者是 `masked_api_key`，解密也在那里 —— 为什么不在快照构建期解，
     /// 见那个函数的说明。
@@ -581,6 +583,7 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
     let image_compress = image_compress_from(&raw);
     let routing = routing_from(&raw);
     RuntimeConfig {
+        model_key_epoch: Default::default(),
         // 文件里有就用文件的，否则环境变量兜底（对应 `if (config.apiKey && !opts.apiKey)`）。
         // 这里存的是**磁盘原值**：`apiKey` 从本轮改造起可能是 `enc1:` 信封（顶层旧
         // 字段的原地加密迁移见 `core::legacy_api_key`）。解开它只发生在
@@ -971,9 +974,10 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
         true
     });
     let _ = DB.set(db);
-    let snapshot = build(read_raw());
+    let mut snapshot = build(read_raw());
     crate::server::core::providers::catalog::invalidate();
     if let Ok(mut guard) = CONFIG.write() {
+        model_key_source::install_epoch(guard.as_ref(), &mut snapshot, true);
         *guard = Some(snapshot.clone());
     }
     crate::server::core::providers::catalog::invalidate();
@@ -991,9 +995,10 @@ pub fn init(db: Option<Db>) -> RuntimeConfig {
 /// 只在迁移真的产生过结果时才由调用点触发（`db::migrate` 的返回非空）；
 /// 没有任何旧文件时不必多读一次库。
 pub fn reload() -> RuntimeConfig {
-    let snapshot = build(read_raw());
+    let mut snapshot = build(read_raw());
     crate::server::core::providers::catalog::invalidate();
     if let Ok(mut guard) = CONFIG.write() {
+        model_key_source::install_epoch(guard.as_ref(), &mut snapshot, true);
         *guard = Some(snapshot.clone());
     }
     crate::server::core::providers::catalog::invalidate();
@@ -1292,6 +1297,7 @@ where
     let catalog_changed = crate::server::core::providers::catalog::config_changed(&previous, &next);
     if catalog_changed { crate::server::core::providers::catalog::invalidate(); }
     if let Ok(mut guard) = CONFIG.write() {
+        model_key_source::install_epoch(guard.as_ref(), &mut next, false);
         *guard = Some(next);
     }
     if catalog_changed { crate::server::core::providers::catalog::invalidate(); }

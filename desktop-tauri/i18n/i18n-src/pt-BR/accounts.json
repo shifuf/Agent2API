@@ -463,7 +463,7 @@
   "所有提供商都有这个字段": "Todos os provedores têm este campo",
   "手动添加": "Adição manual",
   "打开批量操作弹窗，并预选这一组的账号（改代理等动作在弹窗里挑参数）": "Abre a janela de operações em lote com as contas deste grupo pré-selecionadas (os parâmetros, como o proxy, escolhem-se na janela)",
-  "打开筛选": "",
+  "打开筛选": "Abrir filtros",
   "执行中…": "Executando…",
   "执行（{action}）": "Executar ({action})",
   "扫码 / 粘贴令牌 / 导入登录态需在桌面端完成": "",

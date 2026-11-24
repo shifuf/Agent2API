@@ -26,7 +26,11 @@ impl Host {
 
     pub async fn shutdown(&self) {
         self.activity.retire();
+        let task_providers: Vec<_> = self.providers.lock().map(|providers| providers.iter()
+            .map(|provider| provider.id.0.clone()).collect()).unwrap_or_default();
+        for provider in task_providers { super::wasm::tasks::stop_provider(&provider).await; }
         let _serial = self.starting.lock().await;
+        if self.options.wasm.is_some() { self.shutdown_wasm().await; return; }
         let scoped = self.scoped_runtime_package();
         let run = {
             let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
@@ -80,6 +84,8 @@ impl Host {
                 }
             }
         }
+
+        if self.options.wasm.is_some() { return self.start_wasm().await; }
 
         if let Some(old) = self.current_run() {
             {
@@ -229,7 +235,7 @@ impl Host {
             .unwrap_or_else(|| "插件进程不可用".to_string())
     }
 
-    fn note_failure(&self, message: &str) {
+    pub(super) fn note_failure(&self, message: &str) {
         let _state = self.lifecycle.lock().unwrap_or_else(|error| error.into_inner());
         let message = process::redact(message);
         let crashes = self.note_failure_state(&message);

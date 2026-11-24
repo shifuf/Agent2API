@@ -64,6 +64,8 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
         }
     };
     let telemetry = Arc::new(RequestTelemetry::with_id());
+    telemetry.install_model_key_source(access.key_source.clone());
+    telemetry.mark_title_defaults();
     let request_id = telemetry.id();
     super::request_prepare::record_started(state.request_stats(), &request_id, started, &requested, &model, "", &access.source, true).await;
     if let Some(token) = crate::server::core::upstream::cancellation::register(&request_id) {
@@ -73,7 +75,12 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
     let outcome = state.upstream().forward_assistant(ForwardRequest {
         body, stream: false, dedupe_key: String::new(), client_headers: HeaderMap::new(), telemetry: telemetry.clone(),
         allowed_providers: access.scope, pinned_account: None, ignore_model_gate: false, proxy_override: None,
-    }).await;
+    }).await.and_then(|outcome| {
+        if let ForwardOutcome::Completion { body } = &outcome {
+            crate::server::core::upstream::internal_output::verify_completion(body, &telemetry)?;
+        }
+        Ok(outcome)
+    });
     let mut context = RecordContext { stats: state.request_stats(), telemetry, started_at: started, model: requested,
         client_model: model, client_reasoning: String::new(), status: 200, raw_request: None, raw_response: None, is_test: true, source: access.source };
     guard.complete();

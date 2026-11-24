@@ -3,8 +3,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-mod required;
-pub(super) use required::required_release;
 pub(crate) use super::packages::MAX_PACK_BYTES;
 
 use crate::server::core::update::client::{
@@ -29,6 +27,15 @@ pub struct PackAsset {
 
 pub fn asset_name(pack_id: &str, version: &str, target: &str) -> String {
     format!("{pack_id}-{version}-{target}.zip")
+}
+
+pub(super) fn target_compatible(target: &str, current: &str) -> bool {
+    target == current || target == super::wasm::manifest::TARGET
+}
+
+pub(super) fn select_platform<'a>(platforms: &'a [Value], current: &str) -> Option<&'a Value> {
+    platforms.iter().find(|platform| platform["target"].as_str() == Some(current))
+        .or_else(|| platforms.iter().find(|platform| platform["target"] == super::wasm::manifest::TARGET))
 }
 
 #[derive(Clone, Debug)]
@@ -66,13 +73,14 @@ pub struct ReleaseAssets {
 
 impl ReleaseAssets {
     pub fn asset(&self, id: &str, target: &str) -> Option<PackAsset> {
-        let (_, url, size) = self
+        let (actual, url, size) = self
             .platforms
             .iter()
-            .find(|(platform, _, _)| platform == target)?;
+            .find(|(platform, _, _)| platform == target)
+            .or_else(|| self.platforms.iter().find(|(platform, _, _)| platform == super::wasm::manifest::TARGET))?;
         Some(PackAsset {
             version: self.version.clone(),
-            name: asset_name(id, &self.version, target),
+            name: asset_name(id, &self.version, actual),
             url: url.clone(),
             size: *size,
             page: self.page.clone(),
@@ -102,7 +110,6 @@ pub(super) fn describe_error(message: &str, retry_at: i64) -> String {
 }
 
 pub fn clear_cooldown() {
-    super::compatibility::clear_cooldown();
     super::catalog::clear_cooldown();
     if let Err(error) = crate::server::core::task_state::clear_cooldown(&retry_key()) {
         crate::server::logging::verbose("[Plugin]", &error);
@@ -179,7 +186,7 @@ pub async fn read_index_result() -> Result<Vec<IndexEntry>, String> {
                 id,
                 description: text(item, "description"),
                 official: item.get("official").and_then(Value::as_bool) == Some(true),
-                require_signed,
+                require_signed: require_signed || item.get("requireSigned").and_then(Value::as_bool) == Some(true),
                 manifest: text(item, "manifest"),
                 icon: text(item, "icon"),
                 repo: item
@@ -238,7 +245,7 @@ pub async fn read_detail(path: &str) -> Option<PluginDetail> {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "{id}-{version}-{target}.zip".to_string()),
         homepage: text(&document, "homepage"),
-        require_signed: !response.official,
+        require_signed: !response.official || document.get("requireSigned").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -399,7 +406,7 @@ pub(super) async fn release_for_channels(
             && !assets
                 .platforms
                 .iter()
-                .any(|(target, _, _)| *target == super::host_target())
+                .any(|(target, _, _)| target_compatible(target, &super::host_target()))
         {
             continue;
         }

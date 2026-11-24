@@ -112,6 +112,8 @@ pub fn snapshot() -> Value {
             let Ok(mut operation) = serde_json::from_value::<Operation>(value) else {
                 continue;
             };
+            // 旧版的强制产品版本补齐任务已失效，保留历史记录但不继续显示为待修复。
+            if operation.required { continue; }
             if operation.active {
                 operation.active = false;
                 operation.stage = "failed".to_string();
@@ -149,8 +151,8 @@ pub fn start_cached(
     platform: &Value,
     automatic: bool,
 ) -> Result<Operation, String> {
-    if target != super::host_target() {
-        return Err("只能安装当前网关平台的插件包".to_string());
+    if !update::target_compatible(target, &super::host_target()) {
+        return Err("只能安装当前网关平台或跨平台 Wasm 插件包".to_string());
     }
     let asset = update::PackAsset {
         version: version.to_string(),
@@ -168,20 +170,11 @@ pub fn start_cached(
     start_asset(id, action, asset, policy)
 }
 
-pub(super) fn start_required(
-    id: &str,
-    mut asset: update::PackAsset,
-    automatic: bool,
-) -> Result<Operation, String> {
-    asset.require_signed = true;
-    start_asset(id, "repair", asset, InstallPolicy::Required { automatic })
-}
-
 fn claim_operation(id: &str, policy: InstallPolicy) -> Result<task_state::RunGuard, String> {
     if active(id) { return Err("这个插件正在下载或安装".to_string()); }
     match task_state::claim(
         &record_key(id), 60_000, true,
-        if policy.automatic() || matches!(policy, InstallPolicy::Required { .. }) {
+        if policy.automatic() {
             ManualBackoff::Respect
         } else { ManualBackoff::Bypass },
         1000,
@@ -214,9 +207,7 @@ fn finish_operation(
     let message = value["error"].as_str().or_else(|| value["hostError"].as_str())
         .unwrap_or("插件安装完成").to_string();
     if !success { logging::log("[Plugin]", &message); }
-    let interval = if matches!(policy, InstallPolicy::Required { .. }) {
-        super::compatibility::RETRY_INTERVAL_MS
-    } else { 60_000 };
+    let interval = 60_000;
     let _ = guard.finish(success, message, Some(value), 0, interval);
 }
 
@@ -235,9 +226,6 @@ fn start_asset(
         stage: "downloading".to_string(),
         active: true,
         version: asset.version.clone(),
-        required: matches!(policy, InstallPolicy::Required { .. }),
-        required_version: matches!(policy, InstallPolicy::Required { .. })
-            .then(|| crate::server::core::update::CURRENT_VERSION.to_string()),
         updated_at: logging::now_ms(),
         ..Default::default()
     };
@@ -290,14 +278,11 @@ async fn run(
 }
 
 pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, String> {
-    if target != super::host_target() {
-        return Err("只能安装当前网关平台的插件包".to_string());
+    if !update::target_compatible(target, &super::host_target()) {
+        return Err("只能安装当前网关平台或跨平台 Wasm 插件包".to_string());
     }
     let packs = super::list_packs();
     let pack = packs.iter().find(|pack| pack.id == id);
-    if pack.is_some_and(|pack| pack.update_required) {
-        return super::compatibility::start(id, true).await;
-    }
     if action == "update" && pack.is_none() {
         return Err("还没有安装这个插件包".to_string());
     }
@@ -329,7 +314,8 @@ pub async fn start(id: &str, action: &str, target: &str) -> Result<Operation, St
     }
     let platform = entry["platforms"]
         .as_array()
-        .and_then(|items| items.iter().find(|item| item["target"] == target))
+        .and_then(|items| update::select_platform(items, target))
         .ok_or_else(|| "当前平台暂无安装包".to_string())?;
-    start_cached(id, action, target, version, platform, false)
+    let actual_target = platform["target"].as_str().ok_or("插件资产缺少目标平台")?;
+    start_cached(id, action, actual_target, version, platform, false)
 }

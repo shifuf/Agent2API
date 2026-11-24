@@ -85,6 +85,11 @@ pub fn shim_js() -> &'static str {
   // `x-panel-token` / `x-panel-refresh` 头。直连环境下 cookie 照常下发
   // 且服务端优先认它，这套头是纯增量，互不干扰。
   var PANEL_AUTH = 'agent2api.panelAuth';
+  var managementSessionGeneration = 0;
+  function managementSessionChanged() {
+    managementSessionGeneration += 1;
+    window.dispatchEvent(new Event('wb:management-session-changed'));
+  }
   /**
    * 本地记下的 access 到期时刻（毫秒；0 = 不知道）。
    *
@@ -127,13 +132,16 @@ pub fn shim_js() -> &'static str {
   }
 
   function storePanelAuth(access, refresh) {
+    var previousAccess = storedPanelToken('access');
     try {
       localStorage.setItem(PANEL_AUTH, JSON.stringify({
         access: access, refresh: refresh, expiresAt: panelExpiresAt || currentExpiry(),
       }));
     } catch (e) { /* 隐私模式等：留在本次调用链即可 */ }
+    if (previousAccess !== access) managementSessionChanged();
   }
   function clearPanelAuth() {
+    managementSessionChanged();
     panelExpiresAt = 0;
     try { localStorage.removeItem(PANEL_AUTH); } catch (e) { /* 无害 */ }
   }
@@ -364,6 +372,9 @@ pub fn shim_js() -> &'static str {
     if (!method) throw new Error('该登录方式已不在提供商的运行时清单中，请重新选择');
     return {
       manualCallback: method.manualCallback === true,
+      managedLogin: method.managedLogin === true,
+      interactiveLogin: method.interactiveLogin === true,
+      methodIndex: options.methodIndex,
       callbackInput: method.callbackInput === 'code' ? 'code' : 'url',
       localOnly: method.localOnly === true,
       instructions: typeof metadata.instructions === 'string' ? metadata.instructions : '',
@@ -872,6 +883,11 @@ pub fn shim_js() -> &'static str {
       hint: flow ? flow.hint || '' : '',
       state: flow && flow.dynamic && flow.state ? flow.state : null,
       manualCallback: !!(flow && flow.dynamic && flow.manualCallback),
+      managedLogin: !!(flow && flow.managedLogin),
+      interactiveLogin: !!(flow && flow.interactiveLogin),
+      methodIndex: flow && flow.method ? flow.method.methodIndex : undefined,
+      remainingMs: flow && flow.deadline ? Math.max(0, flow.deadline - Date.now()) : undefined,
+      expiresAt: flow && flow.started ? flow.started.expiresAt : undefined,
       callbackInput: flow && flow.dynamic ? flow.callbackInput : 'url',
     };
   }
@@ -908,6 +924,28 @@ pub fn shim_js() -> &'static str {
         throw error;
       }
       if (currentFlow !== flow || flow.canceled) throw canceledError();
+      if (flow.managedLogin) {
+        if (flow.sourceGeneration !== managementSessionGeneration) throw new Error('管理会话已变化，请重新发起登录。');
+        if (!wait || wait.managedLogin !== true || wait.provider !== loginProvider || wait.flow !== flow.state
+          || wait.methodIndex !== flow.method.methodIndex
+          || ['waiting', 'saving', 'saved', 'failed', 'canceled', 'unconfirmed'].indexOf(wait.phase) < 0) {
+          throw new Error('网关未返回有效的托管登录保存回执，请重新查询本次状态。');
+        }
+        if (wait.phase === 'saved') {
+          if (wait.saved !== true || wait.done !== true || wait.pending === true || !wait.session
+            || wait.session.provider !== loginProvider || !(wait.session.accountUid || wait.session.accountId)) {
+            throw new Error('网关未返回有效的托管登录保存回执，请重新查询本次状态。');
+          }
+          return wait;
+        }
+        if (wait.phase === 'canceled') throw canceledError();
+        if (wait.phase === 'failed' || wait.phase === 'unconfirmed') {
+          throw new Error(wait.error || '账号保存未确认，请查询本次状态；不会再次保存。');
+        }
+        if (wait.pending !== true || wait.done === true || wait.saved !== (wait.phase === 'saving' ? null : false)) {
+          throw new Error('网关未返回有效的托管登录保存回执，请重新查询本次状态。');
+        }
+      } else if (wait && wait.managedLogin === true) throw new Error('网关返回的登录步骤不属于当前方式，已停止本次交互。');
       if (wait && wait.done === true && !wait.pending) {
         if (wait.error) throw asError(wait.error);
         return wait.session == null ? {} : wait.session;
@@ -950,6 +988,7 @@ pub fn shim_js() -> &'static str {
     var flow = {
       state: '', canceled: false, dynamic: dynamic, mode: config.mode || 'embedded', edition: config.edition || 'cn',
       instructions: '', hint: '', notices: [], manualCallback: false, callbackInput: 'url', started: null, callbackTargets: [],
+      managedLogin: false, interactiveLogin: false, sourceGeneration: managementSessionGeneration,
       pollIntervalMs: 3000, deadline: 0,
     };
     currentFlow = flow;
@@ -974,6 +1013,13 @@ pub fn shim_js() -> &'static str {
       if (authUrl == null) authUrl = '';
       if (typeof authUrl !== 'string') throw new Error('网关返回的登录链接格式无效');
       var hasUrl = !!authUrl.trim();
+      flow.managedLogin = dynamic && started.managedLogin === true;
+      flow.interactiveLogin = dynamic && started.interactiveLogin === true;
+      if (dynamic && (flow.managedLogin !== !!(flow.method && flow.method.managedLogin)
+        || flow.interactiveLogin && !(flow.method && flow.method.interactiveLogin)
+        || flow.managedLogin && started.methodIndex !== flow.method.methodIndex)) {
+        throw new Error('网关返回的登录步骤不属于当前方式，已停止本次交互。');
+      }
       flow.manualCallback = dynamic && typeof started.manualCallback === 'boolean' ? started.manualCallback
         : dynamic ? !!(flow.method && flow.method.manualCallback) : legacyNeedsManualCallback(provider);
       flow.callbackInput = dynamic && flow.manualCallback
@@ -992,7 +1038,8 @@ pub fn shim_js() -> &'static str {
       // 插件 pollIntervalMs=0 是回调型，不代表关闭网关 /wait；不用于猜 manualCallback。
       flow.pollIntervalMs = Number.isFinite(interval) && interval > 0
         ? Math.max(1000, Math.min(30000, interval)) : 3000;
-      flow.deadline = Date.now() + 5 * 60 * 1000;
+      var remaining = Number(started.remainingMs);
+      flow.deadline = Date.now() + (Number.isFinite(remaining) ? Math.max(0, Math.min(5 * 60 * 1000, remaining)) : 5 * 60 * 1000);
       if (hasUrl) {
         if (!dynamic) authUrl = buildRaccoonWebAuthUrl(provider, flow.state, authUrl);
         flow.callbackTargets = loginCallbackTargets(authUrl);
@@ -1019,7 +1066,7 @@ pub fn shim_js() -> &'static str {
       }
       emitLogin();
       var waiting = pollWait(flow);
-      if (!flow.manualCallback) return await waiting;
+      if (!flow.manualCallback || flow.managedLogin || flow.interactiveLogin) return await waiting;
       // 一个 /wait Promise 与安全粘贴 dialog 竞速，accepted 后仍等待同一个终态。
       var outcome = await Promise.race([
         waiting.then(function (session) { return { session: session }; },
@@ -1479,7 +1526,9 @@ pub fn shim_js() -> &'static str {
           // 无头服务器上选了代理也仍然直连。
           body.proxy = options.proxy;
         }
-        return call('POST', '/api/session/login/start', body);
+        var started = await call('POST', '/api/session/login/start', body);
+        flow.sourceGeneration = managementSessionGeneration;
+        return started;
       }, { dynamic: dynamic, mode: mode || 'embedded', edition: edition || 'cn' });
     },
     submitLoginCallback: function (state, callbackUrl) {

@@ -19,6 +19,13 @@ const upstream = http.createServer(async (request, response) => {
   for await (const chunk of request) chunks.push(chunk)
   const body = JSON.parse(Buffer.concat(chunks).toString() || '{}')
   calls += 1
+  if (body.stream) {
+    response.setHeader('Content-Type', 'text/event-stream')
+    const frame = { id: 'chatcmpl-lifecycle', object: 'chat.completion.chunk', model: body.model,
+      choices: [{ index: 0, delta: { content: body.model }, finish_reason: null }] }
+    response.end(`data: ${JSON.stringify(frame)}\n\ndata: ${JSON.stringify({ ...frame, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`)
+    return
+  }
   response.setHeader('Content-Type', 'application/json')
   response.end(JSON.stringify({ id: 'chatcmpl-lifecycle', object: 'chat.completion', model: body.model,
     choices: [{ index: 0, message: { role: 'assistant', content: body.model }, finish_reason: 'stop' }] }))
@@ -40,15 +47,15 @@ const child = spawn(executable, [], { windowsHide: true, cwd: directory,
 child.stdout.on('data', chunk => { output = (output + chunk).slice(-24000) })
 child.stderr.on('data', chunk => { output = (output + chunk).slice(-24000) })
 const exited = once(child, 'exit')
-async function request(endpoint, body) {
-  const response = await fetch(base + endpoint, { method: body === undefined ? 'GET' : 'POST',
+async function request(endpoint, body, method = body === undefined ? 'GET' : 'POST') {
+  const response = await fetch(base + endpoint, { method,
     headers: { Authorization: `Bearer ${adminKey}`, 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(15000) })
   const result = await response.json()
   return { status: response.status, body: result.success === true ? result.data : result }
 }
-async function ok(endpoint, body) {
-  const result = await request(endpoint, body)
+async function ok(endpoint, body, method) {
+  const result = await request(endpoint, body, method)
   assert.equal(result.status, 200, `${endpoint}: ${JSON.stringify(result.body)}`)
   return result.body
 }
@@ -74,13 +81,101 @@ async function denied(id) {
   assert.equal(calls, before, 'Rejected model must never reach an upstream')
 }
 
+async function currentGroupLifecycle() {
+  const groupsEndpoint = '/api/routing/groups'
+  const state = () => ok(groupsEndpoint)
+  const initial = await state()
+  await ok('/api/routing/groups/actions', { action: 'discovery', enabled: false, revision: initial.collectionRevision })
+  const saveGroup = async group => {
+    const current = await state()
+    return ok(groupsEndpoint, { id: group.id, group,
+      revision: current.groups.find(row => row.group.id === group.id)?.revision ?? current.newRevision }, 'PUT')
+  }
+  const rejectGroup = async (payload, status) => {
+    const before = await state()
+    const response = await request(groupsEndpoint, payload, 'PUT')
+    assert.equal(response.status, status, `Expected atomic group rejection: ${JSON.stringify(response.body)}`)
+    const after = await state()
+    assert.deepEqual(after.groups, before.groups, 'Rejected writes must leave all routing groups unchanged')
+    assert.equal(after.collectionRevision, before.collectionRevision)
+  }
+  const draft = { id: 'lifecycle', model: 'Public/Lifecycle', name: 'Before any channel', enabled: false,
+    kind: 'chat', strategy: 'order', sticky: 'off', members: [] }
+  await saveGroup(draft)
+  assert.deepEqual(await publicIds(), [])
+  await saveGroup({ ...draft, enabled: true })
+  assert.deepEqual(await publicIds(), [], 'An enabled but unbound group stays private')
+  await denied(draft.model)
+  const channel = await ok('/api/custom-providers', { name: 'Lifecycle channel', protocol: 'chat_completions',
+    baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, keyGroups: [
+      { id: 'lifecycle', name: 'Primary', apiKeys: ['fake-lifecycle-key'], models: ['wire-model'], enabled: true },
+    ] })
+  const member = { id: 'source', provider: channel.provider.id, model: 'wire-model', included: true,
+    accountScope: 'selected', accounts: channel.accounts.map(account => account.id) }
+  const published = { ...draft, enabled: true, members: [member] }
+  await saveGroup(published)
+  assert.deepEqual(await publicIds(), [published.model])
+  const reply = await ok('/v1/chat/completions', { model: published.model, messages: [{ role: 'user', content: 'ping' }] })
+  assert.equal(reply.model, published.model)
+  assert.equal(reply.choices[0].message.content, 'wire-model', 'Only the explicitly selected upstream model is sent')
+  const stored = (await state()).groups.find(row => row.group.id === draft.id)
+  const stale = stored.revision
+  await saveGroup({ ...published, name: 'Edited route' })
+  const edited = (await state()).groups.find(row => row.group.id === draft.id).group
+  assert.equal(edited.name, 'Edited route')
+  assert.deepEqual(edited.members, stored.group.members, 'An ordinary edit must preserve the selected source and account scope')
+  await rejectGroup({ id: draft.id, group: { ...published, enabled: false }, revision: stale }, 409)
+  await rejectGroup({ id: 'duplicate', group: { ...published, id: 'duplicate', model: published.model.toUpperCase() },
+    revision: (await state()).newRevision }, 400)
+  await rejectGroup({ id: 'invalid', group: { ...published, id: 'invalid', model: '' },
+    revision: (await state()).newRevision }, 400)
+  await ok('/api/keys', { name: 'Lifecycle selection', key: 'fake-lifecycle-client',
+    allowedProviders: [channel.provider.id], allowedModels: [published.model] })
+  const keysBefore = (await ok('/api/keys')).keys
+  await saveGroup({ ...published, enabled: false })
+  assert.deepEqual(await publicIds(), [])
+  assert.ok(!Object.values((await ok('/api/keys')).modelsByProvider).flat().includes(published.model))
+  await denied(published.model)
+  assert.deepEqual((await ok('/api/keys')).keys, keysBefore, 'Publication must preserve existing Key material')
+  await saveGroup(published)
+  assert.deepEqual(await publicIds(), [published.model])
+  const renamed = { ...published, model: 'Renamed/Lifecycle' }
+  await saveGroup(renamed)
+  assert.deepEqual(await publicIds(), [renamed.model])
+  await denied(published.model)
+  const renamedReply = await ok('/v1/chat/completions', { model: renamed.model, messages: [{ role: 'user', content: 'ping' }] })
+  assert.equal(renamedReply.model, renamed.model)
+  assert.equal(renamedReply.choices[0].message.content, 'wire-model')
+  const current = await state()
+  await ok(groupsEndpoint, { id: draft.id, group: null,
+    revision: current.groups.find(row => row.group.id === draft.id).revision }, 'PUT')
+  assert.deepEqual((await state()).groups, [])
+  assert.deepEqual(await publicIds(), [])
+  await denied(renamed.model)
+  assert.equal((await request(endpoint, { model: { id: 'retired-write', bindings: [] } })).status, 410,
+    'The retired model catalog must not recreate a second public model manager')
+  assert.deepEqual((await state()).groups, [])
+  console.log('PASS: current routing-group model lifecycle, private unbound drafts, selected source, public IDs, edits, atomic validation, stale revisions, disable/enable, rename/delete, Key choices and retired catalog isolation')
+}
+
 try {
+  let currentGroups = false
   for (let attempt = 0; attempt < 120; attempt++) {
     if (child.exitCode !== null) throw new Error(`Gateway exited ${child.exitCode}`)
-    try { catalog = await ok(endpoint); break } catch {}
+    try {
+      const response = await request(endpoint)
+      if (response.status === 410 || response.status === 200 && response.body.retired === true) {
+        if (response.status === 200) assert.equal(response.body.replacement, '/api/routing/groups')
+        await ok('/api/routing/groups'); currentGroups = true; break
+      }
+      if (response.status === 200) { catalog = response.body; break }
+    } catch {}
     await delay(250)
   }
-  assert.ok(catalog, 'Gateway did not become ready')
+  assert.ok(currentGroups || catalog, 'Gateway did not become ready')
+  if (currentGroups) {
+    await currentGroupLifecycle()
+  } else {
   // Regression: creation previously required a channel binding.
   await save({ id: 'standalone', name: 'Before any channel', enabled: false, bindings: [] })
   assert.deepEqual(await publicIds(), [])
@@ -151,6 +246,7 @@ try {
   assert.deepEqual(catalog.models, [])
   assert.deepEqual(await publicIds(), [])
   console.log('PASS: standalone models, metadata round-trip, legacy edits, default-disabled batches, atomic validation/conflicts, stale revisions, archive/restore/publication and gateway Key choices')
+  }
 } catch (error) {
   console.error(output)
   throw error

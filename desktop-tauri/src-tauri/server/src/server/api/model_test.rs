@@ -628,6 +628,8 @@ pub async fn run_model_test(State(state): State<ServerState>, headers: HeaderMap
     // 槽位（`new`），否则会保留自己生成的那个
     let given_id = text_field(&payload, "test_id", 64);
     let telemetry = Arc::new(RequestTelemetry::new());
+    telemetry.install_model_key_source(access.key_source.clone());
+    if matches!(protocol, TestProtocol::Anthropic) { telemetry.mark_anthropic_model_test_defaults(); }
     if !given_id.is_empty() {
         telemetry.ensure_id(&given_id);
     }
@@ -774,10 +776,17 @@ async fn run_forward(
             raw_response: None,
         },
         Ok(Ok(ForwardOutcome::Completion { body })) => {
-            translate_completion(protocol, model, protocol_request, 200, body)
+            match crate::server::core::upstream::internal_output::verify_completion(&body, telemetry) {
+                Ok(()) => translate_completion(protocol, model, protocol_request, 200, body),
+                Err(error) => TestOutcome {
+                    status: i64::from(error.status_code), error: Some(error.message), reply: String::new(),
+                    reasoning_text: String::new(), raw_response: None,
+                },
+            }
         }
         Ok(Ok(ForwardOutcome::Stream { status, stream: source })) => {
             let status = i64::from(status);
+            let source = crate::server::core::upstream::internal_output::observe_stream(source, telemetry);
             // `ForwardOutcome::Stream` 给的是 `Box<dyn Stream + Unpin>`，聚合器要
             // 的是 `BoxStream`（`Pin<Box<dyn Stream>>`）—— `boxed()` 这一步就是
             // 把这个 Unpin 的盒子换成 `'static` 的 Pin 盒子，元素类型不变

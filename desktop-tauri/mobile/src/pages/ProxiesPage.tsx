@@ -1,21 +1,24 @@
-import { useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { ProxyGroups, type GroupRequest } from '../../../ui-shared/proxy-groups'
 import { apiCall } from '../api/client'
 const groupRequest: GroupRequest = (method, path, body) => apiCall(path, { method, body })
+const proxyGroupsActive = () => !document.hidden && store.get().route.screen === 'proxies'
 import {
   Button, Card, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader,
-  DialogTitle, Input, SegmentedControl, Switch,
+  DialogTitle, Input, SegmentedControl, Switch, Checkbox,
 } from '@ui'
 import { PageIntro, IconButton, Empty, ErrorNote, SkeletonList, copyWithToast } from '../components/ui'
 import { GlyphLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
 import { store } from '../state/store'
-import { fetchProxyPool, removeProxyItem, setProxyEnabled, syncClashProxies, testProxy, type PoolItem, type PoolPayload } from '../api/gateway'
+import { fetchProxyBindings, removeProxyItem, setProxyEnabled, syncClashProxies, testProxy, type PoolItem, type PoolPayload } from '../api/gateway'
 import { formatRelative } from '../lib/format'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
-import { proxyServiceLabels } from '../../../ui-shared/proxy-usage'
+import { proxyBindingSearchText, proxyServiceLabels } from '../../../ui-shared/proxy-usage'
+import { ProxyAccountLabels, ProxyBindingsDialog } from '../../../ui-shared/proxy-bindings-dialog'
+import { ProxySubscriptionsSheet, fetchProxySubscriptions, type ProxySubscription } from './proxy-subscriptions-sheet'
 import { ProxyEditorSheet, ProxyTestSettingsSheet } from './proxy-editor-sheet'
 import { serverIdentity } from '../lib/servers'
 import { getKernelStatus, kernelAction, type KernelStatus } from '../api/kernel'
@@ -31,6 +34,11 @@ export function ProxiesPage() {
   const [editor, setEditor] = useState<{ item: PoolItem | null } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [deleting, setDeleting] = useState<PoolItem | null>(null)
+  const [subscriptions, setSubscriptions] = useState<ProxySubscription[]>([])
+  const [subscriptionsOpen, setSubscriptionsOpen] = useState(false)
+  const [binding, setBinding] = useState<{ proxyIds: string[]; accountIds: string[] } | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [expandedSubscriptions, setExpandedSubscriptions] = useState<Set<string>>(new Set())
   const identity = serverIdentity()
   const [kernel, setKernel] = useState<KernelStatus | null>(null)
   const [importOpen, setImportOpen] = useState(false)
@@ -38,15 +46,17 @@ export function ProxiesPage() {
 
   const load = async () => {
     try {
-      const next = await fetchProxyPool()
+      const [next, subscriptions] = await Promise.all([fetchProxyBindings(), fetchProxySubscriptions()])
       if (serverIdentity() !== identity) return
       setData(next)
+      setSubscriptions(subscriptions.items)
       setError('')
     } catch (failure) {
       if (serverIdentity() === identity) setError(message(failure))
     }
   }
-  usePolling(load, 120_000)
+  usePolling(load, 15_000)
+  useEffect(() => { setSelected(previous => new Set([...previous].filter(id => data?.items?.some(item => item.id === id)))) }, [data])
   const loadKernel = async () => {
     try {
       const next = await getKernelStatus()
@@ -70,7 +80,13 @@ export function ProxiesPage() {
   const items = data?.items || []
   const query = keyword.trim().toLowerCase()
   const shown = items.filter(item => (status === 'all' || stateOf(item) === status)
-    && (!query || [item.name, addressOf(item), item.host, item.port, item.protocol].join(' ').toLowerCase().includes(query)))
+    && (!query || [item.name, addressOf(item), item.host, item.port, item.protocol, proxyBindingSearchText(item)].join(' ').toLowerCase().includes(query)))
+  const ordered = [...shown.filter(item => item.source !== 'subscription')]
+  for (const id of new Set(shown.filter(item => item.source === 'subscription').map(item => item.providerId || ''))) {
+    ordered.push(...shown.filter(item => item.source === 'subscription' && (item.providerId || '') === id))
+  }
+  function pick(id: string, checked: boolean) { setSelected(previous => { const next = new Set(previous); if (checked) next.add(id); else next.delete(id); return next }) }
+  function toggleSubscription(id: string) { setExpandedSubscriptions(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next }) }
   const statuses = [
     { value: 'all', label: t('全部'), count: items.length },
     { value: 'ok', label: t('可用'), count: items.filter(item => stateOf(item) === 'ok').length },
@@ -140,12 +156,19 @@ export function ProxiesPage() {
         <IconButton name='plus' label={t('新增代理')} primary onClick={() => setEditor({ item: null })} /></>} />
     <div className='m-section mt-0'>
       <Card className='m-card m-card-pad'>
-        <Button variant='outline' size='touch-sm' className='w-full' disabled={Boolean(busy)} onClick={() => void syncClash()}>{busy === 'sync-clash' ? t('同步中…') : t('同步 Clash Verge')}</Button>
+        <div className='flex flex-wrap gap-2'>
+          <Button variant='outline' size='touch-sm' disabled={Boolean(busy)} onClick={() => setSubscriptionsOpen(true)}>{t('订阅管理')}</Button>
+          <Button variant='outline' size='touch-sm' disabled={Boolean(busy)} onClick={() => setBinding({ proxyIds: [], accountIds: [] })}>{t('管理绑定')}</Button>
+          <Button variant='outline' size='touch-sm' disabled={Boolean(busy)} onClick={() => void syncClash()}>{busy === 'sync-clash' ? t('同步中…') : t('同步 Clash Verge')}</Button>
+        </div>
         <div className='mt-3 flex items-center gap-2'>
-          <Input type='search' className='min-w-0 flex-1' value={keyword} aria-label={t('搜索代理')} placeholder={t('搜索名称 / 地址 / 端口')} onChange={event => setKeyword(event.currentTarget.value)} />
+          <Input type='search' className='min-w-0 flex-1' value={keyword} aria-label={t('搜索代理')} placeholder={t('搜索名称 / 地址 / 渠道 / 账号')} onChange={event => setKeyword(event.currentTarget.value)} />
           <Button variant='outline' size='icon-touch' aria-label={t('测试设置')} onClick={() => setSettingsOpen(true)}><Icon name='settings' className='size-4' /></Button>
         </div>
         <SegmentedControl className='mt-3 w-full flex-wrap' options={statuses} value={status} onValueChange={setStatus} aria-label={t('按状态筛选')} />
+        {selected.size ? <div className='mt-3 flex flex-wrap items-center gap-2 text-xs'><span>{t('已选')} {selected.size}</span>
+          <Button size='touch-sm' disabled={Boolean(busy)} onClick={() => setBinding({ proxyIds: [...selected], accountIds: [] })}>{t('绑定账号')}</Button>
+          <Button size='touch-sm' variant='ghost' onClick={() => setSelected(new Set())}>{t('取消选择')}</Button></div> : null}
       </Card>
     </div>
       {kernel ? <div className='m-section' style={{ marginTop: 0 }}>
@@ -161,7 +184,6 @@ export function ProxiesPage() {
         </Card>
       </div> : null}
       {kernelError ? <ErrorNote text={kernelError} /> : null}
-      <ProxyGroups key={identity} request={groupRequest} t={t} />
       {importOpen && kernel ? <KernelImportSheet status={kernel} onClose={() => setImportOpen(false)} onChanged={refresh} /> : null}
 
     {error ? <ErrorNote text={error} /> : null}
@@ -173,9 +195,18 @@ export function ProxiesPage() {
     {data && items.length > 0 && !shown.length ? <div className='m-section'><Card className='m-card m-card-pad'>
       <Empty text={t('没有匹配当前筛选的出口')} /><Button variant='outline' className='w-full' onClick={() => { setKeyword(''); setStatus('all') }}>{t('清空筛选')}</Button>
     </Card></div> : null}
-    {shown.map(item => <div key={item.id} className='m-section mt-2.5'>
+    {ordered.map((item, index) => <Fragment key={item.id}>
+      {item.source === 'subscription' && !item.orphan && item.providerId && (index === 0 || ordered[index - 1].providerId !== item.providerId) ? <div className='m-section mt-3'>
+        <Card className='m-card m-card-pad'><div className='flex items-center gap-2'>
+          <strong className='min-w-0 flex-1 break-words text-sm'>{subscriptions.find(subscription => subscription.id === item.providerId)?.name || item.providerId}</strong>
+          <Button variant='outline' size='touch-sm' aria-expanded={expandedSubscriptions.has(item.providerId)}
+            aria-label={t('订阅选路：{name}', { name: subscriptions.find(subscription => subscription.id === item.providerId)?.name || item.providerId })}
+            onClick={() => item.providerId && toggleSubscription(item.providerId)}>{t(expandedSubscriptions.has(item.providerId) ? '收起选路' : '展开选路')}</Button>
+        </div>{expandedSubscriptions.has(item.providerId) ? <ProxyGroups key={`${identity}:${item.providerId}`} providerId={item.providerId} compact request={groupRequest} t={t} active={proxyGroupsActive} onChanged={() => void load()} /> : null}</Card>
+      </div> : null}
+      <div className='m-section mt-2.5'>
       <Card className='m-card m-card-pad'>
-        <div className='flex items-center gap-3'><GlyphLogo name='globe' /><div className='min-w-0 flex-1'>
+        <div className='flex items-center gap-3'><Checkbox checked={selected.has(item.id)} aria-label={t('勾选「{name}」', { name: item.name })} onCheckedChange={checked => pick(item.id, checked)} /><GlyphLogo name='globe' /><div className='min-w-0 flex-1'>
           <strong className='text-sm'>{item.name || t('未命名')}</strong>
           {item.source === 'subscription' ? <p className='mt-1 text-[10px] text-subtle'>{t('订阅节点')} · {item.node || item.name}</p> : null}
           {item.source === 'clash' ? <p className='mt-1 text-[10px] text-subtle'>Clash Verge · {t('只读：在 Clash Verge 里改')}</p> : null}
@@ -194,13 +225,14 @@ export function ProxiesPage() {
           {item.lastTest?.at ? <p className='mt-1 break-all text-[11px] text-subtle'>
             {item.lastTest.success ? item.lastTest.ip : item.lastTest.error} · {formatRelative(item.lastTest.at)}
           </p> : null}
+          <div className='mt-2'><ProxyAccountLabels item={item} t={t} /></div>
           <div className='mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-subtle'>
-            {item.usedBy?.length ? <span>{t('{n} 个账号在用', { n: item.usedBy.length })}</span> : null}
             {proxyServiceLabels(item, t).map(service => <span key={service}>{service}</span>)}
             {!item.usedBy?.length && !item.usedByServices?.length ? t('暂未使用') : null}
           </div>
         </div>
         <div className='mt-3 flex justify-end gap-2'>
+          <Button size='touch-sm' variant='outline' disabled={Boolean(busy)} onClick={() => setBinding({ proxyIds: [item.id], accountIds: (item.usedBy || []).flatMap(account => account.id ? [account.id] : []) })}>{t('绑定账号')}</Button>
           <Button size='touch-sm' variant='outline' disabled={Boolean(busy)} onClick={() => void test(item)}>{t('测试')}</Button>
           {item.source !== 'clash' && item.source !== 'subscription' ? <>
             <Button size='touch-sm' variant='outline' disabled={Boolean(busy)} onClick={() => setEditor({ item })}>{t('编辑')}</Button>
@@ -208,7 +240,14 @@ export function ProxiesPage() {
           </> : null}
         </div>
       </Card>
-    </div>)}
+    </div></Fragment>)}
+    {subscriptionsOpen ? <ProxySubscriptionsSheet onClose={() => setSubscriptionsOpen(false)} onChanged={refresh} /> : null}
+    {binding ? <ProxyBindingsDialog<PoolItem> key={identity} request={groupRequest} t={t} initialProxyIds={binding.proxyIds} initialAccountIds={binding.accountIds}
+      onClose={() => setBinding(null)} onSaved={payload => {
+        if (serverIdentity() !== identity) return
+        setData(payload); void refresh(); void store.refresh(true)
+        store.toast(t('已更新 {n} 个账号的代理绑定', { n: payload.changed || 0 }))
+      }} /> : null}
     {editor ? <ProxyEditorSheet item={editor.item} onClose={() => setEditor(null)} onSaved={setData} /> : null}
     {settingsOpen ? <ProxyTestSettingsSheet onClose={() => setSettingsOpen(false)} /> : null}
     <Dialog open={Boolean(deleting)} onOpenChange={open => { if (!open && !busy) setDeleting(null) }}>

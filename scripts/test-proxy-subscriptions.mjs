@@ -12,6 +12,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { createFixturePanelSession } from './fixtures/panel-session.mjs'
 
 const [executable, kernelSource] = process.argv.slice(2)
 assert.ok(executable, 'Usage: node scripts/test-proxy-subscriptions.mjs <agent2api-server> [local-mihomo-file-or-directory]')
@@ -238,7 +239,7 @@ try {
   const env = { ...process.env, AGENT2API_PROXY_HOME: temp, AGENT2API_HOST: '127.0.0.1',
     AGENT2API_UI_DIR: path.resolve('desktop-tauri/ui'),
     AGENT2API_PROXY_PORT: String(port), AGENT2API_PROXY_API_KEY: adminKey,
-    AGENT2API_ACCOUNT_KEY: '3'.repeat(64), AGENT2API_SELF_UPDATE: '0', AGENT2API_PANEL_PORT: '',
+    AGENT2API_ACCOUNT_KEY: '3'.repeat(64), AGENT2API_SELF_UPDATE: '0', AGENT2API_PANEL_PORT: '', AGENT2API_CAPTCHA_ENABLED: '0',
     AGENT2API_ADMIN_USER: '', AGENT2API_ADMIN_PASSWORD: '', AGENT2API_ADMIN_PASSWORD_HASH: '' }
   for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[key]
   child = spawn(path.resolve(executable), [], { windowsHide: true, cwd: temp, env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -445,7 +446,8 @@ try {
     assert.equal((await ok('/api/subscriptions/groups/members', { providerId: local.id, group: 'front-group' })).groups[0].selected, 'second-front')
     if (process.env.PLAYWRIGHT_MODULE) {
       const { checkGroupBrowser } = await import('./test-proxy-groups-browser.mjs')
-      await checkGroupBrowser(base, adminKey, process.env.GROUP_SCREENSHOT_DIR || temp)
+      const administrator = await createFixturePanelSession(base, { username: 'fixture-groups-admin', password: 'fixture-groups-panel-password-only' })
+      await checkGroupBrowser(base, adminKey, process.env.GROUP_SCREENSHOT_DIR || temp, administrator)
     }
     await ok(`/api/accounts/${accountId}`, { proxy: { source: 'pool', proxyId: selected.id } }, 'PATCH')
     await readyNode()

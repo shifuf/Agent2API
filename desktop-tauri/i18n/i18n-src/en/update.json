@@ -290,5 +290,19 @@
   "默认开启；即使当前使用 beta 版，也可收到版本号更高的正式版更新。": "Enabled by default. Even on a beta build, you can receive stable releases with a higher version.",
   "默认跟随软件的正式版和 beta 关注选择；单独设置只影响插件。始终按版本号选择更新，不会降级。": "Follows the software’s stable and beta channel choices by default. Separate settings affect only plugins. Updates are selected by version and never downgrade.",
   "默认跟随软件的自动检查和间隔。关闭自动检查也会暂停插件自动更新和自动下载；手动检查与安装不受影响。": "Follows the software’s automatic checks and interval by default. Turning off automatic checks also pauses automatic plugin updates and downloads. Manual checks and installation remain available.",
-  "（检查于 {time}）": " (checked at {time})"
+  "（检查于 {time}）": " (checked at {time})",
+  "保存值不符合当前插件的规则，请重新设置。": "The saved value does not meet the current plugin’s rules. Please set it again.",
+  "发现未安装的官方插件时自动下载并安装，仅接受当前平台或跨平台 Wasm 且通过官方签名校验的包；开启期间卸载的官方插件也会重新安装。": "Automatically download and install missing official plugins. Only packages for this platform or cross-platform Wasm with valid official signatures are accepted. Official plugins uninstalled while this is enabled will also be reinstalled.",
+  "当前由 {source} 覆盖为 {value}": "Currently overridden by {source}: {value}",
+  "提供商当前不可用，未保存的修改已保留；恢复插件后可继续编辑。": "The provider is unavailable. Your unsaved changes are retained; you can continue editing when the plugin is restored.",
+  "提供商设置已保存": "Provider settings saved",
+  "提供商设置返回格式无效，请刷新后重试": "The provider settings response is invalid. Refresh and try again.",
+  "插件或设置已变化，请放弃修改并刷新后重新编辑。": "The plugin or its settings have changed. Discard your changes, refresh, and edit again.",
+  "插件：{name} · {version}": "Plugin: {name} · {version}",
+  "放弃修改并刷新": "Discard changes and refresh",
+  "检测到更新后自动下载、校验并安装已启用的官方签名插件；其他插件请从市场或文件手动更新。": "Automatically download, verify, and install updates to enabled plugins with official signatures. Update other plugins manually from the market or a file.",
+  "正在读取提供商设置…": "Loading provider settings…",
+  "跨平台 Wasm": "Cross-platform Wasm",
+  "默认跟随软件的正式版和 beta 关注选择，也可单独选择插件更新通道。": "By default, follow the app’s stable and beta update preferences. You can also choose a separate update channel for plugins.",
+  "默认跟随软件的自动检查和间隔。关闭后暂停自动检查、更新和下载，已安装的兼容插件继续运行。": "By default, follow the app’s automatic check settings and interval. Turning this off pauses automatic checks, updates, and downloads; compatible installed plugins continue running."
 }

@@ -269,6 +269,7 @@ pub async fn generations(
                 source,
                 started_at,
                 is_assistant: false,
+                key_source: None,
             },
         )
         .await,
@@ -302,6 +303,7 @@ pub async fn edits(
                 source,
                 started_at,
                 is_assistant: false,
+                key_source: None,
             },
         )
         .await,
@@ -322,6 +324,7 @@ pub(super) struct ImageExecution {
     pub source: crate::server::request_stats::RequestSource,
     pub started_at: i64,
     pub is_assistant: bool,
+    pub key_source: Option<Result<Arc<crate::server::config::model_key_source::Source>, GatewayError>>,
 }
 
 pub(super) async fn execute(
@@ -336,6 +339,7 @@ pub(super) async fn execute(
         source,
         started_at,
         is_assistant,
+        key_source,
     } = input;
     let client_model = pipeline::model_field_text(&payload);
     let state_copy = state.clone();
@@ -368,6 +372,9 @@ pub(super) async fn execute(
         &pipeline::user_agent_of(&headers),
     );
     let telemetry = Arc::new(RequestTelemetry::with_id());
+    if let Some(key_source) = key_source {
+        telemetry.install_model_key_source(key_source);
+    }
     let id = telemetry.id();
     super::request_prepare::record_started(
         state.request_stats(),

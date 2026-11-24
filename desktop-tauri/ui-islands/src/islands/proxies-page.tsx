@@ -137,10 +137,10 @@ import {
   isPortlessSubscription, kernelInstalled, poolItemAddress, portlessSubscriptionLabel,
 } from './accounts-shared'
 import {
-  batchRemove, batchTest, clearSelection, durationText, enableHint,
+  accept, batchRemove, batchTest, clearSelection, durationText, enableHint,
   formatTime, getSnapshot, isDisabledSubscriptionItem, isMirrorOffItem, isOrphanSubscriptionItem,
   isPicked, isReadonlyPoolItem, isUnprovisionedItem, items, loadPanel, readonlyHint, removeItem,
-  setAllPicked, subscribe, testItem, toggleItem, togglePick, wb,
+  setAllPicked, subscribe, testItem, toggleItem, togglePick, toast, wb,
   type ProxyPoolItem,
 } from './proxies-state'
 import {
@@ -154,7 +154,9 @@ import {
 } from './proxies-columns'
 import { TableFooter, useClientPaging } from './table-shell'
 import { t } from '../i18n'
-import { hasProxyUsage, proxyServiceLabels } from '../../../ui-shared/proxy-usage'
+import { hasProxyUsage, proxyBindingSearchText, proxyServiceLabels } from '../../../ui-shared/proxy-usage'
+import { ProxyAccountLabels, ProxyBindingsDialog } from '../../../ui-shared/proxy-bindings-dialog'
+import type { ProxyBindingPayload } from '../../../ui-shared/proxy-bindings'
 import { Badge } from '@ui'
 
 /* ─── 页面 ───────────────────────────────────── */
@@ -169,6 +171,8 @@ function ProxiesPage() {
   /** 窄屏筛选抽屉（见 css/mobile.css 的 .px-filter-group） */
   const [filterOpen, setFilterOpen] = React.useState(false)
   const [subsOpen, setSubsOpen] = React.useState(false)
+  const [binding, setBinding] = React.useState<{ proxyIds: string[]; accountIds: string[] } | null>(null)
+  const [expandedSubscriptions, setExpandedSubscriptions] = React.useState<Set<string>>(new Set())
   const [kw, setKw] = React.useState('')
   const [srcFilter, setSrcFilter] = React.useState('all')
   const [vendorFilter, setVendorFilter] = React.useState('all')
@@ -229,7 +233,7 @@ function ProxiesPage() {
     if (!vendorHit(item)) return false
     if (stFilter !== 'all' && stateKeyOf(item) !== stFilter) return false
     if (keyword) {
-      const hay = [item.name, poolItemAddress(item), item.host, item.protocol, String(item.port ?? '')]
+      const hay = [item.name, poolItemAddress(item), item.host, item.protocol, String(item.port ?? ''), proxyBindingSearchText(item)]
         .join(' ').toLowerCase()
       if (!hay.includes(keyword)) return false
     }
@@ -268,13 +272,32 @@ function ProxiesPage() {
    * 分组带与分页切片都按它 —— 不先排好，第 2 页可能又冒出一条「手动」的带。
    */
   const ordered: ProxyPoolItem[] = []
-  for (const group of groups()) ordered.push(...shown.filter(item => groupOf(item) === group.key))
+  for (const group of groups()) {
+    const entries = shown.filter(item => groupOf(item) === group.key)
+    if (group.key !== 'subscription') { ordered.push(...entries); continue }
+    for (const id of new Set(entries.map(item => item.providerId || ''))) ordered.push(...entries.filter(item => (item.providerId || '') === id))
+  }
   // 分页按整份命中列表切（客户端分页，与账号 / 网关 Key 同一套控件与存盘口径）
   const paging = useClientPaging(shown.length, 'proxies')
   const pageRows = paging.paged ? paging.slice(ordered) : ordered
   /** 各组在**整个命中集**里的条数：分组带报的是这一组有多少条，不是这一页有多少条 */
   const groupCounts = new Map<string, number>()
-  for (const item of shown) groupCounts.set(groupOf(item), (groupCounts.get(groupOf(item)) ?? 0) + 1)
+  const bandOf = (item: ProxyPoolItem) => item.source === 'subscription' ? `subscription:${item.providerId || ''}` : groupOf(item)
+  for (const item of shown) groupCounts.set(bandOf(item), (groupCounts.get(bandOf(item)) ?? 0) + 1)
+
+  function bindingSaved(payload: ProxyBindingPayload<ProxyPoolItem>): void {
+    accept(payload)
+    void loadPanel(true)
+    void wb().wbApp?.refresh?.()
+    toast(t('已更新 {n} 个账号的代理绑定', { n: payload.changed || 0 }), 'ok')
+  }
+  function toggleSubscription(id: string): void {
+    setExpandedSubscriptions(previous => {
+      const next = new Set(previous)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
 
   // 筛选 / 搜索换了结果集：回到第 1 页（停在第 5 页再筛成三条，看到的会是尾部，
   // 与签到记录 / 请求日志同一条口径；越界由 useClientPaging 自己夹回）
@@ -418,6 +441,11 @@ function ProxiesPage() {
         )
       case 'addr':
         return addrCell(item)
+      case 'bindings':
+        return <div className='min-w-[180px] space-y-1.5'>
+          <ProxyAccountLabels item={item} t={t} />
+          <Button size='sm' variant='ghost' disabled={locked} onClick={() => setBinding({ proxyIds: [item.id], accountIds: (item.usedBy || []).flatMap(account => account.id ? [account.id] : []) })}>{t('绑定账号')}</Button>
+        </div>
       case 'state': {
         // 三种来源都能开关（管的是「本端用不用它」，见文件头「启用列」一节）：
         // 唯一不能点的是**来源侧本身就关着的**（Clash 里那条监听器是停用的）——
@@ -516,19 +544,27 @@ function ProxiesPage() {
     const blocks: React.ReactNode[] = []
     let current = ''
     for (const item of pageRows) {
-      const key = groupOf(item)
+      const key = bandOf(item)
       if (key !== current) {
         current = key
-        const group = groups().find(entry => entry.key === key)
+        const group = groups().find(entry => entry.key === groupOf(item))
+        const subscription = item.source === 'subscription' && !item.orphan ? subs.find(subscription => subscription.id === item.providerId) : null
         blocks.push(
           <TableRow className='tr-group' key={`group:${key}:${blocks.length}`}>
             <TableCell colSpan={columns.length}>
-              <span className='prov-tag'>{group?.label ?? key}</span>
+              <span className='prov-tag'>{subscription?.name || group?.label || key}</span>
               {t('{n} 个', { n: groupCounts.get(key) ?? 0 })}
               {group?.note ? <span className='font-normal'>　·　{group.note}</span> : null}
+              {subscription ? <Button size='sm' variant='ghost' className='ml-2' aria-expanded={expandedSubscriptions.has(subscription.id)}
+                aria-label={t('订阅选路：{name}', { name: subscription.name })} onClick={() => toggleSubscription(subscription.id)}>{t(expandedSubscriptions.has(subscription.id) ? '收起选路' : '展开选路')}</Button> : null}
             </TableCell>
           </TableRow>,
         )
+        if (subscription && expandedSubscriptions.has(subscription.id)) blocks.push(<TableRow key={`routes:${key}`}>
+          <TableCell colSpan={columns.length} className='!whitespace-normal'>
+            <ProxyGroups providerId={subscription.id} compact request={accountRequest} t={t} active={proxyGroupsActive} onChanged={() => void loadPanel(true)} />
+          </TableCell>
+        </TableRow>)
       }
       blocks.push(row(item))
     }
@@ -562,6 +598,7 @@ function ProxiesPage() {
             onClick={() => setSettingsOpen(true)}>
             {t('设置')}
           </Button>
+          <Button variant='outline' disabled={snapshot.batchBusy} onClick={() => setBinding({ proxyIds: [], accountIds: [] })}>{t('管理绑定')}</Button>
           {/* 订阅管理：订阅表的唯一入口（页面上不再有第二个面板）。
               带订阅条数 —— 0 条时只写按钮名，免得出现「订阅管理（0）」这种读数。
               「同步 Clash Verge」也在这个弹窗里（与订阅同属「把外面的出口集合
@@ -584,7 +621,6 @@ function ProxiesPage() {
       <div className='px-3 pt-3'>
         <KernelBar showPortRange />
       </div>
-      <ProxyGroups request={accountRequest} t={t} active={proxyGroupsActive} />
 
       {/* 工具条与批量条**共用一个槽位**：勾选后原地换成批量条，取消选择换回来 ——
           两条不叠着，表格不会因为多出一条状态带而整体下移。
@@ -600,6 +636,7 @@ function ProxiesPage() {
             </span>
           ) : null}
           <div className='batch-actions'>
+            <Button variant='outline' disabled={snapshot.batchBusy} onClick={() => setBinding({ proxyIds: [...snapshot.selected], accountIds: [] })}>{t('绑定账号')}</Button>
             <Button variant='outline' disabled={snapshot.batchBusy}
               onClick={() => void batchTest()}>
               {progress ? t('测试中 {done}/{total}', { done: progress.done, total: progress.total }) : t('批量测试')}
@@ -626,7 +663,7 @@ function ProxiesPage() {
             onClick={() => { setKw(''); pickVendor('all'); pickSource('all'); setStFilter('all') }}>{t('清空')}</Button>}>
           <InputGroup className='w-[clamp(150px,22vw,220px)]'>
             <InputGroupInput type='search' value={kw} aria-label={t('搜索节点')}
-              placeholder={t('搜索名称 / 地址 / 端口')}
+              placeholder={t('搜索名称 / 地址 / 渠道 / 账号')}
               onChange={event => setKw(event.currentTarget.value)} />
             <InputGroupAddon align='inline-start' aria-hidden='true'>
               <SearchIcon />
@@ -724,6 +761,8 @@ function ProxiesPage() {
         range={paging.paged ? { start: paging.rangeStart, end: paging.rangeEnd } : null}
       />
 
+      {binding ? <ProxyBindingsDialog<ProxyPoolItem> request={accountRequest} t={t} initialProxyIds={binding.proxyIds} initialAccountIds={binding.accountIds}
+        onClose={() => setBinding(null)} onSaved={bindingSaved} /> : null}
       {modal ? (
         <ProxyModal
           item={modal.item}

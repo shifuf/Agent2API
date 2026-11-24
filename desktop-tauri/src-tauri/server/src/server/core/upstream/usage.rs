@@ -53,6 +53,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::{Map, Value};
 
 mod attempt;
+mod catpaw_output;
+mod host_defaults;
+mod model_key_source;
 pub use attempt::{
     AttemptDetail, RetryEvent, MAX_ATTEMPT_DETAILS, MAX_ATTEMPT_ERROR_CHARS,
     MAX_ATTEMPT_ACCOUNT_CHARS, MAX_ATTEMPT_RETRY_REASON_CHARS, MAX_ATTEMPT_NOTICE_CHARS,
@@ -580,6 +583,12 @@ pub(super) struct ActiveAttempt {
 /// 只能靠一个双方都能拿到的句柄传话。槽位只在一条请求内共享，不存在争用。
 pub struct RequestTelemetry {
     inner: Mutex<TelemetrySnapshot>,
+    /// Shared by every real call belonging to this inbound request.
+    replay_guard: Arc<super::replay_guard::ReplayGuard>,
+    model_key_source: std::sync::OnceLock<model_key_source::Captured>,
+    host_request_defaults: std::sync::OnceLock<host_defaults::HostRequestDefaults>,
+    catpaw_output: Mutex<Option<Arc<crate::server::core::plugin_host::wasm::CatPawOutputSlot>>>,
+    catpaw_output_taken: std::sync::atomic::AtomicBool,
     /// Sending state is independent of the bounded, public attempt history.
     active_attempt: Mutex<Option<ActiveAttempt>>,
     /// 0 = unknown, 1 = raw EOF without terminal, 2 = raw terminal observed.
@@ -635,12 +644,21 @@ impl RequestTelemetry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(TelemetrySnapshot::default()),
+            replay_guard: Arc::new(super::replay_guard::ReplayGuard::new()),
+            model_key_source: std::sync::OnceLock::new(),
+            host_request_defaults: std::sync::OnceLock::new(),
+            catpaw_output: Mutex::new(None),
+            catpaw_output_taken: std::sync::atomic::AtomicBool::new(false),
             active_attempt: Mutex::new(None),
             upstream_stream_end: std::sync::atomic::AtomicU8::new(0),
             capture: Mutex::new(None),
             live: Mutex::new(LiveWrite::default()),
             cancel: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn replay_guard(&self) -> Arc<super::replay_guard::ReplayGuard> {
+        Arc::clone(&self.replay_guard)
     }
 
     pub(crate) fn note_upstream_stream_end(&self, complete: bool) {

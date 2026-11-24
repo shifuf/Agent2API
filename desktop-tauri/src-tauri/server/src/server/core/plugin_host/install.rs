@@ -148,7 +148,20 @@ pub fn verify_signature(
             Some("读不到入口二进制，无法验签".to_string()),
         );
     };
-    let payload = proto::signing_payload(manifest, target, &binary_hash, &collect_ui_files(dir));
+    let mut payload = proto::signing_payload(manifest, target, &binary_hash, &collect_ui_files(dir));
+    // 跨平台包的网络/辅助能力声明同样属于发布者签名的内容。
+    if super::wasm::manifest::is_wasm(manifest) {
+        let Some(hash) = sha256_file(&dir.join("wasm.json")) else {
+            return (SignatureState::Invalid, Some("Wasm 权限清单不可读".into()));
+        };
+        payload.push_str(&format!("wasm={hash}\n"));
+    }
+    if dir.join("host.json").exists() {
+        let Some(hash) = sha256_file(&dir.join("host.json")) else {
+            return (SignatureState::Invalid, Some("插件公共接口清单不可读".into()));
+        };
+        payload.push_str(&format!("host={hash}\n"));
+    }
     let Ok(signature_bytes) = base64::engine::general_purpose::STANDARD.decode(signature.value.trim())
     else {
         return (SignatureState::Invalid, Some("签名不是合法的 base64".to_string()));
@@ -343,14 +356,11 @@ impl PackRegistry {
     /// 某个 provider 是否由已启用的包提供。
     pub fn provider_enabled(&self, provider: &str) -> bool {
         if crate::server::core::providers::availability::is_suspended(provider) { return false; }
-        self.packs.iter().any(|pack| {
-            pack.enabled
-                && pack
-                    .manifest_providers
-                    .iter()
-                    .any(|p| p.id.as_str() == provider)
-                && pack.providers.get(provider).copied().unwrap_or(true)
-        })
+        let loaded = super::runtime::provider_pack(provider);
+        let owners = super::ownership::owners(self);
+        let owner = loaded.as_ref().or_else(|| owners.get(provider));
+        self.packs.iter().any(|pack| owner == Some(&pack.id) && pack.enabled
+            && pack.providers.get(provider).copied().unwrap_or(true))
     }
 }
 
@@ -397,19 +407,23 @@ pub fn validate_manifest(manifest: &proto::PackManifest, host_protocol: u32) -> 
     Ok(())
 }
 
-/// 为当前目标挑一个入口。
-pub fn entry_for_target(manifest: &proto::PackManifest, target: &str) -> Option<String> {
-    // 先精确匹配，再按「架构-系统」宽松匹配（不同打包工具的三元组写法不一致）
-    if let Some(entry) = manifest.entry.get(target) {
-        return Some(entry.clone());
+/// 选择实际包目标；Wasm 的签名和资产仍使用跨平台目标。
+pub(super) fn target_for_manifest(manifest: &proto::PackManifest, target: &str) -> Option<String> {
+    if manifest.entry.contains_key(target) { return Some(target.to_string()); }
+    if super::wasm::manifest::is_wasm(manifest) {
+        return Some(super::wasm::manifest::TARGET.to_string());
     }
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
     manifest
         .entry
-        .iter()
-        .find(|(key, _)| key.contains(arch) && key.contains(os))
-        .map(|(_, entry)| entry.clone())
+        .keys()
+        .find(|key| key.contains(arch) && key.contains(os))
+        .cloned()
+}
+
+pub fn entry_for_target(manifest: &proto::PackManifest, target: &str) -> Option<String> {
+    manifest.entry.get(&target_for_manifest(manifest, target)?).cloned()
 }
 
 /// 读一个版本目录里的 `pack.json`。

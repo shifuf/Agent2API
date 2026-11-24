@@ -697,5 +697,19 @@
   "（有效期 {window}）": "(validade {window})",
   "（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）。": " (pool de assinatura; nomes de modelo com o prefixo cline-pass/, e a conta precisa da assinatura correspondente).",
   "，下一次最快 {minutes} 分钟后": ", próxima tentativa em pelo menos {minutes} min",
-  "，并从 {n} 把 Key 的可用提供商里移除": ", e removido dos provedores permitidos de {n} keys"
+  "，并从 {n} 把 Key 的可用提供商里移除": ", e removido dos provedores permitidos de {n} keys",
+  "仅只读当前 Windows 用户的智谱清言客户端登录态，凭据不会返回界面。": "Lê apenas os dados de login do cliente ChatGLM do usuário atual do Windows. As credenciais não são retornadas à interface.",
+  "打开登录页面的浏览器入口不可用": "O comando do navegador para abrir a página de login não está disponível",
+  "提交登录步骤": "Enviar etapa de login",
+  "本机导入未确认完成，请查询本次状态。": "A conclusão da importação local não foi confirmada. Consulte o status desta importação.",
+  "本机智谱清言客户端导入": "Importar do cliente ChatGLM local",
+  "本次导入的插件来源已变化，请重新发起。": "A origem do plugin desta importação mudou. Inicie uma nova importação.",
+  "查看本次读取范围": "Ver o escopo desta leitura",
+  "查询本次状态": "Consultar status atual",
+  "正在处理本次导入，保存结果尚未确认": "Processando esta importação; o resultado do salvamento ainda não foi confirmado",
+  "确认本次读取并添加账号": "Confirmar esta leitura e adicionar conta",
+  "管理会话已变化，请重新发起登录。": "A sessão de gerenciamento mudou. Inicie o login novamente.",
+  "结果未确认": "Resultado não confirmado",
+  "网关未返回有效的托管登录保存回执，请重新查询本次状态。": "O gateway não retornou uma confirmação de salvamento válida para o login gerenciado. Consulte novamente o status deste login.",
+  "网关返回的登录步骤不属于当前方式，已停止本次交互。": "A etapa de login retornada pelo gateway não corresponde ao método atual. Esta interação foi interrompida."
 }

@@ -80,6 +80,28 @@ use crate::server::core::account_store::priority::{grouped_queue_order, QueueEnt
 use crate::server::core::account_store::state::{AccountState, StoredAccount};
 use crate::server::core::crypto::{self, SecretScope};
 
+pub(crate) mod credential_version;
+
+fn versioned_write(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<bool> {
+    if credential_version::maintained_provider(&record.provider())
+        || record.get(super::credential_version::PRIVATE_FIELD).is_some() {
+        return Ok(true);
+    }
+    let provider: Option<String> = conn.query_row(
+        "SELECT provider FROM main.accounts WHERE id = ?1", [record.id()], |row| row.get(0),
+    ).optional()?;
+    Ok(provider.as_deref().is_some_and(credential_version::maintained_provider))
+}
+
+fn has_versioned_accounts(conn: &Connection, state: Option<&AccountState>) -> rusqlite::Result<bool> {
+    if state.is_some_and(|state| state.accounts.iter().any(|record|
+        credential_version::maintained_provider(&record.provider())
+            || record.get(super::credential_version::PRIVATE_FIELD).is_some())) {
+        return Ok(true);
+    }
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM main.accounts WHERE provider='catpaw')", [], |row| row.get(0))
+}
+
 /// 一行 `data` 列读不出来的**原因**。
 ///
 /// ── 为什么要把原因分开 ──────────────────────────────────────
@@ -399,12 +421,7 @@ pub(crate) fn apply_priorities(
 ) -> rusqlite::Result<usize> {
     let mut changed = 0usize;
     for (id, priority) in updates {
-        let data: Option<String> = conn
-            .query_row("SELECT data FROM accounts WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let Some(record) = data.as_deref().and_then(|text| decode_data(text).ok()) else {
+        let Some(record) = credential_version::ordinary::priority_record(conn, id)? else {
             continue;
         };
         if record.priority() == *priority {
@@ -490,6 +507,18 @@ pub(crate) fn normalize_grouped_queue(conn: &Connection) -> rusqlite::Result<usi
 /// 分组模式下「插在别家区段中间」不是一个有意义的请求（界面上也没有这个入口），
 /// 落在本组末尾是唯一自洽的结果。
 pub(crate) fn put(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
+    if versioned_write(conn, record)? {
+        return credential_version::ordinary::atomic(conn, |conn| {
+            let prepared = credential_version::ordinary::prepare(conn, record, credential_version::ordinary::WriteKind::Replace)?;
+            let existed = prepared.existed();
+            delete(conn, record.id())?;
+            insert_row(conn, prepared.record())?;
+            if !existed && queue_needs_normalize(conn, &record.provider(), record.id())? {
+                normalize_grouped_queue(conn)?;
+            }
+            Ok(())
+        });
+    }
     let existed = delete(conn, record.id())?;
     insert_row(conn, record)?;
     if !existed && queue_needs_normalize(conn, &record.provider(), record.id())? {
@@ -510,7 +539,20 @@ pub(crate) fn put(conn: &Connection, record: &StoredAccount) -> rusqlite::Result
 /// 让这条记录重新出现。这里保持同一结果（而不是静默丢弃这次写入），
 /// 因为调用方大多已经把「写入成功」当作前提继续往下算了。
 pub(crate) fn update_in_place(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<()> {
-    let changed = conn.execute(
+    if versioned_write(conn, record)? {
+        return credential_version::ordinary::atomic(conn, |conn| {
+            let prepared = credential_version::ordinary::prepare(conn, record, credential_version::ordinary::WriteKind::Update)?;
+            if prepared.existed() { update_row(conn, prepared.record())?; }
+            else { insert_row(conn, prepared.record())?; }
+            Ok(())
+        });
+    }
+    if update_row(conn, record)? == 0 { insert_row(conn, record)?; }
+    Ok(())
+}
+
+fn update_row(conn: &Connection, record: &StoredAccount) -> rusqlite::Result<usize> {
+    conn.execute(
         "UPDATE accounts SET provider = ?2, priority = ?3, enabled = ?4, added_at = ?5, data = ?6
          WHERE id = ?1",
         params![
@@ -521,15 +563,15 @@ pub(crate) fn update_in_place(conn: &Connection, record: &StoredAccount) -> rusq
             record.added_at(),
             encode_data(record)?,
         ],
-    )?;
-    if changed == 0 {
-        insert_row(conn, record)?;
-    }
-    Ok(())
+    )
 }
 
 /// 删除一条记录，返回是否真的删掉了（`false` = 本来就没有这一行）。
 pub(crate) fn delete(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let provider: Option<String> = conn.query_row("SELECT provider FROM main.accounts WHERE id = ?1", [id], |row| row.get(0)).optional()?;
+    if provider.as_deref().is_some_and(credential_version::maintained_provider) {
+        return credential_version::ordinary::delete(conn, id);
+    }
     Ok(conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])? > 0)
 }
 
@@ -583,6 +625,20 @@ fn enabled_flag(record: &StoredAccount) -> i64 {
 /// 它不属于任何一条账号记录，只在 `Some` 时写入（旧文件里也是「没有这个键」
 /// 表示尚未迁移），读取见 [`load_priority_scope`]。
 pub(crate) fn save_state(conn: &mut Connection, state: &AccountState) -> rusqlite::Result<()> {
+    if has_versioned_accounts(conn, Some(state))? {
+        return credential_version::ordinary::save_state(conn, state, credential_version::ordinary::WriteKind::Update);
+    }
+    save_state_unversioned(conn, state)
+}
+
+pub(crate) fn save_imported_state(conn: &mut Connection, state: &AccountState) -> rusqlite::Result<()> {
+    if has_versioned_accounts(conn, Some(state))? {
+        return credential_version::ordinary::save_state(conn, state, credential_version::ordinary::WriteKind::Imported);
+    }
+    save_state_unversioned(conn, state)
+}
+
+fn save_state_unversioned(conn: &mut Connection, state: &AccountState) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     // 现有行：id → data 的**解密后**值。比字符串更可靠：两边序列化格式若有一丝
     // 差异（空格、键序）不会误判成「变了」而白写一遍。
@@ -718,6 +774,9 @@ pub(crate) fn load_priority_scope(conn: &Connection) -> rusqlite::Result<Option<
 /// 原文，`Db::open` / `with_conn_mut` 会把它原样带进日志。**失败不阻断启动**
 /// 由调用方决定（见 `store_admin::encrypt_legacy_accounts`）。
 pub(crate) fn encrypt_legacy_rows(conn: &mut Connection) -> rusqlite::Result<usize> {
+    if has_versioned_accounts(conn, None)? {
+        return credential_version::ordinary::encrypt_legacy_rows(conn);
+    }
     // ① 只读收集「还不是密文」的行，不动库
     let mut pending: Vec<(String, String)> = Vec::new();
     {

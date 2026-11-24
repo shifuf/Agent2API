@@ -165,6 +165,7 @@ pub(crate) struct RpcStream {
     /// 宿主（Drop 时要发 abort / 清登记）。
     host: Arc<Host>,
     lease: Option<Arc<super::activity::UsageLease>>,
+    conversation: Option<super::wasm::conversation::ConversationOwner>,
     /// 本次调用的 RPC id。
     id: i64,
     /// 插件的 chunk / 收尾事件。
@@ -222,6 +223,7 @@ impl RpcStream {
         Self {
             host,
             lease: Some(lease),
+            conversation: None,
             id,
             events,
             credit,
@@ -232,6 +234,11 @@ impl RpcStream {
             failure,
             private_failure,
         }
+    }
+
+    pub(super) fn with_conversation(mut self, owner: Option<super::wasm::conversation::ConversationOwner>) -> Self {
+        self.conversation = owner;
+        self
     }
 
     fn capture_failure(&self, error: GatewayError) {
@@ -390,6 +397,8 @@ impl Stream for RpcStream {
 
 impl Drop for RpcStream {
     fn drop(&mut self) {
+        // 消费框架帧不能证明客户端收到最终 HTTP；仅关闭原调用，不确认 OutputSlot。
+        drop(self.conversation.take());
         let unfinished = self.host.close_stream(self.id);
         if unfinished {
             let host = self.host.clone();

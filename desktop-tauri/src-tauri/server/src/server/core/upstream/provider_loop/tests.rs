@@ -395,3 +395,42 @@ fn a_deterministic_404_skips_the_in_place_resend() {
         "404 的豁免不许顺手把 400 也豁免了"
     );
 }
+
+#[tokio::test]
+async fn request_replay_guard_prevents_a_new_real_http_send() {
+    let (transport, hits, task) = mock_upstream(503, "application/json", "{\"error\":\"busy\"}").await;
+    let telemetry = Arc::new(RequestTelemetry::new());
+    let guard = telemetry.replay_guard();
+    let lease = guard.open_call().expect("fresh request admits one call");
+    lease.preparation().freeze().expect("real preparation closes replay admission");
+    lease.close();
+    let failure = send_with_retry(adapter_for(ProviderKind::WorkBuddy), &transport,
+        &mut RetryBudget::new(0), None, &telemetry, false, None, None)
+        .await.err().expect("blocked request must return an error");
+    task.abort();
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "a blocked request must not send even once");
+    assert_eq!(failure.error.code.as_deref(), Some("request_replay_blocked"));
+    assert!(failure.error.retry_forbidden, "outer route retries must stop too");
+}
+
+#[tokio::test]
+async fn request_replay_guard_is_retained_after_the_first_http_response() {
+    let (transport, hits, task) = mock_upstream(200, "text/event-stream", "data: [DONE]\n\n").await;
+    let telemetry = Arc::new(RequestTelemetry::new());
+    let first = send_with_retry(adapter_for(ProviderKind::WorkBuddy), &transport,
+        &mut RetryBudget::new(0), None, &telemetry, false, None, None).await;
+    assert!(first.is_ok());
+    drop(first);
+    let guard = telemetry.replay_guard();
+    let lease = guard.open_call().expect("fresh request admits one call");
+    lease.preparation().freeze().expect("preparation closes replay admission");
+    lease.close();
+    telemetry.clear_active_attempt();
+    telemetry.clear_uncommitted_error();
+    let second = send_with_retry(adapter_for(ProviderKind::WorkBuddy), &transport,
+        &mut RetryBudget::new(0), None, &telemetry, false, None, None).await;
+    task.abort();
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "candidate/telemetry cleanup must not reset replay permission");
+    let failure = second.err().expect("another call in the same request must fail");
+    assert!(failure.error.retry_forbidden);
+}

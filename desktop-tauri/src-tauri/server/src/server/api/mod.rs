@@ -134,6 +134,11 @@ mod record_persist;
 // 提供商插件包的管理面（列表 / 安装 / 卸载 / 启停）：插件是用户安装的，
 // 这一组端点就是「装插件」的唯一入口，见该文件模块头
 pub mod plugins;
+pub mod plugin_helpers;
+pub mod plugin_login;
+pub mod plugin_desktop_import;
+pub mod plugin_provider_settings;
+pub mod plugin_tasks;
 // 插件 UI 资源的托管（`/plugins/{pack}/ui/*`）：插件包可以带页面，由网关
 // 出静态资源、客户端 iframe 嵌入。不挂 protected —— 见该文件模块头
 pub mod plugin_ui;

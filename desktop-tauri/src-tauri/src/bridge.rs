@@ -441,6 +441,8 @@ const BRIDGE_JS: &str = r#"
     // 标题栏那一族方法有同样的教训，见 zcode-claim 那段的说明。
     // 写操作返回最新代理列表；测试失败以 success:false 表达。
     getProxyPool: () => call('GET', '/api/proxies/pool'),
+    getProxyBindings: () => call('GET', '/api/proxies/bindings'),
+    setProxyBindings: payload => call('POST', '/api/proxies/bindings', payload),
     createProxyPoolItem: payload => call('POST', '/api/proxies/pool', payload || {}),
     updateProxyPoolItem: payload => call('POST', '/api/proxies/pool/update', payload || {}),
     setProxyPoolItemEnabled: payload => call('POST', '/api/proxies/pool/enable', payload || {}),
@@ -820,6 +822,15 @@ const BRIDGE_JS: &str = r#"
     // 另开一条「只给页面清单」的端点会让「菜单」与「插件状态」两个事实分开取，
     // 装 / 卸之后两边可能对不上。
     getPlugins: () => call('GET', '/api/plugins'),
+    getPluginProviderSettings: () => call('GET', '/api/plugins/provider-settings'),
+    savePluginProviderSettings: payload => call('PATCH', '/api/plugins/provider-settings', payload),
+    getPluginHelpers: pack => call('GET', '/api/plugins/helpers' + toQuery({ pack })),
+    savePluginHelpers: payload => call('PATCH', '/api/plugins/helpers', payload),
+    getPluginTasks: () => call('GET', '/api/plugins/tasks'),
+    savePluginTask: payload => call('PATCH', '/api/plugins/tasks', payload),
+    runPluginTask: payload => call('POST', '/api/plugins/tasks/run', payload),
+    getPluginLogin: state => call('GET', '/api/plugins/login' + toQuery({ state })),
+    submitPluginLogin: payload => call('POST', '/api/plugins/login', payload),
     // ── 侧边栏布局（分组 / 顺序 / 显隐）──
     // 布局的权威副本在库里（`kv` 的 `sidebarLayout` 键），页面侧的
     // localStorage 只是首帧缓存 —— 桌面壳与网页端是两个 origin，localStorage

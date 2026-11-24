@@ -84,6 +84,8 @@ pub const RESERVED_KV_KEYS: &[&str] = &[
     // （core::agents）。零散状态，与 desktopSettings 同一类。
     "agentProfiles",
     "priorityScope",
+    // CatPaw原行来源的宿主私有出生epoch，不属于用户配置。
+    "accountCredentialEpoch",
     // 侧边栏布局（core::sidebar_layout）：整份「分组 / 顺序 / 显隐」JSON 一个键。
     // 从前只存浏览器 localStorage，而桌面壳与网页端是两个 origin、localStorage
     // 隔离 —— 于是「在 WebUI 里隐藏的菜单，客户端照旧显示」。落库后两端读同一份。

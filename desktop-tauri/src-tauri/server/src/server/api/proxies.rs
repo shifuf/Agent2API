@@ -45,6 +45,10 @@ use crate::server::ServerState;
 
 use super::accounts::proxy_error;
 
+#[path = "proxies_bindings.rs"]
+mod bindings;
+pub use bindings::{list as bindings_list, save as bindings_save};
+
 // ─── GET /api/proxies ───────────────────────────────────────
 
 /// 出网代理可选项。
@@ -180,13 +184,9 @@ pub async fn test_proxy(state: &ServerState, body: &Bytes) -> Response {
 /// 几条）。不在删除确认框里列出来，用户会以为「这条没人用」而删掉一条正在被
 /// 轮询的出口。两条分支回答的是同一个问题 ——「这条池条目会不会被某条账号的
 /// 转发用到」—— 所以放在同一个函数里。
-fn pool_references(state: &ServerState) -> std::collections::HashMap<String, Vec<Value>> {
+fn pool_references(accounts: &[Value]) -> std::collections::HashMap<String, Vec<Value>> {
     let mut references: std::collections::HashMap<String, Vec<Value>> =
         std::collections::HashMap::new();
-    let snapshot = state.store().list_accounts();
-    let Some(accounts) = snapshot.get("accounts").and_then(Value::as_array) else {
-        return references;
-    };
     for account in accounts {
         let Some(config) = account.get("proxy").and_then(|proxy| proxy.get("config")) else {
             continue;
@@ -212,6 +212,8 @@ fn pool_references(state: &ServerState) -> std::collections::HashMap<String, Vec
                 .or_else(|| account.get("name").cloned())
                 .unwrap_or(Value::Null),
             "enabled": account.get("enabled").cloned().unwrap_or(Value::Bool(true)),
+            "provider": account.get("provider").cloned().unwrap_or(Value::Null),
+            "providerLabel": account.get("providerLabel").cloned().unwrap_or(Value::Null),
         });
         for proxy_id in ids {
             references.entry(proxy_id).or_default().push(entry.clone());
@@ -230,7 +232,11 @@ fn pool_references(state: &ServerState) -> std::collections::HashMap<String, Vec
 /// 或旧版进程误删存储键的场景）：孤儿条目在界面上允许**手动删除**清理，
 /// 非孤儿仍是只读镜像（见 `core::proxy_pool::remove_subscription_orphan`）。
 fn pool_payload(state: &ServerState) -> Value {
-    let references = pool_references(state);
+    pool_payload_for_accounts(&bindings::accounts(state))
+}
+
+fn pool_payload_for_accounts(accounts: &[Value]) -> Value {
+    let references = pool_references(accounts);
     let service_references = proxy_pool::usage::service_references();
     let live_subscriptions = crate::server::core::subscriptions::ids();
     let items: Vec<Value> = proxy_pool::list()

@@ -25,6 +25,10 @@ pub(super) fn install_pack(id: &str, category: ProviderCategory, host: Arc<Host>
 
 pub(super) fn set_providers(id: &str, providers: Vec<String>) {
     if let Ok(mut hosts) = table().lock() {
+        // 只在新宿主 ready 后调用；一个提供商只有一个实际执行体。
+        for (other_id, pack) in hosts.iter_mut() {
+            if other_id != id { pack.providers.retain(|provider| !providers.contains(provider)); }
+        }
         if let Some(pack) = hosts.get_mut(id) {
             pack.providers = providers;
         }
@@ -86,7 +90,7 @@ pub fn install(host: Arc<Host>) {
 }
 
 pub fn detach() {
-    if let Ok(mut hosts) = table().lock() { hosts.clear(); }
+    if let Ok(mut hosts) = table().lock() { hosts.retain(|_, pack| !pack.host.wasm_shutdown_complete()); }
 }
 
 pub(super) fn loaded_hosts(ids: &[String]) -> Vec<Arc<Host>> {
@@ -104,11 +108,17 @@ pub(super) fn loaded_ids() -> Vec<String> {
     table().lock().unwrap_or_else(|error| error.into_inner()).keys().cloned().collect()
 }
 
+pub(super) fn failed_ids() -> std::collections::BTreeSet<String> {
+    table().lock().unwrap_or_else(|error| error.into_inner()).iter()
+        .filter(|(_, pack)| !pack.host.ready() && pack.host.status().last_error.is_some())
+        .map(|(id, _)| id.clone()).collect()
+}
+
 pub(super) async fn shutdown_packs(ids: &[String]) -> Result<(), String> {
     for id in ids {
         let Some(host) = host_for_pack(id) else { continue };
         host.shutdown().await;
-        if host.current_run().is_some() {
+        if host.current_run().is_some() || !host.wasm_shutdown_complete() {
             return Err(format!("插件包「{id}」尚未确认退出，已停止替换文件"));
         }
         let mut hosts = table().lock().unwrap_or_else(|error| error.into_inner());
@@ -118,10 +128,16 @@ pub(super) async fn shutdown_packs(ids: &[String]) -> Result<(), String> {
 }
 
 pub async fn shutdown_all() {
-    let hosts: Vec<Arc<Host>> = table().lock()
-        .map(|mut hosts| std::mem::take(&mut *hosts).into_values().map(|pack| pack.host).collect())
+    super::wasm::tasks::stop().await;
+    let hosts = table().lock()
+        .map(|mut hosts| std::mem::take(&mut *hosts))
         .unwrap_or_default();
-    for host in hosts { host.shutdown().await; }
+    for (id, pack) in hosts {
+        pack.host.shutdown().await;
+        if !pack.host.wasm_shutdown_complete() {
+            table().lock().unwrap_or_else(|error| error.into_inner()).insert(id, pack);
+        }
+    }
 }
 
 pub(super) fn status() -> Option<HostStatus> {

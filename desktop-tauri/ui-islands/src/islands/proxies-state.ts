@@ -22,6 +22,7 @@
 import { t } from '../i18n'
 import { proxyServiceLabels, type ProxyUsage } from '../../../ui-shared/proxy-usage'
 import { acceptProxyPool } from './proxy-pool-cache'
+import type { ProxyBindingPayload } from '../../../ui-shared/proxy-bindings'
 
 /* ─── 后端形态 ───────────────────────────────── */
 
@@ -67,6 +68,7 @@ export type ProxyPoolItem = ProxyUsage & {
   node?: string
   /** 孤儿订阅节点：所属订阅已不存在（后端标注），只读镜像的**唯一例外** —— 可手动删除 */
   orphan?: boolean
+  bindingError?: string | null
 }
 
 /** lazy listeners：条目是否「还没有监听端口」（订阅节点的 port 为 null） */
@@ -82,8 +84,8 @@ export function isUnprovisionedItem(item: ProxyPoolItem): boolean {
  */
 export type ProxyClashSnapshot = {
   available?: boolean
-  error?: string
-  dir?: string
+  error?: string | null
+  dir?: string | null
   options?: Array<{
     uid?: string
     name?: string
@@ -140,6 +142,8 @@ export type ProxySettings = {
 
 export type ProxyPoolBridge = {
   getProxyPool?: () => Promise<ProxyPoolPayload | null | undefined>
+  getProxyBindings?: () => Promise<ProxyBindingPayload<ProxyPoolItem> | null | undefined>
+  setProxyBindings?: (payload: { accountIds: string[]; proxyIds: string[] }) => Promise<ProxyBindingPayload<ProxyPoolItem> | null | undefined>
   createProxyPoolItem?: (payload: Record<string, unknown>) => Promise<ProxyPoolPayload | null | undefined>
   updateProxyPoolItem?: (payload: Record<string, unknown>) => Promise<ProxyPoolPayload | null | undefined>
   /** 启用 / 禁用一条（三种来源都放行；响应带 `listener`，见 ProxyPoolPayload） */
@@ -162,6 +166,7 @@ export type ProxySharedWindow = {
     formatTime?: (value: unknown) => string
     /** 当前页标识：首屏只在用户正看着本页时才自拉一次 */
     readonly currentPage?: string
+    refresh?: () => unknown
   }
   wbConfirm?: {
     ask?: (options: { title?: string; html?: string; okText?: string; okClass?: string }) => Promise<boolean>
@@ -438,7 +443,7 @@ export async function loadPanel(silent = false): Promise<void> {
   }
   if (!silent) patch({ loading: true })
   try {
-    accept(await bridge.getProxyPool())
+    accept(await (bridge.getProxyBindings ? bridge.getProxyBindings() : bridge.getProxyPool()))
   } catch (error) {
     patch({ error: errorMessage(error) })
     if (!silent) toast(t('代理列表加载失败：{reason}', { reason: errorMessage(error) }), 'err')

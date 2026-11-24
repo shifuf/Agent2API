@@ -70,7 +70,8 @@ const SKELETON_KEYS: &[&str] = &[
 fn flatten_builtin_secret(record: &StoredAccount) -> Value {
     let mut secret = Map::new();
     for (key, value) in record.fields() {
-        if SKELETON_KEYS.contains(&key.as_str()) || key.starts_with(LEDGER_PREFIX) {
+        if SKELETON_KEYS.contains(&key.as_str()) || key.starts_with(LEDGER_PREFIX)
+            || super::credential_version::private_field(key) {
             continue;
         }
         secret.insert(key.clone(), value.clone());
@@ -126,7 +127,31 @@ pub fn shared() -> Option<AccountStore> {
     SHARED.get().cloned()
 }
 
+/// 宿主内部的原保存记录投影。授权字段只取记录顶层，不信任插件公开视图。
+/// 不实现 Serialize；API 与 guest 的账号读路径继续使用 plugin_account/public_account。
+pub(crate) struct HostAccount {
+    pub(crate) id: String,
+    pub(crate) provider: String,
+    pub(crate) identity: String,
+    pub(crate) enabled: bool,
+    pub(crate) desktop: bool,
+    pub(crate) secret: Value,
+}
+
 impl AccountStore {
+    pub(crate) fn plugin_host_account(&self, id: &str) -> Option<HostAccount> {
+        let record = self.read_record(id)?;
+        let identity = ["pluginIdentity", "identity"].into_iter()
+            .find_map(|key| record.get(key).and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty()))
+            .unwrap_or(record.id()).to_string();
+        Some(HostAccount {
+            id: record.id().to_string(), provider: record.provider(), identity,
+            enabled: record.enabled(), desktop: record.get("desktop") == Some(&Value::Bool(true)),
+            secret: secret_of(&record),
+        })
+    }
+
     /// 读一条插件账号（`{id, provider, secret, public, proxy}`）。
     ///
     /// ── 两种记录形态都读（迁移过渡期）───────────────────────────

@@ -3,7 +3,9 @@ import {
   Badge, Button, Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle, Input, Label, Switch,
 } from '@ui'
-import { pluginName } from './plugins-shared'
+import { api, pluginName } from './plugins-shared'
+import { PluginProviderSettings } from '../../../ui-shared/plugin-provider-settings'
+import { PluginHelpers } from '../../../ui-shared/plugin-helpers'
 import type { PackProvider, PackSummary } from './plugins-types'
 import { t } from '../i18n'
 
@@ -16,17 +18,20 @@ export function PluginPackSettingsDialog({ pack, name, disabled, onClose, onEnab
   onProvider: (provider: PackProvider, enabled: boolean) => void
 }) {
   const [search, setSearch] = React.useState('')
+  const [settingsBusy, setSettingsBusy] = React.useState(false)
+  const [helpersBusy, setHelpersBusy] = React.useState(false)
+  const locked = disabled || settingsBusy || helpersBusy
   const idPrefix = React.useId()
   const keyword = search.trim().toLocaleLowerCase()
   const providers = pack.providers.filter(provider => !keyword
     || `${provider.label} ${provider.id}`.toLocaleLowerCase().includes(keyword))
 
-  return <Dialog open onOpenChange={next => { if (!next) onClose() }}>
-    <DialogContent>
+  return <Dialog open onOpenChange={(next, details) => { if (!next) { if (locked) details.cancel(); else onClose() } }}>
+    <DialogContent className='max-h-[85dvh] max-w-2xl' showCloseButton={!locked}>
       <DialogHeader>
         <DialogTitle className='min-w-0 break-words'>{pluginName(pack.id, name || pack.name)} · {t('设置')}</DialogTitle>
       </DialogHeader>
-      <DialogBody className='min-h-0 gap-3.5'>
+      <DialogBody className='min-h-0 gap-3.5 overflow-y-auto'>
         <div className='flex flex-wrap items-center justify-between gap-3'>
           <div className='flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground'>
             <span className='tabular-nums'>v{pack.version}</span>
@@ -34,7 +39,7 @@ export function PluginPackSettingsDialog({ pack, name, disabled, onClose, onEnab
           </div>
           <Label htmlFor={`${idPrefix}-enabled`} className='text-[12px] text-subtle'>
             {t('启用')}
-            <Switch id={`${idPrefix}-enabled`} checked={pack.enabled} disabled={disabled}
+            <Switch id={`${idPrefix}-enabled`} checked={pack.enabled} disabled={locked}
               onCheckedChange={value => onEnabled(value === true)} />
           </Label>
         </div>
@@ -54,7 +59,7 @@ export function PluginPackSettingsDialog({ pack, name, disabled, onClose, onEnab
                   <code className='max-w-full text-[11px] break-all text-muted-foreground'>{provider.id}</code>
                   {provider.enabled && !provider.loaded ? <Badge variant='secondary' className='mt-1'>{t('未加载')}</Badge> : null}
                 </Label>
-                <Switch id={`${idPrefix}-${provider.id}`} checked={provider.enabled} disabled={disabled || !pack.enabled}
+                <Switch id={`${idPrefix}-${provider.id}`} checked={provider.enabled} disabled={locked || !pack.enabled}
                   onCheckedChange={value => onProvider(provider, value === true)} />
               </div>)}
             </div> : <p className='px-3 py-5 text-center text-[12px] text-subtle'>
@@ -62,9 +67,13 @@ export function PluginPackSettingsDialog({ pack, name, disabled, onClose, onEnab
             </p>}
           </div>
         </> : null}
+        <PluginProviderSettings packId={pack.id} providers={pack.providers} request={api} t={t}
+          locale={window.wbI18n?.locale() || 'zh-Hans'} disabled={locked} onBusyChange={setSettingsBusy} />
+        <PluginHelpers packId={pack.id} providers={pack.providers} enabled={pack.enabled} request={api} t={t}
+          disabled={locked} onBusyChange={setHelpersBusy} />
       </DialogBody>
       <DialogFooter className='justify-end'>
-        <Button variant='outline' size='sm' onClick={onClose}>{t('关闭')}</Button>
+        <Button variant='outline' size='sm' disabled={locked} onClick={onClose}>{t('关闭')}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

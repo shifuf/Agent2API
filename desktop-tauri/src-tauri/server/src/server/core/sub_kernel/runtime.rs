@@ -267,6 +267,13 @@ fn read_provider_nodes(provider_id: &str) -> Vec<String> {
     names
 }
 
+/// Current cache targets accepted by account bindings. Includes dependency-checked
+/// group aliases and unused nodes before lazy listeners allocate their ports.
+/// Local file reads only: safe while AccountStore holds its Db transaction.
+pub(crate) fn binding_nodes(provider_id: &str) -> HashSet<String> {
+    read_provider_nodes(provider_id).into_iter().collect()
+}
+
 /// 读各订阅缓存里的**节点定义**（`<订阅id>::<节点名>` → mihomo 的 proxy 条目）。
 ///
 /// ── 为什么要读它 ────────────────────────────────────────────

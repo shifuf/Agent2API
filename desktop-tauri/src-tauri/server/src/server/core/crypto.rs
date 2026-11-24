@@ -151,6 +151,11 @@ fn cache_for(scope: SecretScope) -> &'static std::sync::Mutex<Option<[u8; KEY_LE
     }
 }
 
+/// 原行最终门只借用已解析的真实密钥，不等锁、不访问文件或环境变量。
+pub(crate) fn try_cached_key(scope: SecretScope) -> Option<[u8; KEY_LEN]> {
+    cache_for(scope).try_lock().ok().and_then(|guard| *guard)
+}
+
 /// 取某个域的加密密钥（没有就现场生成一份新的）。所有失败都以中文错误上抛。
 ///
 /// 为什么用 `Mutex<Option<…>>` 而不是把密钥直接 `OnceLock` 进去：密钥要
@@ -352,11 +357,39 @@ pub fn fingerprint_of(bytes: &[u8]) -> String {
 /// `Accounts` 之外的域不会被替换，重置它们只是多一次读文件，但**不做**：调用方
 /// 只该传真的换过密钥的那个域，保留「重置 = 我确实换了文件」的语义。
 pub fn reset_cache(scope: SecretScope) {
+    // 原来源在缓存清空前撤销；即使随后装回相同密钥，旧调用也不能复活。
+    let mut source_gate = if matches!(scope, SecretScope::Accounts) {
+        account_source_epoch().write().ok()
+    } else { None };
+    if let Some(epoch) = source_gate.as_mut() { **epoch = std::sync::Arc::new(()); }
     if let Ok(mut guard) = cache_for(scope).lock() {
         *guard = None;
     }
+    drop(source_gate);
     if matches!(scope, SecretScope::Accounts) {
         crate::server::core::providers::catalog::invalidate();
+    }
+}
+
+fn account_source_epoch() -> &'static std::sync::RwLock<std::sync::Arc<()>> {
+    static SOURCE: std::sync::OnceLock<std::sync::RwLock<std::sync::Arc<()>>> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(|| std::sync::RwLock::new(std::sync::Arc::new(())))
+}
+
+/// 仅由真实密钥域签发的来源，不序列化、不按字段/路径恢复。
+#[derive(Clone)]
+pub(crate) struct AccountKeySource { epoch: std::sync::Arc<()> }
+
+pub(crate) fn account_key_source() -> Option<AccountKeySource> {
+    Some(AccountKeySource { epoch: account_source_epoch().try_read().ok()?.clone() })
+}
+
+impl AccountKeySource {
+    pub(crate) fn same(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.epoch, &other.epoch) }
+    pub(crate) fn with_current<R>(&self, action: impl FnOnce() -> R) -> Option<R> {
+        let current = account_source_epoch().try_read().ok()?;
+        if !std::sync::Arc::ptr_eq(&self.epoch, &current) { return None; }
+        Some(action())
     }
 }
 

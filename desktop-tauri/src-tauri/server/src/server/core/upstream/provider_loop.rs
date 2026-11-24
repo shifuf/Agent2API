@@ -532,6 +532,9 @@ pub(super) async fn forward_with_providers(
         channels.len().saturating_mul(2).saturating_add(1).max(3)
     } else { MAX_ROUTE_ATTEMPTS };
     loop {
+        if ctx.telemetry.replay_guard().blocked() {
+            return Err(super::replay_guard::blocked_error());
+        }
         rounds += 1;
         let attempt_started = std::time::Instant::now();
         let previous_attempts = ctx.telemetry.snapshot().attempts_detail.len();
@@ -567,8 +570,11 @@ pub(super) async fn forward_with_providers(
                 return super::route_content::deliver(outcome, ctx.telemetry.clone(), candidate_started,
                     Some(candidate_started.elapsed().as_secs_f64() * 1000.0), held_slot, client_stream, Some(completion)).await;
             }
-            Err(error) => {
+            Err(mut error) => {
                 if ctx.telemetry.cancel_token().is_some_and(|token| token.is_cancelled()) { return Err(error); }
+                // Preserve the original failure and its channel-health accounting.
+                // An armed request cannot enter another candidate or sticky retry.
+                if ctx.telemetry.replay_guard().blocked() { error.retry_forbidden = true; }
                 ctx.telemetry.finish_last_attempt(Some(error.status_code as i64), Some(&error.message));
                 if sticky_faults && super::route_content::channel_fault(&error) {
                     if let Some(lease) = &lease {
@@ -780,6 +786,9 @@ async fn attempt_queue(
         if ctx.telemetry.is_cancelled() {
             return Err(cancellation::cancelled_error());
         }
+        if ctx.telemetry.replay_guard().blocked() {
+            return Err(super::replay_guard::blocked_error());
+        }
         // A new candidate has no send deadline until its actual attempt starts.
         // Same-account token refreshes stay in the inner loop and retain theirs.
         ctx.telemetry.clear_active_attempt();
@@ -844,7 +853,7 @@ async fn attempt_queue(
                     }
                     return Ok(outcome);
                 },
-                Err(error) => {
+                Err(mut error) => {
                     // 手动终止优先（与无状态路径同一判定与理由）：不把已受理的
                     // 终止当成「这一轮失败」去顺延下一个账号
                     if ctx.telemetry.is_cancelled() {
@@ -854,6 +863,8 @@ async fn attempt_queue(
                         );
                         return Err(cancellation::cancelled_error());
                     }
+                    if ctx.telemetry.replay_guard().blocked() { error.retry_forbidden = true; }
+                    if error.retry_forbidden { return Err(error); }
                     // 「指定错误码直接换号」名单在这里没有专属分支：命中时
                     // `attempt_custom` 内部的原地重发已被第二道闸挡住（见
                     // `direct_switch_status`），落到下面就是与其它错误同一条
@@ -989,7 +1000,7 @@ async fn attempt_queue(
                     }
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
-                Err(error) => {
+                Err(mut error) => {
                     // 手动终止优先（与无状态 / 自定义两条路径同一判定与理由）：
                     // 会话式这一轮已经结束，但用户要的是终止 —— 不把它当成
                     // 普通失败去顺延下一个账号（那会把终止拖成另一轮转发）
@@ -1000,6 +1011,8 @@ async fn attempt_queue(
                         );
                         return Err(cancellation::cancelled_error());
                     }
+                    if ctx.telemetry.replay_guard().blocked() { error.retry_forbidden = true; }
+                    if error.retry_forbidden { return Err(error); }
                     if stateful_account_id.is_some() {
                         if !tried_ids.contains(&attempt_key) {
                             tried_ids.push(attempt_key.clone());
@@ -1208,6 +1221,9 @@ async fn attempt_queue(
         // 其余家是空串 —— 提取见循环内唯一那条成功 break）
         let mut native_tools;
         let (response, wire_model, response_protocol, antigravity_session) = loop {
+            if ctx.telemetry.replay_guard().blocked() {
+                return Err(super::replay_guard::blocked_error());
+            }
             // 发送体在这一轮发送前取一次（同一家同池同降级状态下复用缓存项）：
             // 借用在本次迭代内有效，`continue`（401 刷新 / 内容拦截补救）时
             // 重新取 —— 于是「换了 body 的那次重试」拿到的一定是新的一份。
@@ -1503,7 +1519,7 @@ async fn attempt_queue(
                             });
                         }
                     }
-                    if failure.stop || failure.policy.stop {
+                    if failure.stop || failure.policy.stop || ctx.telemetry.replay_guard().blocked() {
                         ctx.telemetry.finish_last_attempt(
                             Some(i64::from(failure.error.status_code)),
                             Some(&failure.error.message),
@@ -2466,6 +2482,9 @@ async fn attempt_custom(
         0
     };
     loop {
+        if ctx.telemetry.replay_guard().blocked() {
+            return Err(super::replay_guard::blocked_error());
+        }
         match custom_forward::forward(
             &service.store,
             &provider_id,
@@ -2508,7 +2527,9 @@ async fn attempt_custom(
                 ctx.telemetry.finish_last_attempt(Some(status), None);
                 return Ok(outcome);
             }
-            Err(error) => {
+            Err(mut error) => {
+                if ctx.telemetry.replay_guard().blocked() { error.retry_forbidden = true; }
+                if error.retry_forbidden { return Err(error); }
                 // 换出口重发（同一账号、同一条尝试明细：明细里追加一条内部重试，
                 // 与「动作 0 换提示词重试」同一记账形态，见 `note_attempt_retry`）。
                 if rotate_left > 0 && error.is_quota_limit() {
@@ -2713,6 +2734,11 @@ async fn attempt_stateful(
             // 不带错误 —— 前端把它渲染成「成功」（无状态码）。
             ctx.telemetry.finish_last_attempt(None, None);
             // 会话适配器只收到上游真名；客户端别名由外层可信请求体恢复。
+            // Preserve the exact selected source before the trusted rewrite;
+            // only the downstream final observer may confirm output completion.
+            let outcome = if adapter.sse_model_rewrite() || ctx.routing.group.is_some() {
+                ctx.telemetry.project_catpaw_model(outcome, &model)?
+            } else { outcome };
             let outcome = match outcome {
                 ForwardOutcome::Stream { status, stream } if adapter.sse_model_rewrite() || ctx.routing.group.is_some() => {
                     return Ok(ForwardOutcome::Stream {
@@ -2997,6 +3023,13 @@ async fn send_with_retry(
         if telemetry.is_cancelled() {
             return Err(cancelled_failure());
         }
+        if telemetry.replay_guard().blocked() {
+            let error = super::replay_guard::blocked_error();
+            return Err(OutboundFailure {
+                class: UpstreamErrorClass::Fatal { status: 409, message: error.message.clone(), upstream_code: None },
+                error, stop: true, policy: Default::default(),
+            });
+        }
         // 阶段：这一下就是**真正发出**上游请求的时刻 → 等待响应。
         // 为什么不能只靠尝试起头那一处（`note_attempt_started`）：同账号内的
         // 退避重发也走本循环（外面看不见），退避期间阶段是「重试中」，
@@ -3018,6 +3051,14 @@ async fn send_with_retry(
                 // 手动终止：不把它当传输失败去退避重发（原因不是链路抖动）
                 if telemetry.is_cancelled() {
                     return Err(cancelled_failure());
+                }
+                if telemetry.replay_guard().blocked() {
+                    let mut gateway = error.to_gateway_error();
+                    gateway.retry_forbidden = true;
+                    return Err(OutboundFailure {
+                        class: UpstreamErrorClass::Fatal { status: 502, message: gateway.message.clone(), upstream_code: None },
+                        error: gateway, stop: true, policy: Default::default(),
+                    });
                 }
                 if images.is_some() && !error.safe_to_retry {
                     telemetry.note_attempt_notice("生图请求可能已发送，未自动重发，以免重复消耗额度");
@@ -3139,7 +3180,8 @@ async fn send_with_retry(
         let uncertain_image = images.is_some()
             && matches!(class, UpstreamErrorClass::Fatal { .. })
             && (status >= 500 || matches!(status, 408 | 409 | 425));
-        let stop = policy.stop || uncertain_image || matches!(&decision, RetryDecision::Stop { .. });
+        let stop = policy.stop || uncertain_image || telemetry.replay_guard().blocked()
+            || matches!(&decision, RetryDecision::Stop { .. });
         if let Some(reason) = network.after_status(status, &body,
             !stop && !policy.suspend_account && policy.account_cooldown_until.is_none()
                 && matches!(class, UpstreamErrorClass::Fatal { .. })).await {

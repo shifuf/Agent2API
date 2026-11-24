@@ -114,12 +114,15 @@ pub fn remove(id: &str) {
     crate::server::core::providers::catalog::invalidate();
     super::rpc_cache::forget(id);
     super::schedules::forget(id);
+    super::wasm::forget(id);
     changed().notify_waiters();
 }
 
 pub fn clear() {
     crate::server::core::providers::catalog::invalidate();
-    table().lock().unwrap_or_else(|error| error.into_inner()).adapters.clear();
+    let ids: Vec<_> = { let mut table = table().lock().unwrap_or_else(|error| error.into_inner());
+        let ids = table.adapters.keys().cloned().collect(); table.adapters.clear(); ids };
+    for id in ids { super::wasm::forget(&id); }
     crate::server::core::providers::catalog::invalidate();
     super::schedules::clear_all();
     changed().notify_waiters();
@@ -156,7 +159,7 @@ impl SwitchGuard {
         }
         crate::server::core::providers::catalog::invalidate();
         drop(table);
-        for id in &self.providers { super::schedules::forget(id); }
+        for id in &self.providers { super::schedules::forget(id); super::wasm::forget(id); }
     }
 }
 

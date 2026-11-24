@@ -1,8 +1,13 @@
 export type ProxyService = 'update' | 'kernelDownload'
 
 export type ProxyUsage = {
-  usedBy?: Array<{ id?: string; name?: string; enabled?: boolean }>
+  usedBy?: Array<{ id?: string; name?: string; provider?: string; providerLabel?: string; enabled?: boolean }>
   usedByServices?: ProxyService[]
+}
+
+/** The same binding names are searchable in desktop and mobile exit lists. */
+export function proxyBindingSearchText(item: ProxyUsage): string {
+  return (item.usedBy || []).flatMap(account => [account.id, account.name, account.provider, account.providerLabel]).filter(Boolean).join(' ').toLowerCase()
 }
 
 export function hasProxyUsage(item: ProxyUsage): boolean {
