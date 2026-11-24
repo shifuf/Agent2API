@@ -781,6 +781,7 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/auto-continue",
             get(api::auto_continue::get_auto_continue).put(api::auto_continue::put_auto_continue),
         )
+        .route("/api/web-tool-emulation", get(api::web_tools::get_settings).put(api::web_tools::put_settings))
         // ── 会话图片压缩（默认开）──
         // 与 /api/auto-continue 同一族（GET 读 / PUT 写、改的是发给上游的
         // 字节）：开关 + 长边 / 质量 / 阈值三项一起挂在同一条端点上。挂 protected

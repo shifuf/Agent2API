@@ -65,6 +65,7 @@ pub mod auto_checkin;
 // 判据与执行链在 `core::upstream::continuation`，这里只是那两个数的读写入口；
 // 独立成文件而不是塞进 config_api —— 理由见该模块头。
 pub mod auto_continue;
+pub mod web_tools;
 pub mod billing;
 pub mod captcha;
 pub mod chat;

@@ -276,6 +276,16 @@ impl RpcStream {
         self.capture_failure(failure);
     }
 
+    fn capture_final_failure(&self, error: GatewayError) {
+        if self.usage.strict_provider.is_some() {
+            self.capture_failure(error);
+        } else if let Some(slot) = &self.failure {
+            // Done(Err) belongs to the actual host call. A preliminary public
+            // frame must not replace its final HTTP or business metadata.
+            *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+        }
+    }
+
     /// 排上「错误帧 + [DONE]」收尾。
     fn finish_with_error(&mut self, message: &str) {
         self.usage.finish(&self.telemetry);
@@ -386,7 +396,7 @@ impl Stream for RpcStream {
                         let failure = super::rpc::rpc_error(provider, error, proto::methods::gateway::CONVERSATION);
                         this.finish_strict_error(failure);
                     } else {
-                        this.capture_failure(super::rpc::rpc_error("", error.clone(), proto::methods::gateway::CONVERSATION));
+                        this.capture_final_failure(super::rpc::rpc_error("", error.clone(), proto::methods::gateway::CONVERSATION));
                         this.finish_with_error(&error.message);
                     }
                 }

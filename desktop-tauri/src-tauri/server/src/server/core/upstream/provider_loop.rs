@@ -2659,8 +2659,12 @@ async fn attempt_stateful(
     // provider 一次转发就是一个会话轮次，没有「换提示词重发」这一步），
     // 但降级期内（状态机已生效）首发的提示词也要跟着换。
     let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
-    // 内置家透传出口的内部字段剥离：与无状态路径同一理由（见那里的说明）
-    let stripped = strip_internal_fields(&send.body);
+    // The declared web-tool bridge consumes failed-result markers before stripping them.
+    // RpcAdapter strips the actual outgoing body after that conversion.
+    let web_tools = config::web_tools::enabled() && adapter.list_models().iter()
+        .any(|model| super::web_tools::Profile::from_model(model).is_some());
+    let stripped = if web_tools { std::borrow::Cow::Borrowed(send.body.as_ref()) }
+        else { strip_internal_fields(&send.body) };
     let body: &serde_json::Value = &stripped;
     // 这一家实际收到的上游模型名 = 限额冷却键（与字节同源，见 `SendBody`）
     let wire_model = &send.wire_model;

@@ -37,6 +37,7 @@ use crate::server::core::providers::adapter::{
 };
 use crate::server::core::providers::ProviderKind;
 use crate::server::core::upstream::usage::RequestTelemetry;
+use crate::server::core::upstream::web_tools;
 use crate::server::core::upstream::ForwardOutcome;
 use crate::server::errors::GatewayError;
 
@@ -54,6 +55,8 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[path = "rpc_images.rs"]
 mod images;
+#[path = "rpc_model_compat.rs"]
+mod model_compat;
 
 /// 宿主启动参数。
 #[derive(Clone, Debug)]
@@ -155,6 +158,8 @@ pub struct RpcAdapter {
     binding: Option<Arc<tokio::sync::OnceCell<RpcAdapter>>>,
     /// 握手时取回的能力位（本地缓存）。
     capabilities: proto::Capabilities,
+    native_model_compat: model_compat::NativeModelCompatibility,
+    web_tool_models: web_tools::DeclaredModels,
     image_generation: bool,
     image_editing: bool,
     image_models: Vec<Value>,
@@ -177,6 +182,8 @@ impl RpcAdapter {
         host: Arc<Host>,
         info: proto::ProviderInfo,
     ) -> Self {
+        let native_model_compat = model_compat::NativeModelCompatibility::for_options(&id, &host.options);
+        let web_tool_models = web_tools::DeclaredModels::from_defaults(&info.default_models);
         Self {
             id: leak_str(id),
             label: leak_str(info.label.clone()),
@@ -184,6 +191,8 @@ impl RpcAdapter {
             host,
             lease: None,
             binding: None,
+            native_model_compat,
+            web_tool_models,
             capabilities: info.capabilities,
             image_generation: false,
             image_editing: false,
@@ -346,6 +355,8 @@ impl ProviderAdapter for RpcAdapter {
         // 定期调 `models.list` 填充。缓存为空时返回内置兜底（握手时
         // `provider.info` 已经带回来了）。
         let mut models = super::rpc_cache::models_for(self.id).unwrap_or_default();
+        self.metadata().native_model_compat.apply(&mut models);
+        self.metadata().web_tool_models.apply(&mut models);
         for image in &self.metadata().image_models {
             let id = crate::server::core::models::model_id(image);
             if let Some(existing) = models.iter_mut().find(|item| crate::server::core::models::model_id(item).eq_ignore_ascii_case(&id)) {
@@ -968,7 +979,14 @@ impl ProviderAdapter for RpcAdapter {
             let adapted = if self.id == "catpaw" && host.options.wasm.is_some() {
                 telemetry.adapt_catpaw_host_defaults(body)
             } else { std::borrow::Cow::Borrowed(body) };
-            let body = adapted.as_ref();
+            let prepared = execution.web_tool_models.prepare(adapted.as_ref())?;
+            let (adapted, web_tool_context) = match prepared {
+                Some(prepared) => (std::borrow::Cow::Owned(prepared.body), prepared.context),
+                None => (adapted, None),
+            };
+            // Tool-result markers have now been consumed by the actual bridge.
+            let stripped = crate::server::core::protocol::strip_internal_fields(adapted.as_ref());
+            let body = stripped.as_ref();
             let lease = execution.lease.clone().or_else(|| host.activity.acquire())
                 .ok_or_else(|| super::activity::AvailabilityError::Unavailable.gateway())?;
             let mut params = self.base();
@@ -1138,13 +1156,13 @@ impl ProviderAdapter for RpcAdapter {
                     let status = 200;
                     let conversation = opening.take().and_then(ErrorBodyScope::handoff_conversation);
                     return execution
-                        .finish_stream(id, status, stream, events, Some(bytes), wire_model, telemetry, None, lease, conversation)
+                        .finish_stream(id, status, stream, events, Some(bytes), wire_model, telemetry, None, lease, conversation, web_tool_context)
                         .await;
                 }
             };
 
             let conversation = opening.take().and_then(ErrorBodyScope::handoff_conversation);
-            execution.finish_stream(id, head.status, stream, events, None, wire_model, telemetry, Some(head.headers), lease, conversation)
+            execution.finish_stream(id, head.status, stream, events, None, wire_model, telemetry, Some(head.headers), lease, conversation, web_tool_context)
                 .await
         })
     }
@@ -1720,6 +1738,7 @@ impl RpcAdapter {
         response_headers: Option<std::collections::BTreeMap<String, String>>,
         lease: Arc<super::activity::UsageLease>,
         mut conversation: Option<ConversationOwner>,
+        web_tool_context: Option<web_tools::Context>,
     ) -> Result<ForwardOutcome, GatewayError> {
         // ── 失败状态：先收齐正文再分类（与内置家的门控同一处置）────────
         // `status >= 400` 时插件仍会推 chunk（那是错误体的字节），但客户端
@@ -1777,7 +1796,8 @@ impl RpcAdapter {
         }
         if let Some(owner) = &conversation { owner.select_output()?; }
         let strict = strict::applies(self.id);
-        let failure = (strict || self.host.options.wasm.is_some()).then(|| Arc::new(std::sync::Mutex::new(None)));
+        let failure = (strict || self.host.options.wasm.is_some() || web_tool_context.is_some())
+            .then(|| Arc::new(std::sync::Mutex::new(None)));
         let private_failure = strict.then(|| Arc::new(std::sync::Mutex::new(None)));
         let source = super::RpcStream::with_pending(
             self.id,
@@ -1790,6 +1810,13 @@ impl RpcAdapter {
             private_failure.clone(),
             lease,
         ).with_conversation(if stream { conversation.take() } else { None });
+        // The original RpcStream still owns guest output observation and its lease.
+        // Emulated tools can be emitted only after that source reaches actual EOF.
+        let source: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> = Box::pin(source);
+        let source = match (web_tool_context, failure.as_ref()) {
+            (Some(context), Some(slot)) => web_tools::wrap(source, context, telemetry.clone(), slot.clone()),
+            _ => source,
+        };
 
         // ── 非流式：网关把帧聚合掉（插件恒按 stream:true 推）───────────
         // 客户端要不要流式是**网关**的事：非流式时网关自己聚合（与内置家
@@ -1807,7 +1834,7 @@ impl RpcAdapter {
                 crate::server::config::strip_newline_keepalive(),
             );
             let aggregated = crate::server::core::upstream::aggregate::aggregate_frame_stream(
-                Box::pin(source),
+                source,
                 telemetry.clone(),
                 policy,
             )

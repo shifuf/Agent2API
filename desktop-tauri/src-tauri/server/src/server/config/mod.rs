@@ -82,6 +82,7 @@ mod sanitize_config;
 pub(crate) mod sql;
 mod types;
 mod update_policy;
+pub(crate) mod web_tools;
 
 pub use account_sort::{
     account_sort_settings, save_account_sort, validate_account_sort, AccountSortRule, AccountSortSettings,

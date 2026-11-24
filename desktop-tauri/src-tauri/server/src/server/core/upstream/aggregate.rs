@@ -145,6 +145,9 @@ async fn aggregate_frame_stream_inner(
     let mut first_chunk_seen = false;
     while let Some(item) = stream.next().await {
         let chunk = item.map_err(|error| {
+            if let Some(failure) = super::stream_errors::gateway(&error) {
+                return failure;
+            }
             // 手动终止的旁路流给的就是原文（见上面的说明）：折成 408 的
             // 网关错误，不加「上游流式传输中断」前缀 —— 它不是上游的问题
             let text = error.to_string();

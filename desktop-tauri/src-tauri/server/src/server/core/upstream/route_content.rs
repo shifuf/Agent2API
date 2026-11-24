@@ -110,7 +110,8 @@ pub(super) async fn hold(mut stream: ByteStream, deadline: Option<Instant>) -> R
                 .map_err(|_| GatewayError::with_status(504, "候选在首内容等待期限内没有返回文本、推理或工具调用").with_code("route_first_content_timeout"))?
         } else { stream.next().await };
         let Some(next) = next else { return Err(GatewayError::with_status(502, "上游在返回有效内容前关闭了响应").with_code("route_empty_response")); };
-        let bytes = next.map_err(|error| GatewayError::with_status(502, error.to_string()))?;
+        let bytes = next.map_err(|error| super::stream_errors::gateway(&error)
+            .unwrap_or_else(|| GatewayError::with_status(502, error.to_string())))?;
         size += bytes.len();
         let frame = probe.push(&bytes);
         prefix.push(Ok(bytes));
@@ -203,7 +204,7 @@ pub(super) async fn deliver(outcome: ForwardOutcome, telemetry: Arc<RequestTelem
     match outcome {
         ForwardOutcome::Stream { status, stream: inner } => {
             let observed = ObservedStream::new(inner, telemetry.clone(), started, first, slot, completion);
-            if stream { Ok(ForwardOutcome::Stream { status, stream: Box::new(observed) }) }
+            if stream { Ok(ForwardOutcome::Stream { status, stream: Box::new(super::stream_errors::public(Box::pin(observed))) }) }
             else {
                 let completion = super::aggregate::aggregate_frame_stream(Box::pin(observed), telemetry, Default::default()).await?;
                 Ok(ForwardOutcome::Completion { body: completion.body })
@@ -227,6 +228,88 @@ pub(super) fn timeout_at(started: Instant, seconds: u64) -> Option<Instant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rewritten_failure_stream(error: GatewayError, telemetry: Arc<RequestTelemetry>, content: bool) -> ByteStream {
+        let prefix = if content {
+            Bytes::from_static(b"data: {\"model\":\"private-model\",\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n")
+        } else {
+            Bytes::from_static(b"data: {\"model\":\"private-model\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n")
+        };
+        Box::new(super::super::ForwardStream::from_translated(
+            Box::pin(futures::stream::iter([Ok(prefix), Err(std::io::Error::other(error))])),
+            None,
+            super::super::ConnectionGuard::new(super::super::Connections::new()),
+            telemetry,
+            super::super::sse::FramePolicy::with_rewrite(Some(super::super::sse::ModelRewrite {
+                requested: "public-model".into(),
+            })),
+        ))
+    }
+
+    #[tokio::test]
+    async fn trusted_stream_failure_survives_model_rewrite_and_first_content_probe() {
+        for status in [429, 499, 504, 502] {
+            let mut failure = GatewayError::with_status(status, "original host failure")
+                .with_code("original_host_code").upstream_code(6029).with_retry_after_seconds(17);
+            failure.retry_forbidden = true;
+            let stream = rewritten_failure_stream(failure, Arc::new(RequestTelemetry::new()), false);
+            let error = match hold(stream, None).await {
+                Err(error) => error,
+                Ok(_) => panic!("a trusted failure cannot commit the route"),
+            };
+            assert_eq!(error.status_code, status);
+            assert_eq!(error.code.as_deref(), Some("original_host_code"));
+            assert_eq!(error.upstream_code, Some(6029));
+            assert_eq!(error.retry_after_secs, Some(17));
+            assert!(error.retry_forbidden);
+        }
+    }
+
+    #[tokio::test]
+    async fn trusted_stream_failure_after_content_keeps_metadata_in_aggregate() {
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let mut failure = GatewayError::with_status(429, "original host failure")
+            .with_code("original_host_code").upstream_code(6029).with_retry_after_seconds(17);
+        failure.retry_forbidden = true;
+        let stream = rewritten_failure_stream(failure, telemetry.clone(), true);
+        let error = match deliver(ForwardOutcome::Stream { status: 200, stream }, telemetry,
+            Instant::now(), None, None, false, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("a failed aggregate cannot be a successful completion"),
+        };
+        assert_eq!(error.status_code, 429);
+        assert_eq!(error.code.as_deref(), Some("original_host_code"));
+        assert_eq!(error.upstream_code, Some(6029));
+        assert_eq!(error.retry_after_secs, Some(17));
+        assert!(error.retry_forbidden);
+    }
+
+    #[tokio::test]
+    async fn trusted_stream_failure_is_projected_once_at_the_public_stream_boundary() {
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let mut failure = GatewayError::with_status(429, "original host failure")
+            .with_code("original_host_code").upstream_code(6029);
+        failure.retry_forbidden = true;
+        let stream = rewritten_failure_stream(failure, telemetry.clone(), true);
+        let outcome = deliver(ForwardOutcome::Stream { status: 200, stream }, telemetry,
+            Instant::now(), None, None, true, None).await.unwrap();
+        let ForwardOutcome::Stream { mut stream, .. } = outcome else { panic!("stream requested"); };
+        let mut bytes = Vec::new();
+        while let Some(frame) = stream.next().await { bytes.extend_from_slice(&frame.unwrap()); }
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("public-model"));
+        assert!(!text.contains("private-model"));
+        assert_eq!(text.matches("data: [DONE]").count(), 1);
+        let frames: Vec<Value> = text.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter(|line| *line != "[DONE]").map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(frames.iter().filter(|frame| frame.get("error").is_some()).count(), 1);
+        let error = frames.iter().find(|frame| frame.get("error").is_some()).unwrap();
+        assert_eq!(error["error"]["code"], "original_host_code");
+        assert_eq!(error["error"]["upstream_code"], 6029);
+        assert!(!text.contains("retry_forbidden") && !text.contains("conversation_class"));
+        assert!(frames.iter().all(|frame| frame.pointer("/choices/0/finish_reason").is_none_or(Value::is_null)));
+    }
+
     #[test]
     fn control_frames_do_not_commit_and_partial_tool_frames_do() {
         let mut probe = ContentProbe::default();

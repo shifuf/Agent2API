@@ -66,6 +66,7 @@ mod rotate;
 mod route_state;
 mod route_context;
 mod route_content;
+mod stream_errors;
 mod route_completion;
 mod route_affinity;
 mod route_rules_runtime;
@@ -77,6 +78,7 @@ pub mod stall;
 pub mod translate;
 pub mod usage;
 pub mod model_trace;
+pub(crate) mod web_tools;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -751,6 +753,12 @@ impl Stream for ForwardStream {
                     }
                 }
                 std::task::Poll::Ready(Some(Err(error))) => {
+                    if stream_errors::gateway(&error).is_some() {
+                        // Routing must receive the original host status and no-replay
+                        // evidence. Do not flush a synthetic success terminal here.
+                        self.upstream_done = true;
+                        return std::task::Poll::Ready(Some(Err(error)));
+                    }
                     // 上游流式传输中断：那是**正常路径**（客户端断开、上游主动结束），
                     // 不 panic。先把已累积的 reasoning 冲刷出去，再补上
                     // 「错误帧 + [DONE]」收尾（与 Node 一致）。

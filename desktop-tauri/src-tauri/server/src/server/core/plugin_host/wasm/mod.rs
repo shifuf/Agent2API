@@ -35,6 +35,8 @@ mod host;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod forwarding_tests;
+#[cfg(test)]
+mod tool_tests;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};

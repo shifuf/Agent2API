@@ -52,6 +52,7 @@ path = "../../../scripts/fixtures/sticky-timing-gateway.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonschema = { version = "=0.61.2", default-features = false }
 # rt-multi-thread/macros 起运行时，net 监听端口，sync 传停机信号，
 # fs/io-util 读写配置与日志文件；signal 供 headless 二进制接 SIGTERM
 # （容器 stop 的优雅停机路径）；process 供 Qoder 国际版签到的 UMID 组件
