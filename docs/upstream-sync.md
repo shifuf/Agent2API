@@ -222,3 +222,24 @@
 - 桌面、手机 TypeScript/Vite、登录入口构建与六语资源通过，共用前端 **32/32**。完整暂存格式检查报告 11 处纯空白提示；同席复审核对全部上下文，判为 Minor/P3 并允许延期，不将该检查写作通过。冻结源码未因非功能格式清理改变。
 - 证据固定在私有临时目录 `agent2api-351-sticky` 的 `plugins-final-source-run3`、`plugins-final-acceptance-turh6inl`、`plugins-final-http-1795523204911136500`、`final-proxy-acceptance-run3` 与 `plugins-final-evidence-manifest-run3.json`。前两轮真实失败记录保留，不以文件名或旧程序证据替代最终通过记录。
 - 用户已确认本批九条日志及版本仍为 **3.5.1**；只提交并推送 `origin/beta`，不推 main、不打 tag、不创建 Release。随后验收本仓库双架构 Docker/GHCR 的源码 revision 和平台 digest，再对目标站做一致性备份与固定 digest 更新，保留当前数据、代理绑定、插件启停与旧容器回退。实际发布和生产部署结果记录于私有发布账本，本文上述本地通过不表示生产切换已完成。
+
+## 2026-11-25 v3.5.1 官方 WASM 转发接口兼容修复
+
+本批基线为 `bbfec534b4f5404fb24abb0b3f612bd02ab26147`，产品版本保持 `3.5.1`。用户反馈“构造对话请求失败：插件不支持此操作”，并要求补齐全部已接管插件的兼容、直接同步 GitHub 和 `175.178.69.4:3065`。上游审查边界仍为 `v3.5.1`、`33f5e797836ac91d958022e9f4ca53c30d0432ec`；本轮没有整体合并其它暂缓功能。
+
+| 来源或问题 | 采用判断 | 定制兼容方式 |
+|---|---|---|
+| `a61a61ab6d660e4efbe99129c98b711f66113373` 的独立响应转发契约 | 适配后采纳 | `forwards_response` 与 `is_stateful` 分离。官方无状态 WASM 通过 `conversation` 自行转发，不再调用未实现的旧 `chat` 请求计划；保留真实的状态能力及原生插件请求计划路径。来源作者为 Lucas，提交保留原作者署名。 |
+| 官方 WASM 的标准图片结果 | 修复宿主集成 | 增加独立 `forwards_images` / `forward_images` 接口，使用实际 WASM 宿主已校验并材料化的结果，不再次解析为 `ImageRequestPlan` 或重发上游请求。动态适配器完整委托接口；图片不进入 Chat 公共模型改写。 |
+| 图片调用的取消和未知结果 | 修复宿主集成 | 原调用继承已捕获的执行代次、活动租约、账号、代理和超时参数。取消直接丢弃原 WASM future，由真实 Context 析构关闭 HTTP 资源；实际调用返回 5xx 或结果未确认时标记 `image_output_uncertain` 和 `retry_forbidden`，防止再次消耗图片额度。正常输出保留资源材料化和 usage 记账。 |
+
+本轮使用服务器当前安装的十个原始签名包，逐文件通过 SFTP 获取并核对尺寸与 SHA256；没有改包、重签名或根据重建 ZIP 替换生产安装记录。覆盖 atomcode 0.1.0、catpaw 0.1.0、chatglm 0.1.0、qoder 0.1.0、qoder-intl 0.1.0、raccoon 0.1.1、trae 0.1.1、workbuddy 0.1.0、workbuddy-intl 0.1.0、zcode-intl 0.1.0-beta.1。WASM 传输声明不代表各提供商都支持图片；实际生成/编辑能力仍由包清单决定。
+
+### 本轮验证与部署边界
+
+- 原始签名 WorkBuddy Intl guest 在正常临时 SQLite、Key 和路由组路径中复现旧代码 HTTP 501；旧图片路径在上游已成功生成后报 `missing field url`。另分别复现失败结果未禁止重发、取消后原调用两秒内未结束，不以夹具初始化错误代替目标失败。
+- 五个需要签名包的专项测试分别使用独立进程和空临时目录执行，全部 **1/1 通过**：无状态对话的聚合/完整流式、工具/思考/usage/公共别名和原始鉴权；图片生成/编辑及原资源材料化；失败时仅提交一次且禁止重试；实际提交后取消并及时关闭宿主；十包签名安装、真实状态/能力、动态委托及加载/关闭契约。
+- 最终普通 Cargo 库测试 **497 通过、0 失败、17 ignored**；上述五个 ignored 夹具已单独执行，本轮合计 **502 项实际测试**，不将其余十二个未在本轮重跑的签名夹具计作通过。`cargo build --locked` 的服务端和 `sticky-timing-gateway` 示例、`cargo check --locked --workspace` 均退出 0。
+- 最终程序上的 **8 组 HTTP 回归全部退出 0**：粘滞准备、粘滞故障切换、三协议流式/聚合及原始正文、路由组引擎、渠道/账号/Key 权限、公开模型目录、代理多选绑定，以及带已校验 Mihomo 的实际订阅/代理转发。没有前端源码或生成资源变更。
+- 本轮证据保存在私有临时目录 `agent2api-351-sticky/wasm-forwarding-compatibility-20261125` 及父目录的 `wasm-compat-red-*`、`wasm-compat-green2-*`、`wasm-compat-all-lib1` 和构建/检查日志；十包来源及 ABI 清单位于 `current-signed-wasm-20261125`。真实包的安装/接口验收不等于十家外部账号的实时请求全部成功。
+- 仍只推 `origin/beta`，不推 main、不打 tag、不创建 Release。生产更新前重新备份当前完整数据，验收固定镜像的源码 revision 和双架构 digest，只替换镜像、保留现有十包及所有账号/Key/路由/代理配置，再用现有 Key 对当前允许路由和账号验证实际完整响应。实际部署及外部请求结果记入私有验收账本。

@@ -22,7 +22,8 @@ static TRANSPORT: Mutex<Option<String>> = Mutex::new(None);
 pub(crate) fn transport_url(original: &str) -> String {
     let Ok(parsed) = url::Url::parse(original) else { return original.to_string() };
     if !matches!(parsed.origin().ascii_serialization().as_str(), CATPAW_ORIGIN
-        | "https://copilot.tencent.com" | "https://www.codebuddy.cn") { return original.to_string(); }
+        | "https://copilot.tencent.com" | "https://www.codebuddy.cn"
+        | "https://www.workbuddy.ai") { return original.to_string(); }
     let Ok(mapping) = TRANSPORT.lock() else { return original.to_string() };
     let Some(origin) = mapping.as_ref() else { return original.to_string() };
     let mut mapped = format!("{origin}{}", parsed.path());

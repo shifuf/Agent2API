@@ -52,6 +52,9 @@ use super::wasm::conversation::ConversationOwner;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[path = "rpc_images.rs"]
+mod images;
+
 /// 宿主启动参数。
 #[derive(Clone, Debug)]
 pub struct HostOptions {
@@ -679,6 +682,29 @@ impl ProviderAdapter for RpcAdapter {
 
     fn is_stateful(&self) -> bool {
         self.metadata().capabilities.stateful
+    }
+
+    fn forwards_response(&self) -> bool {
+        self.is_stateful() || self.metadata().host.options.wasm.is_some()
+    }
+
+    fn forwards_images(&self) -> bool {
+        self.metadata().host.options.wasm.is_some()
+    }
+
+    fn forward_images<'a>(
+        &'a self,
+        _store: &'a AccountStore,
+        account_id: &'a str,
+        body: &'a Value,
+        client_headers: &'a HeaderMap,
+        proxy: Option<ResolvedProxy>,
+        operation: crate::server::core::providers::images::ImageOperation,
+        telemetry: &'a Arc<RequestTelemetry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<
+        Output = Result<ForwardOutcome, GatewayError>,
+    > + Send + 'a>> {
+        Box::pin(self.wasm_images(account_id, body, client_headers, proxy, operation, telemetry))
     }
 
     fn supports_refresh(&self) -> bool {

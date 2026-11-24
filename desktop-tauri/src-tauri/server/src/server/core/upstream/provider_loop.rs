@@ -35,7 +35,7 @@
 //! **只替换「一次发送」，不替换账号循环**：选路、
 //! telemetry 记账全部共用；不走 `build_chat_request` 那条路，因为会话式协议的
 //! 「一次发送」是 round + turn + 工具循环，产出的是同形的 `ForwardOutcome`
-//! 而不是 `reqwest::Response`。分流点是账号循环里的一处 `if adapter.is_stateful()`，
+//! 而不是 `reqwest::Response`。分流按 `forwards_response` / `forwards_images`，
 //! 实现见 `attempt_stateful`（只做「凭证 → 记账 → 转发 → 错误透传」；
 //! 无状态路径的重试 / 刷新动作不套用，适配器给的 `classify_conversation_error`
 //! 只取其中的限额**记账**语义，标记冷却后仍按队列顺延）。
@@ -966,12 +966,10 @@ async fn attempt_queue(
         // 没有「按家重置预算」这一步了：两份预算都在循环外开好、整份请求共用
         // （理由见上面的注释）。`provider_id` 仍然要取 —— 下面的发送体缓存、
         // 日志与遥测记账都用它。
-        // 会话式通道只服务「一次对话请求就是一个会话轮次」的家；生图请求走
-        // 图片通道（`build_image_request_async`），不能被会话式分支截走。
-        // 豆包工作两者都声明（会话式对话 + 对话流里的生图任务），漏了这半个
-        // 判据时生图体会被当成对话体发进 `conversation`，插件按对话协议解析
-        // 立刻报「messages 必须包含消息」——症状与账号无关，换个账号也一样。
-        if adapter.is_stateful() && ctx.images.is_none() {
+        // 自行转发响应与有无会话状态是独立能力。WASM 对话调用 conversation，
+        // WASM 图片调用对应 images 方法；原生请求计划保留原宿主代发路径。
+        if (adapter.forwards_response() && ctx.images.is_none())
+            || (adapter.forwards_images() && ctx.images.is_some()) {
             // 会话式转发（CatPaw）内部没有轮换，但**队列的兜底仍然生效**：
             // 它失败了就把它记入已尝试、回到循环挑下一个账号 —— 可能已经换了一家。
             // 没有下一个可用账号时，把这个错误原样透传（它的文案最贴近真实原因）。
@@ -2580,7 +2578,7 @@ async fn attempt_custom(
     }
 }
 
-/// **有状态 provider** 的一次转发（架构文档 §4.2.1；`is_stateful` 为 true 的家走这条）。
+/// 适配器自行转发响应的一次尝试（包括无状态 WASM 对话及标准图片结果）。
 ///
 /// ── 共用与不共用的部分（与无状态路径逐条对照）───────────────
 /// ```text
@@ -2703,8 +2701,11 @@ async fn attempt_stateful(
             describe_proxy(target.proxy.as_ref()),
         ),
     );
-    match adapter
-        .forward_conversation(
+    let outcome = if let Some(operation) = ctx.images {
+        adapter.forward_images(&service.store, target.account_id.as_deref().unwrap_or(""),
+            body, ctx.client_headers, target.proxy.clone(), operation, ctx.telemetry).await
+    } else {
+        adapter.forward_conversation(
             &service.store,
             target.account_id.as_deref().unwrap_or(""),
             body,
@@ -2714,7 +2715,8 @@ async fn attempt_stateful(
             ctx.telemetry,
         )
         .await
-    {
+    };
+    match outcome {
         Ok(outcome) => {
             // 成功：清除本次模型已有的限额标记，与外层会话式限额记账配对。
             cap_cleared(
@@ -2736,11 +2738,12 @@ async fn attempt_stateful(
             // 会话适配器只收到上游真名；客户端别名由外层可信请求体恢复。
             // Preserve the exact selected source before the trusted rewrite;
             // only the downstream final observer may confirm output completion.
-            let outcome = if adapter.sse_model_rewrite() || ctx.routing.group.is_some() {
+            let rewrite_chat = ctx.images.is_none() && (adapter.sse_model_rewrite() || ctx.routing.group.is_some());
+            let outcome = if rewrite_chat {
                 ctx.telemetry.project_catpaw_model(outcome, &model)?
             } else { outcome };
             let outcome = match outcome {
-                ForwardOutcome::Stream { status, stream } if adapter.sse_model_rewrite() || ctx.routing.group.is_some() => {
+                ForwardOutcome::Stream { status, stream } if rewrite_chat => {
                     return Ok(ForwardOutcome::Stream {
                         status,
                         stream: Box::new(super::ForwardStream::from_translated(
@@ -2752,7 +2755,7 @@ async fn attempt_stateful(
                         )),
                     });
                 }
-                ForwardOutcome::Completion { mut body } if adapter.sse_model_rewrite() || ctx.routing.group.is_some() => {
+                ForwardOutcome::Completion { mut body } if rewrite_chat => {
                     if let Some(current) = body.get_mut("model").filter(|value| value.as_str() != Some(model.as_str())) {
                         *current = Value::String(model);
                     }

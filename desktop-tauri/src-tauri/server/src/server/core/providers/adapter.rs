@@ -55,9 +55,8 @@
 //!      宁可漏刷也不要凭猜测去打上游。
 //!   6. `is_stateful` + `forward_conversation`（W4a 加钩子）：本 provider 的
 //!      上游是不是**多步会话协议**（round → turn → 工具循环 → completed）。
-//!      默认 false；由插件侧那些走会话式转发的家覆写。`forward_conversation`
-//!      是会话式转发的入口（默认 503），编排层的 `provider_loop` 按
-//!      `is_stateful` 分流到它。
+//!      默认 false；由插件侧的会话式提供商覆写。`forwards_response` 独立决定
+//!      是否通过 `forward_conversation` 自行转发；无状态 WASM 也使用该入口。
 //!   7. `supports_web_login` + `build_login_url` + `exchange_login_code`
 //!      （「网页登录」）：拉起官方登录页 → 用户完成登录 → 回调里带回一次性 code
 //!      → 网关用 code 换凭证并**落进账号库**。
@@ -1068,8 +1067,8 @@ pub trait ProviderAdapter: Send + Sync {
     ///
     /// 默认 false（一次 HTTP 请求 = 一次对话）。CatPaw 覆写成 true：它的上游是
     /// round → event(running) → turn(SSE) → 工具循环 → event(completed) 的多步
-    /// 会话（§9），单请求构造容纳不了。编排层据此把它分流到 adapter 自带的
-    /// **会话式转发入口** [`Self::forward_conversation`]；产出与无状态路径同一种
+    /// 会话（§9），单请求构造容纳不了。转发入口由 [`Self::forwards_response`]
+    /// 独立决定，产出与请求计划路径同一种
     /// `ForwardOutcome`，于是 `chat.rs` 的其余链路（脱敏、记账、错误写出）零改动。
     ///
     /// 覆写成 true 的是走会话式转发入口的家（CatPaw / Qoder / Accio /
@@ -1078,16 +1077,41 @@ pub trait ProviderAdapter: Send + Sync {
         false
     }
 
+    /// 适配器自行发送并返回完整响应，而非提供宿主代发的请求计划。
+    /// WASM 的无状态提供商也使用此入口，不改变其状态语义。
+    fn forwards_response(&self) -> bool {
+        self.is_stateful()
+    }
+
+    /// 适配器自行完成图片请求并返回标准图片结果。
+    fn forwards_images(&self) -> bool {
+        false
+    }
+
+    fn forward_images<'a>(
+        &'a self,
+        _store: &'a AccountStore,
+        _account_id: &'a str,
+        _body: &'a Value,
+        _client_headers: &'a HeaderMap,
+        _proxy: Option<crate::server::core::proxies::ResolvedProxy>,
+        _operation: super::images::ImageOperation,
+        _telemetry: &'a std::sync::Arc<crate::server::core::upstream::usage::RequestTelemetry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<
+        Output = Result<crate::server::core::upstream::ForwardOutcome, GatewayError>,
+    > + Send + 'a>> {
+        Box::pin(async { Err(GatewayError::with_status(503, "该提供商不支持直接图片转发")) })
+    }
+
     /// **会话式转发入口**（模块头扩展 6 的配套；架构文档 §4.2.1）。
     ///
-    /// 只有有状态 provider 覆写它（`is_stateful` 为 true 的家，见各自 `mod.rs`）。
-    /// 默认实现返回 503：走到这里
-    /// 说明编排层把一家无状态 provider 当成了有状态的 —— 那是**内部契约错误**，
+    /// 声明 `forwards_response` 的 provider 覆写它，包括无状态 WASM 提供商。
+    /// 默认实现返回 503：声明转发能力却没有实现入口是**内部契约错误**，
     /// 报错比让 `build_chat_request` 与 `forward_conversation` 各发一半安全。
     ///
     /// ── 与 `build_chat_request` 的分工 ──────────────────────────
-    /// 无状态路径的编排是「构造请求 → 发 → 读错误 → 按分类换账号」；
-    /// 有状态路径把这四步全收进适配器（CatPaw 是 round/turn/工具循环 + 注册表
+    /// 请求计划路径的编排是「构造请求 → 发 → 读错误 → 按分类换账号」；
+    /// 直接转发路径把这四步全收进适配器（CatPaw 是 round/turn/工具循环 + 注册表
     /// 状态机），编排层只保留它**必然共用**的那部分：账号选路循环、限额冷却、
     /// provider 轮询、telemetry 记账（见 `upstream::provider_loop` 的分流）。
     ///
@@ -1121,7 +1145,7 @@ pub trait ProviderAdapter: Send + Sync {
             Err(GatewayError::with_status(
                 503,
                 format!(
-                    "该提供商不支持会话式转发（{}）：这是内部契约错误，请检查 is_stateful 的分流",
+                    "该提供商不支持会话式转发（{}）：这是内部契约错误，请检查 forwards_response 的分流",
                     super::kind_id(kind)
                 ),
             ))
@@ -1946,6 +1970,29 @@ impl ProviderAdapter for BuiltinAdapter {
 
     fn is_stateful(&self) -> bool {
         adapter_for(self.0).is_stateful()
+    }
+
+    fn forwards_response(&self) -> bool {
+        adapter_for(self.0).forwards_response()
+    }
+
+    fn forwards_images(&self) -> bool {
+        adapter_for(self.0).forwards_images()
+    }
+
+    fn forward_images<'a>(
+        &'a self,
+        store: &'a AccountStore,
+        account_id: &'a str,
+        body: &'a Value,
+        client_headers: &'a HeaderMap,
+        proxy: Option<crate::server::core::proxies::ResolvedProxy>,
+        operation: super::images::ImageOperation,
+        telemetry: &'a std::sync::Arc<crate::server::core::upstream::usage::RequestTelemetry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<
+        Output = Result<crate::server::core::upstream::ForwardOutcome, GatewayError>,
+    > + Send + 'a>> {
+        adapter_for(self.0).forward_images(store, account_id, body, client_headers, proxy, operation, telemetry)
     }
 
     fn forward_conversation<'a>(
