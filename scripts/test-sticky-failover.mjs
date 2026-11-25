@@ -31,6 +31,11 @@ const upstream = http.createServer(async (request, response) => {
   const topic = body.messages?.at(-1)?.content || body.input?.at(-1)?.content || ''
   calls.push({ channel, key, model: body.model, topic })
   const mode = modes.get(channel)
+  if (mode === 'edge-timeout' || mode === 'limited') {
+    response.writeHead(mode === 'edge-timeout' ? 524 : 429)
+    response.end()
+    return
+  }
   if (mode === 'slow-headers') {
     await delay(1500)
     if (response.destroyed) return
@@ -117,7 +122,8 @@ async function until(label, check, timeout = 15000) {
   throw Error(`Timed out: ${label}`)
 }
 async function scenario(name, action) {
-  if (process.env.STICKY_SCENARIO && !name.includes(process.env.STICKY_SCENARIO)) return
+  const filter = process.argv[3] || process.env.STICKY_SCENARIO
+  if (filter && !name.includes(filter)) return
   modes.clear()
   try { await action(); passed.push(name); console.log(`PASS ${name}`) }
   catch (error) { failed.push({ name, error: error.stack }); console.error(`FAIL ${name}: ${error.message}`) }
@@ -187,6 +193,30 @@ try {
     assert.deepEqual(sequence(next), ['b'], 'A second Key must not bypass the frozen member')
     const independent = await save(group('independent-entry'))
     assert.equal(await chat(independent), 'a', 'Cooling is scoped to the public routing entry')
+  })
+
+  await scenario('an empty HTTP 524 retries another account and freezes the failed channel before answering from B', async () => {
+    const value = await warm('edge-524')
+    modes.set('a', 'edge-timeout')
+    const start = calls.length
+    assert.equal(await chat(value), 'b')
+    assert.deepEqual(sequence(start), ['a', 'a', 'b'])
+    assert.notEqual(calls[start].key, calls[start + 1].key)
+    modes.clear()
+    assert.equal(await chat(value, 'edge-524-new-session'), 'b', '524 must freeze every Key of A')
+  })
+
+  await scenario('all account candidates are considered when one channel has eight quota failures', async () => {
+    const created = await ok('/api/custom-providers', { name: 'Eight quota accounts', protocol: 'chat_completions',
+      baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, keyGroups: [{ id: 'main', name: 'Main',
+        apiKeys: Array.from({ length: 8 }, (_, index) => `quota-${index}`), models: ['wire-fixture'], enabled: true }] })
+    const value = await save(group('account-budget', { members: [{ id: 'quota', provider: created.provider.id,
+      model: 'wire-fixture', accountScope: 'all', accounts: [], included: true, weight: 1 }, members[1]] }))
+    modes.set('quota', 'limited')
+    const start = calls.length
+    assert.equal(await chat(value), 'b')
+    assert.deepEqual(sequence(start), ['quota', 'quota', 'quota', 'quota', 'quota', 'quota', 'quota', 'quota', 'b'])
+    assert.equal(new Set(calls.slice(start, start + 8).map(call => call.key)).size, 8)
   })
 
   await scenario('B and C follow the same two-failure rule and all-frozen requests send nothing', async () => {

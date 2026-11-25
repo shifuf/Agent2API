@@ -12,9 +12,9 @@ async function handle(frame) {
   let result
   switch (frame.method) {
     case 'init': result = fixture.providers; break
-    case 'models.refresh': result = { refreshed: true, count: 9 }; break
-    case 'models.list': result = { models: ['quota-switch', 'quota-headers', 'quota-timeout'].flatMap(phase =>
-      ['a', 'b', 'c'].map(channel => ({ id: phase + '-' + channel, context: 32768 }))) }; break
+    case 'models.refresh': result = { refreshed: true, count: fixture.providers[0].default_models.length,
+      models: fixture.providers[0].default_models, meta: { remote: true, refreshed_at: Date.now() } }; break
+    case 'models.list': result = { models: fixture.providers[0].default_models }; break
     case 'token.ensure':
     case 'token.refresh': {
       const control = JSON.parse(await readFile(fixture.control, 'utf8'))
@@ -25,7 +25,25 @@ async function handle(frame) {
     case 'chat': result = { url: fixture.upstream + '/messages', upstream: 'chat', body: params.body,
       headers: [['Content-Type', 'application/json'], ['Authorization', 'Bearer timing-' + channel]] }; break
     case 'is_error_response': result = false; break
-    case 'classify': result = params.status === 429 ? fixture.quota : fixture.fatal; break
+    case 'conversation': {
+      const control = JSON.parse(await readFile(fixture.control, 'utf8'))
+      const send = value => process.stdout.write(JSON.stringify({ id: frame.id, ...value }) + '\n')
+      if (channel !== 'c' && control.mode === 'cleanup') {
+        send({ error: { code: 'provider_http:' + JSON.stringify({ status: 502, code: 'network_cleanup_unconfirmed' }),
+          message: 'fixture resource cleanup was not confirmed' } })
+        return
+      }
+      const status = channel !== 'c' ? Number(control.mode) : 200
+      send({ event: 'head', status, headers: {}, upstream: 'chat' })
+      if (status === 200) {
+        const text = `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: channel }, finish_reason: null }] })}\n\n` +
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`
+        send({ event: 'chunk', data: Buffer.from(text).toString('base64') })
+      }
+      send({ result: null })
+      return
+    }
+    case 'classify': result = params.status === 429 ? fixture.quota : { ...fixture.fatal, status: params.status }; break
     case 'error.policy': result = {}; break
     case 'retry.decision': result = { action: 'default' }; break
     case 'retry.advice': result = null; break

@@ -210,6 +210,9 @@ pub(in crate::server::core::plugin_host) fn conversation(
         error.retry_after_secs = reset_at.and_then(seconds_until);
     }
     error.conversation_class = Some(class);
+    // Decide at the trusted projection boundary: ordinary Fatal upstream
+    // failures can fail over, but interruptions and unconfirmed cleanup cannot.
+    error.retry_forbidden = stopped(&error);
     error
 }
 
@@ -352,12 +355,13 @@ pub(in crate::server::core::plugin_host) fn reproject(provider: &str, error: &Ga
     let mut result = conversation(provider, status, class, &body, None);
     if matches!(error.code.as_deref(), Some("runtime_sdk_quota" | "runtime_sdk_token" | "runtime_sdk_content"))
         && error.conversation_class.is_none() {
-        return fatal(provider, status, UNKNOWN);
+        result = fatal(provider, status, UNKNOWN);
     }
     if let Some(UpstreamErrorClass::QuotaLimited { reset_at, .. }) = &mut result.conversation_class {
         if reset_at.is_none() { *reset_at = error.retry_after_secs.and_then(retry_reset); }
         result.retry_after_secs = reset_at.and_then(seconds_until);
     }
+    result.retry_forbidden |= error.retry_forbidden;
     result
 }
 
@@ -560,4 +564,47 @@ fn seconds_until(reset: i64) -> Option<u64> {
     let remaining = reset.checked_sub(logging::now_ms())?;
     if remaining <= 0 { return None; }
     u64::try_from(remaining).ok()?.checked_add(999).map(|value| value / 1000)
+}
+
+#[cfg(test)]
+mod routing_stop_tests {
+    use super::*;
+
+    #[test]
+    fn projected_plugin_interruptions_forbid_retry_but_ordinary_server_failures_do_not() {
+        for (status, code, stopped) in [
+            (503, "", false), (524, "", false), (504, "", true),
+            (556, "", true), (502, "network_cleanup_unconfirmed", true),
+            (502, "something_cleanup_failed", true),
+        ] {
+            let error = conversation("workbuddy", status,
+                UpstreamErrorClass::Fatal { status, message: String::new(), upstream_code: None },
+                &json!({ "code": code }), None);
+            assert_eq!(error.status_code, i32::from(status));
+            assert_eq!(error.retry_forbidden, stopped, "HTTP {status}, code {code}");
+            if code.contains("cleanup") {
+                assert_eq!(error.code.as_deref(), Some("network_cleanup_unconfirmed"));
+            }
+        }
+    }
+
+    #[test]
+    fn reproject_keeps_an_explicit_stop_even_without_classification_metadata() {
+        for status in [503, 524] {
+            let mut error = fatal("workbuddy", status, "");
+            error.retry_forbidden = true;
+            let result = reproject("workbuddy", &error);
+            assert!(result.retry_forbidden, "explicit stop was lost for HTTP {status}");
+            assert_eq!(result.status_code, error.status_code);
+            assert_eq!(result.code, error.code);
+            assert_eq!(result.upstream_code, error.upstream_code);
+            assert!(matches!(result.conversation_class, Some(UpstreamErrorClass::Fatal { .. })));
+        }
+        let mut error = GatewayError::with_status(503, "untrusted classification").with_code("runtime_sdk_quota");
+        error.retry_forbidden = true;
+        let result = reproject("workbuddy", &error);
+        assert!(result.retry_forbidden, "classification fallback cannot clear an explicit stop");
+        assert_eq!(result.code.as_deref(), Some(UNKNOWN));
+        assert!(matches!(result.conversation_class, Some(UpstreamErrorClass::Fatal { .. })));
+    }
 }

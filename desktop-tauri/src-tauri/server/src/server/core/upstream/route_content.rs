@@ -44,15 +44,17 @@ pub(super) type ByteStream = Box<dyn Stream<Item = Result<Bytes, std::io::Error>
 
 pub(super) fn transient(error: &GatewayError) -> bool {
     use crate::server::core::providers::adapter::UpstreamErrorClass;
-    !error.retry_forbidden && matches!(error.status_code, 408 | 429 | 500 | 502 | 503 | 504)
-        && !matches!(error.conversation_class, Some(UpstreamErrorClass::Fatal {..} | UpstreamErrorClass::TokenExpired {..} | UpstreamErrorClass::ContentBlocked {..}))
+    // Fatal is the plugin protocol's catch-all for ordinary upstream failures;
+    // explicit Stop decisions are carried separately by retry_forbidden.
+    !error.retry_forbidden && matches!(error.status_code, 408 | 429 | 500 | 502 | 503 | 504 | 524)
+        && !matches!(error.conversation_class, Some(UpstreamErrorClass::TokenExpired {..} | UpstreamErrorClass::ContentBlocked {..}))
         && !matches!(error.code.as_deref(), Some("route_empty" | "model_not_found" | "account_scope_mismatch" | "route_strict_failed" | "route_strict_unavailable" | "route_patience_exhausted" | "route_cooling_down"))
 }
 
 
 pub(super) fn channel_fault(error: &GatewayError) -> bool {
     use crate::server::core::providers::adapter::UpstreamErrorClass;
-    matches!(error.status_code, 408 | 500 | 502 | 503 | 504)
+    matches!(error.status_code, 408 | 500 | 502 | 503 | 504 | 524)
         && !matches!(error.conversation_class, Some(UpstreamErrorClass::TokenExpired {..} | UpstreamErrorClass::ContentBlocked {..} | UpstreamErrorClass::QuotaLimited {..}))
         && error.code.as_deref().map_or(true, |code| !code.starts_with("route_")
             || matches!(code, "route_first_content_timeout" | "route_empty_response"))
@@ -333,15 +335,25 @@ mod tests {
     }
 
     #[test]
-    fn patience_obeys_retry_after_and_does_not_retry_permission_or_fatal_failures() {
+    fn ordinary_plugin_server_failures_can_retry_until_content_commits() {
+        for status in [503, 524] {
+            let mut error = GatewayError::with_status(status, "upstream server failure");
+            error.conversation_class = Some(crate::server::core::providers::adapter::UpstreamErrorClass::Fatal {
+                status: status as u16, message: "upstream server failure".into(), upstream_code: None,
+            });
+            assert!(transient(&error), "ordinary plugin HTTP {status} must reach another candidate");
+            error.retry_forbidden = true;
+            assert!(!transient(&error), "explicit stop must retain replay protection");
+        }
+    }
+
+    #[test]
+    fn patience_obeys_retry_after_and_does_not_retry_permission_or_explicit_stop() {
         let mut busy = GatewayError::with_status(429,"busy"); busy.retry_after_secs = Some(20);
         assert_eq!(retry_delay(&busy,1,Duration::from_secs(60)),Duration::from_secs(20));
         assert_eq!(retry_delay(&busy,1,Duration::from_secs(3)),Duration::from_secs(3));
         assert!(transient(&busy));
         assert!(!transient(&GatewayError::with_status(403,"denied")));
-        let mut fatal = GatewayError::with_status(503,"fatal");
-        fatal.conversation_class = Some(crate::server::core::providers::adapter::UpstreamErrorClass::Fatal {status:503,message:"fatal".into(),upstream_code:None});
-        assert!(!transient(&fatal));
         let mut stopped = GatewayError::with_status(503, "adapter stopped");
         stopped.retry_forbidden = true;
         assert!(!transient(&stopped));

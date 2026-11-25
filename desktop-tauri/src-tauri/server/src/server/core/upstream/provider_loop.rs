@@ -259,7 +259,7 @@ fn defer_to_next_account(
 /// **也不含 [`readiness::LOCAL_PRECONDITION_STATUS`]（556）**：那个码说的是
 /// 「这一次转发从未发生」，原地重发第二次与第一次的结果必然是同一个失败 ——
 /// 它的出路只有换号一条（见 [`defer_to_next_account`]）。
-const TRANSIENT_RETRY_STATUSES: &[u16] = &[408, 500, 502, 503, 504];
+const TRANSIENT_RETRY_STATUSES: &[u16] = &[408, 500, 502, 503, 504, 524];
 
 /// 按**请求体字节数**拒收的状态码：这一档的结论只由「这份 body 有多大」决定，
 /// 重发同一份字节必然得到同一个失败 ⇒ 不进原地重发（见 [`fallback_retry_advice`]）。
@@ -527,9 +527,12 @@ pub(super) async fn forward_with_providers(
     let mut rounds = 0usize;
     let sticky_faults = ctx.routing.sticky_faults();
     let max_rounds = if sticky_faults {
-        let channels: std::collections::HashSet<_> = ctx.routing.group_projection.accounts.iter().map(|account|
-            crate::server::core::routing_groups::member_key(&crate::server::core::routing_groups::attempt_key(account)).unwrap_or("").to_string()).collect();
-        channels.len().saturating_mul(2).saturating_add(1).max(3)
+        // Quota failures exclude accounts without freezing their channel. Count
+        // candidates so a large account pool cannot exhaust the outer budget
+        // before its remaining accounts or the next channel are considered.
+        let candidates: std::collections::HashSet<_> = ctx.routing.group_projection.accounts.iter()
+            .map(|account| crate::server::core::routing_groups::attempt_key(account)).collect();
+        candidates.len().saturating_mul(2).saturating_add(1).max(3)
     } else { MAX_ROUTE_ATTEMPTS };
     loop {
         if ctx.telemetry.replay_guard().blocked() {
