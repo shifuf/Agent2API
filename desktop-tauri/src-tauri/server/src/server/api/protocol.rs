@@ -105,9 +105,7 @@ async fn forward_chat(
         allowed_providers: scope.clone(),
         max_rounds,
     });
-    let outcome = state
-        .upstream()
-        .forward(ForwardRequest {
+    let outcome = super::stream_wait::forward(state.upstream().clone(), ForwardRequest {
             body: payload,
             stream,
             dedupe_key,

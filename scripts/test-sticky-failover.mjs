@@ -36,11 +36,11 @@ const upstream = http.createServer(async (request, response) => {
     response.end()
     return
   }
-  if (mode === 'slow-headers') {
-    await delay(1500)
+  if (mode === 'slow-headers' || mode === 'slow-start' || mode === 'slow-failure') {
+    await delay(mode === 'slow-headers' ? 1500 : 4000)
     if (response.destroyed) return
   }
-  if (mode === 'fail' || mode === 'bad-request' || (mode?.remaining > 0 && mode.remaining--)) {
+  if (mode === 'fail' || mode === 'slow-failure' || mode === 'bad-request' || (mode?.remaining > 0 && mode.remaining--)) {
     response.writeHead(mode === 'bad-request' ? 400 : 503, { 'Content-Type': 'application/json', ...(mode?.retryAfter ? { 'Retry-After': String(mode.retryAfter) } : {}) })
     response.end(JSON.stringify({ error: { message: mode === 'bad-request' ? 'invalid request field' : 'temporarily overloaded' } }))
     return
@@ -180,6 +180,101 @@ try {
     members.push({ id: channel, provider: created.provider.id, model: 'wire-fixture',
       accountScope: 'all', accounts: [], included: true, weight: 1 })
   }
+
+  for (const endpoint of ['/v1/chat/completions', '/v1/responses', '/v1/messages']) {
+    await scenario(`stream wait ${endpoint} sends keepalive before delayed upstream headers`, async () => {
+      const value = await save(group(`stream-wait-${endpoint.split('/').at(-1)}`))
+      modes.set('a', 'slow-start')
+      const body = endpoint.endsWith('/responses') ? { model: value.model, stream: true, input: 'ping' }
+        : { ...chatBody(value.model, 'ping', true), ...(endpoint.endsWith('/messages') ? { max_tokens: 32 } : {}) }
+      const started = Date.now()
+      const response = await fetch(base + endpoint, { method: 'POST', headers: { Authorization: `Bearer ${adminKey}`,
+        'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) })
+      const reader = response.body.getReader()
+      try {
+        const first = await reader.read()
+        assert.equal(response.status, 200)
+        assert(Date.now() - started < 1500, 'routing must expose keepalive before a short downstream first-byte timeout')
+        assert(Buffer.from(first.value).toString().startsWith(':'), 'keepalive is an SSE comment, not model output')
+        let text = Buffer.from(first.value).toString()
+        for (;;) { const item = await reader.read(); if (item.done) break; text += Buffer.from(item.value).toString() }
+        assert(text.includes('a'), 'the original slow candidate must still finish normally')
+        assert(text.includes(endpoint.endsWith('/responses') ? 'response.completed' : endpoint.endsWith('/messages') ? 'message_stop' : '[DONE]'))
+      } finally { await reader.cancel() }
+    })
+  }
+
+  await scenario('stream wait keeps the request connected while first-content deadlines traverse accounts', async () => {
+    const value = await save(group('stream-wait-failover', { firstToken: 1 }))
+    modes.set('a', 'slow-start')
+    const start = calls.length
+    const response = await ok('/v1/chat/completions', chatBody(value.model, 'ping', true))
+    assert(response.startsWith(':'))
+    assert(response.includes('"content":"b"'))
+    assert.deepEqual(sequence(start), ['a', 'a', 'b'])
+  })
+
+  await scenario('stream wait cancel after heartbeat drops pending inference without trying the next candidate', async () => {
+    const value = await save(group('stream-wait-cancel', { firstToken: 1 }))
+    modes.set('a', 'slow-start')
+    const start = calls.length
+    const controller = new AbortController()
+    const response = await fetch(base + '/v1/chat/completions', { method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(chatBody(value.model, 'cancel', true)), signal: controller.signal })
+    const reader = response.body.getReader()
+    await reader.read()
+    controller.abort()
+    await reader.cancel().catch(() => {})
+    await delay(2200)
+    assert.deepEqual(sequence(start), ['a'], 'a disconnected caller must not consume the remaining account pool')
+  })
+
+  await scenario('stream wait sends recurring comments while a candidate has no content', async () => {
+    const value = await save(group('stream-wait-heartbeats'))
+    modes.set('a', 'delayed-success')
+    const response = await fetch(base + '/v1/responses', { method: 'POST',
+      headers: { Authorization: `Bearer ${adminKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: value.model, stream: true, input: 'heartbeat-pending' }), signal: AbortSignal.timeout(20000) })
+    const reader = response.body.getReader()
+    try {
+      assert(Buffer.from((await reader.read()).value).toString().startsWith(':'))
+      const next = await reader.read()
+      assert(Buffer.from(next.value).toString().startsWith(':'), 'protocol conversion must not swallow recurring keepalive')
+      releases.get('heartbeat-pending')()
+      let text = ''
+      for (;;) { const item = await reader.read(); if (item.done) break; text += Buffer.from(item.value).toString() }
+      assert(text.includes('response.completed'))
+    } finally { await reader.cancel(); releases.get('heartbeat-pending')?.() }
+  })
+
+  await scenario('stream wait final failure after headers remains a protocol error with no fabricated completion', async () => {
+    const value = await save(group('stream-wait-final-error', { sticky: 'off', members: [members[1]] }))
+    modes.set('b', 'slow-failure')
+    const start = calls.length
+    const result = await request('/v1/responses', { model: value.model, stream: true, input: 'slow-error' })
+    assert.equal(result.status, 200, 'headers have already started the SSE response')
+    assert(result.body.includes('temporarily overloaded'))
+    assert(result.body.includes('response.failed'))
+    assert(!result.body.includes('response.completed'))
+    assert.deepEqual(sequence(start), ['b'])
+  })
+
+  await scenario('stream wait fast validation failures and non-streaming JSON retain their HTTP behavior', async () => {
+    const missing = await request('/v1/chat/completions', { model: 'not-a-model', stream: true, messages: [] })
+    assert.equal(missing.status, 404)
+    const invalid = await save(group('stream-wait-bad-request'))
+    modes.set('a', 'bad-request')
+    const rejected = await request('/v1/chat/completions', chatBody(invalid.model, 'invalid', true))
+    assert.equal(rejected.status, 400, 'a fast upstream rejection must remain an HTTP error')
+    assert.equal(typeof rejected.body, 'object')
+    modes.clear()
+    const value = await save(group('stream-wait-json'))
+    modes.set('a', 'slow-start')
+    const result = await request('/v1/chat/completions', chatBody(value.model))
+    assert.equal(result.status, 200)
+    assert.equal(result.body.choices[0].message.content, 'a', 'JSON clients must not receive SSE comments')
+  })
 
   await scenario('two failures freeze every Key in A and move the sticky session to B', async () => {
     const value = await warm('two-failures')

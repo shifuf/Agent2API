@@ -130,6 +130,7 @@ pub mod public_model_catalog;
 pub mod onboarding;
 pub mod panel;
 pub mod pipeline;
+mod stream_wait;
 mod live_progress;
 mod record_persist;
 // 提供商插件包的管理面（列表 / 安装 / 卸载 / 启停）：插件是用户安装的，

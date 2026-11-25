@@ -886,14 +886,15 @@ pub fn sse_response(
     status: StatusCode,
     stream: Box<dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin>,
 ) -> Response {
-    let mut response = Response::new(Body::from_stream(stream));
+    let mut response = Response::new(Body::from_stream(super::stream_wait::keepalive(Box::pin(stream))));
     *response.status_mut() = status;
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream; charset=utf-8"),
     );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache, no-transform"));
+    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
     headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
     response
 }
