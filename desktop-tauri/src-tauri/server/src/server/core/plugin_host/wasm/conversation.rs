@@ -16,7 +16,7 @@ use super::context::Shared;
 use super::super::Host;
 use crate::server::core::{proxies::ResolvedProxy, upstream::{
     cancellation::CancelToken,
-    replay_guard::{CallLease, PreparationRef, ReplayError}, usage::RequestTelemetry,
+    replay_guard::{CallLease, PreparationRef, ReplayError}, usage::{RequestTelemetry, DispatchTracker},
 }};
 use crate::server::errors::GatewayError;
 
@@ -87,7 +87,7 @@ impl ConversationOwner {
             client_stream: params["client_stream"].as_bool().ok_or_else(output_unavailable)?,
             deadline: Instant::now() + timeout,
             call_cancel: telemetry.cancel_token(),
-            capture: telemetry.capture(), memory,
+            capture: telemetry.capture(), memory, dispatch: telemetry.dispatch_tracker(),
         };
         Ok((Self { lease: Some(lease), signal, output }, call))
     }
@@ -129,6 +129,7 @@ pub(in crate::server::core::plugin_host) struct ConversationCall {
     call_cancel: Option<Arc<CancelToken>>,
     capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
     memory: Option<Arc<super::catpaw_turn::budget::Allocation>>,
+    dispatch: DispatchTracker,
 }
 impl ConversationCall {
     pub(super) fn deadline(&self) -> Instant { self.deadline }
@@ -185,12 +186,12 @@ impl ConversationCall {
         if !state.guard_issued || state.source_issued || state.consumer || state.execution.is_some() { return Err(unavailable()); }
         self.with_current(|| self.preparation.freeze()).map_err(|_| unavailable())?;
         state.http_submission = true;
-        Ok(HttpSubmissionGuard { preparation: self.preparation.clone() })
+        Ok(HttpSubmissionGuard { preparation: self.preparation.clone(), dispatch: self.dispatch.clone() })
     }
 }
 
 /// 在实际原 HTTP/WS 发送前建立，返回、取消、超时和 trap 均永久关闭新调用。
-pub(super) struct HttpSubmissionGuard { preparation: PreparationRef }
+pub(super) struct HttpSubmissionGuard { preparation: PreparationRef, pub(super) dispatch: DispatchTracker }
 impl Drop for HttpSubmissionGuard {
     fn drop(&mut self) { self.preparation.lock_permanent_replay_block(); }
 }

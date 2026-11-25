@@ -370,6 +370,51 @@ pub(crate) async fn delete(url: &str, auth: &WebDavAuth, user_agent: &str) -> Re
     Err(status_error("DELETE", response.status(), url))
 }
 
+/// List immediate children from a successful Depth:1 response. Hrefs must stay in this directory.
+pub(crate) async fn children(url: &str, auth: &WebDavAuth, user_agent: &str) -> Result<Vec<(String, bool)>, String> {
+    let root = if url.ends_with('/') { url.to_string() } else { format!("{url}/") };
+    let base = Url::parse(&root).map_err(|e|e.to_string())?;
+    let response = apply_auth(client(user_agent)?.request(method_propfind(), &root)
+        .header("Depth", "1").header("Content-Type", "application/xml")
+        .body(r#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>"#)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)), auth)
+        .send().await.map_err(|e|transport_error("PROPFIND", &root, &e))?;
+    if response.status() == StatusCode::NOT_FOUND { return Ok(Vec::new()); }
+    if response.status() != StatusCode::MULTI_STATUS { return Err(status_error("PROPFIND", response.status(), &root)); }
+    let mut body = Vec::new();
+    use futures::StreamExt as _;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e|transport_error("PROPFIND", &root, &e))?;
+        if body.len().saturating_add(chunk.len()) > 2_000_000 { return Err("WebDAV 目录清单超过上限".into()); }
+        body.extend_from_slice(&chunk);
+    }
+    let xml = String::from_utf8(body).map_err(|_|"WebDAV 目录响应不是UTF-8".to_string())?;
+    if !xml.contains("multistatus") { return Err("WebDAV 目录响应缺少multistatus".into()); }
+    let mut names = std::collections::BTreeSet::new();
+    for entry in super::xml::blocks(&xml, "response")? {
+        let Some(href) = super::xml::text(entry, "href")? else { continue };
+        let prop = super::xml::blocks(entry,"propstat")?.into_iter().find(|block|
+            super::xml::text(block,"status").ok().flatten().is_some_and(|status|status.split_whitespace().nth(1)==Some("200"))
+                && regex::Regex::new(r"<(?:[A-Za-z_][\w.-]*:)?resourcetype\b").is_ok_and(|pattern|pattern.is_match(block)));
+        let Some(prop) = prop else { continue };
+        let Ok(child) = base.join(&href) else { continue };
+        if child.origin() != base.origin() || child.query().is_some() || child.fragment().is_some() { continue }
+        let Some(relative) = child.path().strip_prefix(base.path()) else { continue };
+        let name = relative.trim_end_matches('/');
+        if !name.is_empty() && !name.contains('/') {
+            let collection = relative.ends_with('/') || regex::Regex::new(r"<(?:[A-Za-z_][\w.-]*:)?collection\b").map_err(|e|e.to_string())?.is_match(prop);
+            names.insert((name.to_string(),collection));
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
+
+pub(crate) async fn child_names(url: &str, auth: &WebDavAuth, user_agent: &str) -> Result<Vec<String>, String> {
+    Ok(children(url,auth,user_agent).await?.into_iter().filter_map(|(name,collection)|collection.then_some(name)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

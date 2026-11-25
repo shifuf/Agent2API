@@ -106,7 +106,7 @@ impl RequestTelemetry {
         let account_id = guard.account_id.clone();
         let candidate_id = guard.route.as_ref().and_then(|route| route.get("pickedCandidate")).and_then(Value::as_str).unwrap_or(&account_id).to_string();
         let started_at = crate::server::logging::now_ms();
-        *self.active_attempt.lock().unwrap_or_else(|error| error.into_inner()) = Some(ActiveAttempt { candidate_id: candidate_id.clone(), started_at });
+        *self.active_attempt.lock().unwrap_or_else(|error| error.into_inner()) = Some(ActiveAttempt { candidate_id: candidate_id.clone(), started_at, dispatch: Default::default() });
         if guard.attempts_detail.len() >= MAX_ATTEMPT_DETAILS { return; }
         let member_id = crate::server::core::routing_groups::member_key(&candidate_id).unwrap_or("").to_string();
         let reason = guard.route.as_ref()

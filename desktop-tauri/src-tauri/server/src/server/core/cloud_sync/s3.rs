@@ -381,6 +381,45 @@ pub(crate) async fn get_object(
     Ok(Some(bytes))
 }
 
+pub(crate) async fn delete_object(credentials: &S3Credentials, key: &str) -> Result<(), String> {
+    let url = object_url(credentials, key);
+    let mut builder = client(credentials)?.delete(&url).timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    for (name, value) in signed_headers("DELETE", &url, b"", None, credentials)? { builder = builder.header(name, value); }
+    let response = builder.send().await.map_err(|e|transport_error("DELETE", &e))?;
+    if response.status().is_success() || response.status() == StatusCode::NOT_FOUND { return Ok(()); }
+    Err(status_error("DELETE", response.status(), &url))
+}
+pub(crate) async fn list_keys(credentials: &S3Credentials, prefix: &str) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    let mut continuation: Option<String> = None;
+    for _ in 0..100 {
+        let mut url = url::Url::parse(&bucket_url(credentials)).map_err(|e|e.to_string())?;
+        { let mut query = url.query_pairs_mut(); query.append_pair("list-type", "2").append_pair("prefix", prefix);
+          if let Some(token) = continuation.as_ref() { query.append_pair("continuation-token", token); } }
+        let mut builder = client(credentials)?.get(url.as_str()).timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        for (name, value) in signed_headers("GET", url.as_str(), b"", None, credentials)? { builder = builder.header(name, value); }
+        let response = builder.send().await.map_err(|e|transport_error("LIST", &e))?;
+        if !response.status().is_success() { return Err(status_error("LIST", response.status(), url.as_str())); }
+        use futures::StreamExt as _;
+        let mut body = Vec::new(); let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e|transport_error("LIST", &e))?;
+            if body.len().saturating_add(chunk.len()) > 2_000_000 { return Err("S3目录清单超过上限".into()); }
+            body.extend_from_slice(&chunk);
+        }
+        let xml = String::from_utf8(body).map_err(|_|"S3目录响应不是UTF-8".to_string())?;
+        if !xml.contains("ListBucketResult") { return Err("S3目录响应格式无效".into()); }
+        for block in super::xml::blocks(&xml, "Contents")? {
+            if let Some(key) = super::xml::text(block, "Key")? { if key.starts_with(prefix) { keys.push(key); } }
+        }
+        if super::xml::text(&xml,"IsTruncated")?.as_deref() != Some("true") { return Ok(keys); }
+        let next = super::xml::text(&xml,"NextContinuationToken")?.ok_or_else(||"S3分页响应缺少继续标记".to_string())?;
+        if next.is_empty() || continuation.as_ref() == Some(&next) { return Err("S3分页标记无效".into()); }
+        continuation = Some(next);
+    }
+    Err("S3目录分页超过上限，未执行清理".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -112,7 +112,7 @@ impl Owner {
             source::subsequent(&self.source, self.cleanup.account(), || record.mark_turn_submission()).await?;
             self.cleanup.mark_turn();
             let capture = self.source.capture();
-            let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline()).await?;
+            let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline(), self.source.dispatch_tracker()).await?;
             self.reader = Some(Reader::new(response, &record.ids.conversation, capture));
             return Ok(());
         }
@@ -146,7 +146,7 @@ impl Owner {
         let round_request = network::prepare(self.cleanup.client().ok_or_else(error::unavailable)?, self.cleanup.account(), network::Route::Round, &self.input.round)?;
         // 构造先于原Call/原行最终门，门内仅freeze与CAS，无锁内网络。
         source::submit(&self.source, self.cleanup.account(), record).await?;
-        let round = match network::short(self.cleanup.client().ok_or_else(error::unknown)?, round_request, network::Route::Round, &record.ids.conversation, Some(self.source.deadline())).await {
+        let round = match network::short(self.cleanup.client().ok_or_else(error::unknown)?, round_request, network::Route::Round, &record.ids.conversation, Some(self.source.deadline()), Some(self.source.dispatch_tracker())).await {
             Ok(round) => {
                 self.source.lock_permanent_replay();
                 round
@@ -165,7 +165,7 @@ impl Owner {
         let running = json!({"conversationId": record.ids.conversation, "eventType": "conversation", "data": {"status": "running"}});
         let request = network::prepare(self.cleanup.client().ok_or_else(error::unknown)?, self.cleanup.account(), network::Route::Running, &running.to_string())?;
         source::subsequent(&self.source, self.cleanup.account(), || record.mark_running_submission()).await?;
-        network::short(self.cleanup.client().ok_or_else(error::unknown)?, request, network::Route::Running, &record.ids.conversation, Some(self.source.deadline())).await?;
+        network::short(self.cleanup.client().ok_or_else(error::unknown)?, request, network::Route::Running, &record.ids.conversation, Some(self.source.deadline()), Some(self.source.dispatch_tracker())).await?;
         record.running_accepted()?;
         if record.abandoned() { return Err(error::ended()); }
         source::check(&self.source, self.cleanup.account())?;
@@ -175,7 +175,7 @@ impl Owner {
         self.cleanup.mark_turn();
         // 已投递的future不受等待端取消影响；成功后同一worker持有唯一Response。
         let capture = self.source.capture();
-        let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline()).await?;
+        let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline(), self.source.dispatch_tracker()).await?;
         self.reader = Some(Reader::new(response, &record.ids.conversation, capture));
         Ok(())
     }

@@ -59,6 +59,10 @@ const upstream = http.createServer(async (request, response) => {
   }
   response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
   response.write(frame({ choices: [{ index: 0, delta: { role: 'assistant' } }] }))
+  if (mode === 'hold-control') {
+    response.once('close', () => { closedHolds++ })
+    return
+  }
   if (mode === 'delayed-success') await new Promise(resolve => releases.set(topic, resolve))
   if (response.destroyed) return
   response.write(contentFrame(channel))
@@ -113,6 +117,7 @@ async function until(label, check, timeout = 15000) {
   throw Error(`Timed out: ${label}`)
 }
 async function scenario(name, action) {
+  if (process.env.STICKY_SCENARIO && !name.includes(process.env.STICKY_SCENARIO)) return
   modes.clear()
   try { await action(); passed.push(name); console.log(`PASS ${name}`) }
   catch (error) { failed.push({ name, error: error.stack }); console.error(`FAIL ${name}: ${error.message}`) }
@@ -251,6 +256,21 @@ try {
     assert.equal(await chat(value), 'a')
   })
 
+  await scenario('unsent local request construction errors never freeze a sticky channel', async () => {
+    const created = await ok('/api/custom-providers', { name: 'Unsent authorization fixture', protocol: 'chat_completions',
+      baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
+      keyGroups: [{ id: 'main', name: 'Main', apiKeys: ['unsent\none'], models: ['wire-fixture'], enabled: true }] })
+    const value = await save(group('unsent-construction', { members: [{ id: 'unsent', provider: created.provider.id,
+      model: 'wire-fixture', accountScope: 'all', accounts: [], included: true, weight: 1 }] }))
+    const before = calls.length
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const failed = await request('/v1/chat/completions', chatBody(value.model), { session: value.id })
+      assert.equal(failed.status, 502, 'A local build error must stay a build error rather than route_cooling_down')
+      assert(!JSON.stringify(failed.body).includes('route_cooling_down'))
+    }
+    assert.equal(calls.length, before, 'Invalid headers must never reach the local upstream')
+  })
+
   await scenario('restricted gateway Keys cannot fail over into forbidden channels', async () => {
     const value = await save(group('key-scope'))
     const key = 'only-b-and-c-sticky-test'
@@ -276,6 +296,94 @@ try {
       }
       modes.clear()
       assert.equal(await chat(value), 'b')
+    })
+  }
+
+  for (const sticky of ['auto', 'strict']) await scenario(`cross-request ${sticky} first incomplete reply prefers another account in the same channel`, async () => {
+    const value = await warm('cross-request-account-' + sticky, { sticky })
+    modes.set('a', 'truncated')
+    const first = calls.length
+    await request('/v1/chat/completions', chatBody(value.model, 'first-incomplete', true), { session: value.id })
+    assert.deepEqual(sequence(first), ['a'])
+    const second = calls.length
+    await request('/v1/chat/completions', chatBody(value.model, 'second-incomplete', true), { session: value.id })
+    assert.deepEqual(sequence(second), ['a'], 'Each partially delivered reply must submit only once')
+    assert.notEqual(calls[second].key, calls[first].key, 'The next request must prefer another available account of A')
+    modes.clear()
+    assert.equal(await chat(value), 'b', 'Two incomplete requests must freeze every account of A')
+  })
+
+  await scenario('cross-request completed response on another account resets the channel failure chain', async () => {
+    const value = await warm('cross-request-completed-reset')
+    modes.set('a', 'truncated')
+    const initial = calls.length
+    await request('/v1/chat/completions', chatBody(value.model, 'first-incomplete', true), { session: value.id })
+    modes.clear()
+    assert.equal(await chat(value), 'a')
+    assert.notEqual(calls[initial].key, calls[initial + 1].key)
+    modes.set('a', 'truncated')
+    await request('/v1/chat/completions', chatBody(value.model, 'new-first-incomplete', true), { session: value.id })
+    modes.clear()
+    assert.equal(await chat(value), 'a', 'One failure after a complete success must not freeze A')
+  })
+
+  await scenario('cross-request nested strict affinity rotates accounts before releasing its channel', async () => {
+    const nested = await save(group('cross-request-nested-child', { sticky: 'strict', members: structuredClone(members.slice(0, 2)) }))
+    const value = await save(group('cross-request-nested-parent', { members: [
+      { id: 'nested', group: nested.id, provider: '', model: '', included: true, accounts: [] }, members[2],
+    ] }))
+    assert.equal(await chat(value), 'a')
+    modes.set('a', 'truncated')
+    const first = calls.length
+    for (let index = 0; index < 2; index++) {
+      const before = calls.length
+      await request('/v1/chat/completions', chatBody(value.model, 'nested-incomplete-' + index, true), { session: value.id })
+      assert.equal(calls.length, before + 1)
+    }
+    assert.notEqual(calls[first].key, calls[first + 1].key)
+    modes.clear()
+    assert.equal(await chat(value), 'b')
+  })
+
+  for (const stage of ['before-content', 'before-first-content', 'after-content']) {
+    await scenario(`cross-request client disconnect ${stage} advances account then freezes the channel`, async () => {
+      const value = await warm('cross-request-disconnect-' + stage)
+      const start = calls.length
+      modes.set('a', stage === 'before-content' ? 'slow-headers' : stage === 'before-first-content' ? 'hold-control' : 'hold')
+      for (let index = 0; index < 2; index++) {
+        const previous = calls.length
+        const closed = closedHolds
+        const controller = new AbortController()
+        const pending = fetch(base + '/v1/chat/completions', { method: 'POST',
+          headers: { Authorization: `Bearer ${adminKey}`, 'Content-Type': 'application/json', 'x-session-id': value.id },
+          body: JSON.stringify(chatBody(value.model, `disconnect-${index}`, true)), signal: controller.signal })
+        // Attach a handler before aborting: the pre-header fetch intentionally rejects.
+        pending.catch(() => {})
+        await until('upstream received interrupted request', () => calls.length > previous)
+        if (stage === 'after-content') {
+          const response = await pending
+          const reader = response.body.getReader()
+          let text = ''
+          while (!text.includes('"content":"a"')) {
+            const chunk = await reader.read()
+            assert(!chunk.done)
+            text += new TextDecoder().decode(chunk.value)
+          }
+          controller.abort()
+          await reader.cancel().catch(() => {})
+          await until('interrupted stream closed upstream', () => closedHolds > closed)
+        } else {
+          controller.abort()
+          await pending.catch(() => {})
+          if (stage === 'before-first-content') await until('control-only stream closed upstream', () => closedHolds > closed)
+          else await delay(250)
+        }
+        assert.equal(calls.length, previous + 1, 'An interrupted request must never replay to another upstream')
+      }
+      modes.clear()
+      const next = await chat(value)
+      assert.equal(next, 'b', 'Two interrupted requests must freeze all A accounts for subsequent requests')
+      assert.notEqual(calls[start].key, calls[start + 1].key, 'The second request must prefer the other available account of A')
     })
   }
 
@@ -371,8 +479,8 @@ try {
     assert.equal(await chat(value), 'c', 'Two new failures must still freeze B despite a late success from old A')
   })
 
-  await scenario('client cancellation of an active stream does not count as channel failure', async () => {
-    const value = await warm('client-cancellation')
+  await scenario('explicit manual cancellation of an active stream does not count as channel failure', async () => {
+    const value = await warm('manual-cancellation')
     modes.set('a', 'hold')
     for (let i = 0; i < 2; i++) {
       const closed = closedHolds
@@ -387,6 +495,11 @@ try {
         assert(!next.done)
         text += new TextDecoder().decode(next.value)
       }
+      const active = await until('manual cancellation request row', async () => {
+        const rows = await ok('/api/stats/requests?model=' + encodeURIComponent(value.model))
+        return rows.entries.find(row => row.status === 0 && row.model === value.model)
+      })
+      await ok('/api/stats/requests/terminate?id=' + encodeURIComponent(active.id), {}, { method: 'POST' })
       controller.abort()
       await reader.cancel().catch(() => {})
       await until('upstream cancellation', () => closedHolds > closed)

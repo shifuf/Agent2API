@@ -158,6 +158,13 @@ pub async fn read_upstream_error(
 pub async fn send_chat_request(
     plan: &TransportRequest,
 ) -> Result<reqwest::Response, UpstreamRequestError> {
+    send_chat_request_tracked(plan, None).await
+}
+
+pub(crate) async fn send_chat_request_tracked(
+    plan: &TransportRequest,
+    dispatch: Option<&super::usage::DispatchTracker>,
+) -> Result<reqwest::Response, UpstreamRequestError> {
     // 客户端三选一：账号级代理 → 跟随系统代理（本家能力位，见
     // `TransportRequest::system_proxy_when_unset`）→ 直连
     let client = match plan.proxy.as_ref() {
@@ -165,12 +172,13 @@ pub async fn send_chat_request(
         None if plan.system_proxy_when_unset => egress::client_for_system_proxy(),
         None => egress::client_for(None),
     };
-    send_chat_with_client(plan, &client).await
+    send_chat_with_client(plan, &client, dispatch).await
 }
 
 pub(super) async fn send_chat_with_client(
     plan: &TransportRequest,
     client: &reqwest::Client,
+    dispatch: Option<&super::usage::DispatchTracker>,
 ) -> Result<reqwest::Response, UpstreamRequestError> {
     let multipart = plan.headers.iter().any(|(key, value)| {
         key.eq_ignore_ascii_case("content-type") && value.eq_ignore_ascii_case("multipart/form-data")
@@ -211,7 +219,12 @@ pub(super) async fn send_chat_with_client(
     // 等待响应头有上限（见 headers_timeout 的说明）：超时后 future 被丢弃，
     // 上游连接随之关闭（与客户端断开时的取消是同一机制）
     let headers_budget = headers_timeout();
-    match tokio::time::timeout(headers_budget, builder.send()).await {
+    let send = async {
+        let request = builder.build()?;
+        if let Some(dispatch) = dispatch { dispatch.mark(); }
+        client.execute(request).await
+    };
+    match tokio::time::timeout(headers_budget, send).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(error)) => {
             // `send()` 阶段的超时只可能来自连接（等待响应头由外层计时器管，

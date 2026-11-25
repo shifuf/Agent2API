@@ -87,6 +87,11 @@ pub(crate) struct S3Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SyncStatus {
+    /// Last fully committed upload, independent of downloads and routine data changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_upload: Option<super::policy::UploadState>,
+    #[serde(default)]
+    pub sync_baselines: std::collections::BTreeMap<String, super::policy::UploadState>,
     /// 上次成功同步的时刻（毫秒）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<i64>,
@@ -315,52 +320,59 @@ fn database() -> Option<&'static Db> {
 /// 读整份设置。键不存在 / 解析失败 / 库不可用一律回落默认值 ——
 /// 与 `settings::load` 的容错取向一致（读不出来 = 还没配过）。
 pub(crate) fn load() -> CloudSyncSettings {
-    let Some(db) = database() else {
-        return CloudSyncSettings::default();
-    };
-    let text = db
-        .with(|conn| {
-            conn.query_row(
-                "SELECT value FROM kv WHERE key = ?1",
-                rusqlite::params![KV_KEY],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
-        .flatten();
-    let Some(text) = text else {
-        return CloudSyncSettings::default();
-    };
-    let mut settings: CloudSyncSettings = serde_json::from_str(&text).unwrap_or_default();
-    // 老版本 / 手改数据里的空路径要收口，否则远端路径会算成 `/v1/default`
+    database().map(load_from).unwrap_or_default()
+}
+
+fn read_connection(conn: &rusqlite::Connection) -> CloudSyncSettings {
+    let text = conn.query_row("SELECT value FROM kv WHERE key = ?1",
+        rusqlite::params![KV_KEY], |row| row.get::<_, String>(0)).ok();
+    let mut settings: CloudSyncSettings = text
+        .and_then(|value| serde_json::from_str(&value).ok()).unwrap_or_default();
     settings.normalize();
     settings
 }
 
-/// 整份写回（增删改都走它）。返回落库结果，调用方在锁外记日志。
-pub(crate) fn save(settings: &CloudSyncSettings) -> Result<(), String> {
-    let db = database().ok_or_else(|| "数据库不可用，云同步设置未保存".to_string())?;
-    let text = serde_json::to_string(settings)
-        .map_err(|error| format!("云同步设置序列化失败: {error}"))?;
-    db.with(|conn| {
-        conn.execute(
-            "INSERT INTO kv (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![KV_KEY, text],
-        )
-        .map(|_| ())
-        .map_err(|error| format!("保存云同步设置失败: {error}"))
-    })
-    .ok_or_else(|| "数据库不可用，云同步设置未保存".to_string())?
+fn load_from(db: &Db) -> CloudSyncSettings {
+    db.with(read_connection).unwrap_or_default()
 }
 
-/// 只更新状态字段（成功后 / 失败后调用）。读-改-写整份。
+fn write_connection(conn: &rusqlite::Connection, settings: &CloudSyncSettings) -> Result<(), String> {
+    let text = serde_json::to_string(settings)
+        .map_err(|error| format!("云同步设置序列化失败: {error}"))?;
+    conn.execute("INSERT INTO kv (key, value) VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![KV_KEY, text]).map(|_| ())
+        .map_err(|error| format!("保存云同步设置失败: {error}"))
+}
+
+#[cfg(test)]
+fn write_full(db: &Db, settings: &CloudSyncSettings) -> Result<(), String> {
+    db.with(|conn| write_connection(conn, settings))
+        .ok_or_else(|| "数据库不可用，云同步设置未保存".to_string())?
+}
+
+/// Configuration is prepared outside the database mutex (secret sealing can
+/// access other stores), then merged with the latest status in one critical section.
+fn save_configuration(db: &Db, mut settings: CloudSyncSettings) -> Result<CloudSyncSettings, String> {
+    db.with(|conn| {
+        settings.status = read_connection(conn).status;
+        write_connection(conn, &settings)?;
+        Ok(settings)
+    }).ok_or_else(|| "数据库不可用，云同步设置未保存".to_string())?
+}
+
+fn update_status_in(db: &Db, patch: impl FnOnce(&mut SyncStatus)) -> Result<(), String> {
+    db.with(|conn| {
+        let mut settings = read_connection(conn);
+        patch(&mut settings.status);
+        write_connection(conn, &settings)
+    }).ok_or_else(|| "数据库不可用，云同步设置未保存".to_string())?
+}
+
 pub(crate) fn update_status(patch: impl FnOnce(&mut SyncStatus)) {
-    let mut settings = load();
-    patch(&mut settings.status);
-    if let Err(error) = save(&settings) {
-        // 状态写不进去不该让同步本身报错（与 cc-switch 的 best-effort 同义），
-        // 但必须留痕：下一次打开设置看不到「上次同步时间」时要知道原因。
+    let result = database().ok_or_else(|| "数据库不可用，云同步设置未保存".to_string())
+        .and_then(|db| update_status_in(db, patch));
+    if let Err(error) = result {
         crate::server::logging::log("[CloudSync]", &format!("⚠️ 同步状态写入失败: {error}"));
     }
 }
@@ -398,7 +410,8 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     settings.webdav.username = input.webdav_username;
     settings.webdav.user_agent = input.webdav_user_agent;
     // 空串 = 沿用旧值；非空 = 换新（加密后落库）
-    if !input.webdav_password.is_empty() {
+    if !input.webdav_password.is_empty()
+        && settings.webdav_password_plain().ok().as_deref() != Some(input.webdav_password.as_str()) {
         settings.webdav.password = crypto::seal(
             input.webdav_password.as_bytes(),
             SecretScope::CloudSync,
@@ -407,7 +420,8 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     settings.s3.region = input.s3_region;
     settings.s3.bucket = input.s3_bucket;
     settings.s3.access_key_id = input.s3_access_key_id;
-    if !input.s3_secret_access_key.is_empty() {
+    if !input.s3_secret_access_key.is_empty()
+        && settings.s3_secret_plain().ok().as_deref() != Some(input.s3_secret_access_key.as_str()) {
         settings.s3.secret_access_key = crypto::seal(
             input.s3_secret_access_key.as_bytes(),
             SecretScope::CloudSync,
@@ -415,7 +429,8 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     }
     settings.s3.endpoint = input.s3_endpoint;
     settings.s3.user_agent = input.s3_user_agent;
-    if !input.sync_password.is_empty() {
+    if !input.sync_password.is_empty()
+        && settings.sync_password_plain().ok().flatten().as_deref() != Some(input.sync_password.as_str()) {
         if input.sync_password.chars().count() < MIN_PASSWORD_LEN {
             return Err(format!("同步密码至少需要 {MIN_PASSWORD_LEN} 位"));
         }
@@ -428,13 +443,40 @@ pub(crate) fn apply_save(input: SaveInput) -> Result<CloudSyncSettings, String> 
     settings.profile = input.profile;
     settings.normalize();
     settings.validate()?;
-    save(&settings)?;
-    Ok(settings)
+    let db = database().ok_or_else(|| "数据库不可用，云同步设置未保存".to_string())?;
+    save_configuration(db, settings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_a_prepared_configuration_preserves_newly_committed_daily_baselines() {
+        let (db, _file) = crate::server::db::test_temp::TempDb::open("cloud-settings-atomic-merge");
+        let initial = CloudSyncSettings::default();
+        write_full(&db, &initial).unwrap();
+        // A settings request prepared before a concurrent successful upload must
+        // merge its configuration with the status present at commit time.
+        let mut prepared = load_from(&db);
+        prepared.profile = "other".to_string();
+        let uploaded = super::super::policy::UploadState {
+            scope: "daily-target-a".to_string(), uploaded_at: 1795500000000,
+            account_ids: ["account-one".to_string()].into_iter().collect(),
+            key_fingerprint: Some("local-key".to_string()),
+        };
+        update_status_in(&db, |status| {
+            status.last_upload = Some(uploaded.clone());
+            status.sync_baselines.insert(uploaded.scope.clone(), uploaded.clone());
+        }).unwrap();
+        save_configuration(&db, prepared).unwrap();
+        // Re-open the database, so an in-process recent-upload cache cannot hide loss.
+        let reopened = Db::open(_file.path()).unwrap();
+        let persisted = load_from(&reopened);
+        assert_eq!(persisted.profile, "other");
+        assert_eq!(persisted.status.last_upload.as_ref().map(|v|v.scope.as_str()), Some("daily-target-a"));
+        assert!(persisted.status.sync_baselines.contains_key("daily-target-a"));
+    }
 
     #[test]
     fn default_paths_are_stable() {

@@ -109,6 +109,137 @@ fn temp_service() -> (TempDbDir, UpstreamService, String) {
     (TempDbDir(dir), service, id)
 }
 
+#[test]
+fn sticky_pending_preparation_drop_does_not_fail_an_unsent_channel() {
+    crate::server::config::init(None);
+    let (_dir, service, _) = temp_service();
+    let routing = super::super::route_context::RequestRouting::capture_request(
+        "unsent-sticky", &service.store, &json!({}), None, false, None).unwrap();
+    let candidate = "member-a\0key-one";
+    let telemetry = Arc::new(RequestTelemetry::new());
+    telemetry.set_route_decision(json!({"pickedCandidate":candidate}));
+    telemetry.note_attempt_started("workbuddy", "preparing");
+    // Preparation can close replay admission without dispatching any HTTP call.
+    let replay = telemetry.replay_guard();
+    let call = replay.open_call().unwrap();
+    call.preparation().freeze().unwrap();
+    let lease = service.route.health.begin(&routing.scope, candidate, logging::now_ms()).unwrap();
+    *routing.attempt_health.lock().unwrap() = Some(lease);
+    drop(super::super::route_completion::PendingAttempt::new(&service, &routing, telemetry));
+    assert_eq!(service.route.health.failed_candidate(&routing.scope, candidate), None,
+        "dropping async provider preparation must not penalize an unsent channel");
+}
+
+#[test]
+fn sticky_nested_strict_finds_an_enabled_sibling_after_a_disabled_bound_account() {
+    let (_dir, service, _) = temp_service();
+    let routing = super::super::route_context::RequestRouting::capture_request(
+        "nested-disabled-sticky", &service.store, &json!({}), None, false, None).unwrap();
+    let path = json!([{"groupId":"parent","sticky":"auto"},{"groupId":"child","sticky":"strict"}]);
+    let mut accounts = vec![
+        json!({"id":"key-one","routingMemberId":"member-a","routingCandidateId":"member-a\0key-one","enabled":false,"hasCredentials":true,"routingStrategyPath":path}),
+        json!({"id":"key-two","routingMemberId":"member-a","routingCandidateId":"member-a\0key-two","enabled":true,"hasCredentials":true,"routingStrategyPath":path}),
+    ];
+    let candidate = crate::server::core::routing_groups::attempt_key(&accounts[0]);
+    super::super::route_affinity::bind(&service, &routing, "session", &accounts[0], "test", service.route.sticky_generation());
+    let lease = service.route.health.begin(&routing.scope, &candidate, logging::now_ms()).unwrap();
+    service.route.health.failure(&lease, 60, logging::now_ms(), || {});
+    super::super::route_affinity::decorate(&service, &routing, "session", &mut accounts, &[])
+        .expect("a usable sibling in the same channel must keep nested strict routing available");
+}
+
+#[tokio::test]
+async fn sticky_strict_failed_binding_does_not_select_a_cooled_sibling() {
+    crate::server::config::init(None);
+    let (_dir, service, _) = temp_service();
+    let provider = "custom-sticky-cooldown-fixture";
+    let mut accounts = Vec::new();
+    for key in ["one", "two"] {
+        let saved = service.store.add_custom_account(provider, &json!({"apiKey":key}), None).unwrap();
+        let mut account = saved.account;
+        account["routingMemberId"] = "member-a".into();
+        account["routingCandidateId"] = format!("member-a\0{}", account["id"].as_str().unwrap()).into();
+        account["routingModel"] = "wire-fixture".into();
+        accounts.push(account);
+    }
+    let model = "sticky/cooldown-fixture";
+    let mut route = super::super::route_context::RequestRouting::capture_request(
+        model, &service.store, &json!({}), None, false, None).unwrap();
+    route.settings.sticky = crate::server::config::StickyMode::Strict;
+    route.group = Some(serde_json::from_value(json!({"id":"cooldown-fixture","model":model,"name":"fixture","strategy":"order","sticky":"strict","members":[]})).unwrap());
+    route.group_projection.accounts = accounts.clone();
+    let bound = crate::server::core::routing_groups::attempt_key(&accounts[0]);
+    let id = accounts[0]["id"].as_str().unwrap();
+    let sibling = accounts[1]["id"].as_str().unwrap();
+    service.route.sticky_bind("session", model, &bound, "fixture", logging::now_ms(), route.sticky_ttl(), service.route.sticky_generation());
+    service.store.cooldown_upstream_account(id, logging::now_ms() + 60_000, "fixture").unwrap();
+    service.store.cooldown_upstream_account(sibling, logging::now_ms() + 60_000, "fixture").unwrap();
+    let keys = rotate::CooldownKeys::new(model);
+    let target = rotate::select_target_account(&service, &[provider], &keys, &[], None, "session", &route).await.unwrap();
+    assert_eq!(target.account_id.as_deref(), Some(id), "the healthy exact strict binding can bypass soft cooldown");
+    let lease = service.route.health.begin(&route.scope, &bound, logging::now_ms()).unwrap();
+    service.route.health.failure(&lease, 60, logging::now_ms(), || {});
+    let result = rotate::select_target_account(&service, &[provider], &keys, &[], None, "session", &route).await;
+    assert!(result.is_err(), "after failure, strict replacement must honor account-level cooldown");
+}
+
+#[tokio::test]
+async fn sticky_pending_drop_after_http_dispatch_fails_unless_explicitly_cancelled() {
+    crate::server::config::init(None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+    let app = axum::Router::new().route("/messages", axum::routing::post(move || {
+        let accepted = accepted.clone();
+        async move { accepted.send(()).unwrap(); std::future::pending::<String>().await }
+    }));
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for cancel in [false, true] {
+        let (_dir, service, _) = temp_service();
+        let route = super::super::route_context::RequestRouting::capture_request(
+            "dispatch-fixture", &service.store, &json!({}), None, false, None).unwrap();
+        let candidate = "member-a\0one";
+        let telemetry = Arc::new(RequestTelemetry::new());
+        let request_id = format!("sticky-dispatch-{cancel}");
+        let token = cancellation::register(&request_id).unwrap();
+        telemetry.set_cancel_token(token.clone());
+        telemetry.set_route_decision(json!({"pickedCandidate":candidate}));
+        telemetry.note_attempt_started("fixture", "one");
+        *route.attempt_health.lock().unwrap() = Some(service.route.health.begin(&route.scope, candidate, logging::now_ms()).unwrap());
+        let pending = super::super::route_completion::PendingAttempt::new(&service, &route, telemetry.clone());
+        let transport = TransportRequest { url: format!("http://{address}/messages"), headers: vec![], payload: "{}".into(), proxy: None, system_proxy_when_unset: false };
+        let dispatch = telemetry.dispatch_tracker();
+        {
+            let send = crate::server::core::upstream::request::send_chat_request_tracked(&transport, Some(&dispatch));
+            tokio::pin!(send);
+            tokio::select! {
+                result = &mut send => panic!("headers must remain pending: {}", result.is_ok()),
+                accepted = incoming.recv() => assert_eq!(accepted, Some(())),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("local fixture did not receive request"),
+            }
+        }
+        if cancel { token.cancel(); }
+        drop(pending);
+        assert_eq!(service.route.health.failed_candidate(&route.scope, candidate), if cancel { None } else { Some(candidate.into()) });
+        cancellation::unregister(&request_id);
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn sticky_invalid_request_preparation_and_old_dispatch_do_not_mark_the_new_attempt() {
+    let telemetry = RequestTelemetry::new();
+    telemetry.note_attempt_started("fixture", "one");
+    let dispatch = telemetry.dispatch_tracker();
+    let transport = TransportRequest { url: "http://127.0.0.1:1".into(), headers: vec![("invalid\nheader".into(), "value".into())], payload: "{}".into(), proxy: None, system_proxy_when_unset: false };
+    assert!(crate::server::core::upstream::request::send_chat_request_tracked(&transport, Some(&dispatch)).await.is_err());
+    assert!(!dispatch.dispatched(), "invalid headers never dispatch");
+    telemetry.clear_active_attempt();
+    telemetry.note_attempt_started("fixture", "two");
+    dispatch.mark();
+    assert!(!telemetry.dispatch_tracker().dispatched(), "late old calls must not taint the new attempt");
+}
+
 /// 本家分类结果 → 记账名单（只取本次这一个键，绕开目录缓存的全局态）。
 fn single(name: &str) -> Vec<String> {
     vec![name.to_string()]

@@ -164,7 +164,11 @@ fn select_target_account_sync(
     conv_key: &str,
     request_routing: &super::route_context::RequestRouting,
 ) -> Result<RouteTarget, GatewayError> {
-    let mut accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
+    let strict_bound = if request_routing.settings.sticky == config::StickyMode::Strict {
+        service.route.snapshot_for_model(conv_key, keys.request_model(), logging::now_ms(), request_routing.sticky_ttl())
+            .sticky_hit.filter(|bound| service.route.health.failed_candidate(&request_routing.scope, bound).is_none())
+    } else { None };
+    let mut accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing), strict_bound.as_deref());
     if accounts.is_empty() && request_routing.sticky_faults() {
         let eligible = request_routing.accounts(accounts_in_providers(service, providers, pinned));
         if let Some(until) = eligible.iter().filter_map(|account| service.route.health.frozen_until(
@@ -173,8 +177,9 @@ fn select_target_account_sync(
         }
     }
     if let Some(candidate) = &request_routing.retry_candidate {
-        if accounts.iter().any(|account| crate::server::core::routing_groups::attempt_key(account) == *candidate) {
-            accounts.retain(|account| crate::server::core::routing_groups::attempt_key(account) == *candidate);
+        let channel = crate::server::core::routing_groups::member_key(candidate);
+        if accounts.iter().any(|account| crate::server::core::routing_groups::member_key(&crate::server::core::routing_groups::attempt_key(account)) == channel) {
+            accounts.retain(|account| crate::server::core::routing_groups::member_key(&crate::server::core::routing_groups::attempt_key(account)) == channel);
         }
     }
     super::route_affinity::decorate(service, request_routing, conv_key, &mut accounts, tried_ids)?;
@@ -219,8 +224,7 @@ fn select_target_account_sync(
     // Strict keeps the bound route across soft quota, concurrency and breaker
     // states, but the current scope, enabled flag and credentials still gate it.
     if request_routing.settings.sticky == config::StickyMode::Strict {
-        let snap = service.route.snapshot_for_model(conv_key, keys.request_model(), logging::now_ms(), request_routing.sticky_ttl());
-        if let Some(bound) = snap.sticky_hit {
+        if let Some(bound) = strict_bound {
             if tried_ids.contains(&bound) { return Err(GatewayError::with_status(503, "严格粘性绑定的候选本次已失败，未切换其他成员").with_code("route_strict_failed")); }
             let account = accounts.iter().find(|account| crate::server::core::routing_groups::attempt_key(account) == bound)
                 .filter(|account| account.get("enabled").and_then(Value::as_bool) != Some(false) && account.get("hasCredentials").and_then(Value::as_bool) != Some(false));
@@ -301,10 +305,11 @@ fn select_target_account_sync(
     let mut plan = if request_routing.group.is_some() && pinned.is_none() {
         service.route.rotate_group(keys.request_model(), &routing::rotation_pools(&candidates),
             &request_routing.rotation_cursors, |group_cursors| {
-                let plan = routing::plan_route(&accounts, keys, &counts, tried_ids, now,
+                let mut plan = routing::plan_route(&accounts, keys, &counts, tried_ids, now,
                     &routing::PlanMeta { strategy: settings.strategy, sunk: &snap.sunk,
                         resting: &snap.resting, open: &snap.open, limiter_blocked: &balance_blocked_ids,
                         cursor: None, provider_cursors: Some(group_cursors), sticky_account: snap.sticky_hit.as_deref() });
+                prefer_unfailed_account(service, request_routing, &mut plan.ordered);
                 let entered = plan.ordered.iter().find(|entry| service.store.get_session_by_id(&entry.id).is_some())
                     .map(|entry| routing::entered_rotation_pools(&entry.account, &accounts, snap.sticky_hit.as_deref()))
                     .unwrap_or_default();
@@ -344,6 +349,7 @@ fn select_target_account_sync(
             },
         );
     }
+    prefer_unfailed_account(service, request_routing, &mut plan.ordered);
     let mut decision = decision_json(&plan, &settings, now);
     decision["scope"] = Value::String(request_routing.scope.clone());
     decision["configSnapshot"] = request_routing.json();
@@ -553,6 +559,7 @@ fn scoped_accounts(
     model: &str,
     pinned: Option<&str>,
     request_routing: Option<&super::route_context::RequestRouting>,
+    strict_bound: Option<&str>,
 ) -> Vec<Value> {
     let accounts = accounts_in_providers(service, providers, pinned);
     let accounts = if let Some(routing) = request_routing.filter(|routing| routing.source_test.is_some()) {
@@ -566,7 +573,7 @@ fn scoped_accounts(
         crate::server::core::account_store::custom_accounts::key_groups::allows_request(
             account, model, crate::server::core::routing_groups::candidate_model(account))
     }).filter(|account| {
-        pinned.is_some() || request_routing.is_some_and(|routing| routing.settings.sticky == config::StickyMode::Strict) || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
+        pinned.is_some() || strict_bound.is_some_and(|bound| crate::server::core::routing_groups::attempt_key(account) == bound) || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
             .is_some_and(|until| until > logging::now_ms())
     }).filter(|account| !request_routing.is_some_and(|routing| routing.sticky_faults()
         && service.route.health.frozen_until(&routing.scope, &crate::server::core::routing_groups::attempt_key(account), logging::now_ms()).is_some())).collect();
@@ -720,7 +727,7 @@ pub(super) fn earliest_limit_reset_at(
     keys: &routing::CooldownKeys<'_>,
 ) -> i64 {
     let now = logging::now_ms();
-    let accounts: Vec<Value> = scoped_accounts(service, providers, keys.request_model(), None, None)
+    let accounts: Vec<Value> = scoped_accounts(service, providers, keys.request_model(), None, None, None)
         .into_iter()
         .filter(|account| !matches!(account.get("enabled"), Some(Value::Bool(false))))
         .collect();
@@ -846,7 +853,7 @@ pub(super) fn pick_next_account(
     if tried_ids.last().is_some_and(|last| !allows_route_skip(service, last)) {
         return None;
     }
-    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing));
+    let accounts = scoped_accounts(service, providers, keys.request_model(), pinned, Some(request_routing), None);
     // 换号顺延与第一级选路同一份候选剔除：被限制器拦下的账号不会在 429 之后
     // 被当作「下一个」重新塞进来
     let (candidates, balance_blocked_ids) = filter_limiter_blocked(&accounts, keys, pinned);
@@ -869,6 +876,26 @@ pub(super) fn pick_next_account(
     };
     let plan = routing::plan_route(&candidates, keys, &counts, tried_ids, now, &meta);
     plan.ordered.into_iter().next().map(|entry| entry.account)
+}
+
+/// Apply the channel's failure preference only after normal eligibility checks.
+/// A failed account never authorizes a disabled, cooled, or out-of-scope sibling.
+fn prefer_unfailed_account(service: &UpstreamService, request: &super::route_context::RequestRouting,
+    ordered: &mut Vec<routing::PlanEntry>) {
+    if !request.sticky_faults() { return; }
+    let Some(first) = ordered.first() else { return; };
+    let first_candidate = crate::server::core::routing_groups::attempt_key(&first.account);
+    let Some(failed) = service.route.health.failed_candidate(&request.scope, &first_candidate) else { return; };
+    let channel = crate::server::core::routing_groups::member_key(&first_candidate);
+    let alternative = ordered.iter().position(|entry| {
+        let candidate = crate::server::core::routing_groups::attempt_key(&entry.account);
+        candidate != failed && crate::server::core::routing_groups::member_key(&candidate) == channel
+    });
+    if let Some(index) = alternative.filter(|index| *index > 0) {
+        let mut selected = ordered.remove(index);
+        selected.reason = "粘滞渠道首次失败，优先同渠道其它可用账号".into();
+        ordered.insert(0, selected);
+    }
 }
 
 /// 选路决策快照（请求日志「路由回放」的数据源）。

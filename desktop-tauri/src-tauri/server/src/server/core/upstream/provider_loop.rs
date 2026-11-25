@@ -540,10 +540,10 @@ pub(super) async fn forward_with_providers(
         let previous_attempts = ctx.telemetry.snapshot().attempts_detail.len();
         ctx.telemetry.clear_active_attempt();
         *ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        let _pending_attempt = super::route_completion::PendingAttempt::new(service, &ctx.routing, ctx.telemetry.clone());
         let result = super::route_content::during_send(attempt_queue(service, &ctx, &provider_ids, slot, connections),
             &ctx.routing, ctx.telemetry, patience_until).await;
         let snapshot = ctx.telemetry.snapshot();
-        let lease = ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()).take();
         let active_attempt = ctx.telemetry.active_attempt();
         let candidate_elapsed = active_attempt.as_ref().map(|attempt| attempt.started_at)
             .map(|at| logging::now_ms().saturating_sub(at).max(0) as u64).unwrap_or(0);
@@ -562,6 +562,7 @@ pub(super) async fn forward_with_providers(
             Ok(ForwardOutcome::Stream { status, stream }) => super::route_content::hold(stream, deadline).await.map(|stream| ForwardOutcome::Stream { status, stream }),
             other => other,
         };
+        let lease = ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()).take();
         match result {
             Ok(outcome) => {
                 let completion = super::route_completion::RouteCompletion::new(service, &ctx.routing, &conv_key, &model,
@@ -577,7 +578,11 @@ pub(super) async fn forward_with_providers(
                 if ctx.telemetry.replay_guard().blocked() { error.retry_forbidden = true; }
                 ctx.telemetry.finish_last_attempt(Some(error.status_code as i64), Some(&error.message));
                 if sticky_faults && super::route_content::channel_fault(&error) {
-                    if let Some(lease) = &lease {
+                    // Local request construction can return a gateway error without
+                    // contacting the channel. Settle only its actual dispatched attempt.
+                    if let Some(lease) = lease.as_ref().filter(|lease|
+                        ctx.telemetry.active_attempt().is_some_and(|attempt|
+                            attempt.candidate_id == lease.candidate && attempt.dispatch.dispatched())) {
                         if let Some(failure) = ctx.routing.with_current_configuration(||
                             service.route.channel_failure(lease, ctx.routing.settings.breaker_timeout_seconds, logging::now_ms())) {
                             if !super::route_content::transient(&error) || rounds >= max_rounds { return Err(error); }
@@ -2954,10 +2959,10 @@ async fn send_or_cancel(
     telemetry: &crate::server::core::upstream::usage::RequestTelemetry,
 ) -> Result<reqwest::Response, super::request::UpstreamRequestError> {
     let Some(token) = telemetry.cancel_token() else {
-        return network.send().await;
+        return network.send(telemetry).await;
     };
     tokio::select! {
-        result = network.send() => result,
+        result = network.send(telemetry) => result,
         _ = token.cancelled() => Err(super::request::UpstreamRequestError {
             message: cancellation::MANUAL_TERMINATED.to_string(),
             reason: cancellation::MANUAL_TERMINATED.to_string(),

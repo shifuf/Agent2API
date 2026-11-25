@@ -123,10 +123,17 @@ impl Snapshot {
     /// 直接哈希**序列化后的字节**：两次构建的字段顺序由 `BTreeMap` 与
     /// `serde_json` 的结构化序列化保证稳定，不必自己做规范化。
     pub(crate) fn content_hash(&self) -> String {
-        match serde_json::to_vec(self) {
+        let mut content = self.clone();
+        content.exported_at = 0;
+        match serde_json::to_vec(&content) {
             Ok(bytes) => super::sha256_hex(&bytes),
             Err(_) => String::new(),
         }
+    }
+
+    pub(crate) fn account_ids(&self) -> std::collections::BTreeSet<String> {
+        self.tables.get("accounts").into_iter().flatten()
+            .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_owned)).collect()
     }
 
     /// 行数摘要（界面展示「这份快照里有多少数据」）
@@ -524,6 +531,13 @@ mod tests {
         assert!(!is_synced_kv_key("backgroundTaskState"));
     }
 
+    #[test]
+    fn unchanged_data_hash_does_not_depend_on_export_time() {
+        let (db, _guard) = crate::server::db::test_temp::TempDb::open("cloud-sync-stable-hash");
+        let a = db.with(|conn| build_conn(conn, 1000)).unwrap().unwrap();
+        let b = db.with(|conn| build_conn(conn, 2000)).unwrap().unwrap();
+        assert_eq!(a.content_hash(), b.content_hash());
+    }
     #[test]
     fn apply_rejects_newer_schema() {
         let snapshot = Snapshot {

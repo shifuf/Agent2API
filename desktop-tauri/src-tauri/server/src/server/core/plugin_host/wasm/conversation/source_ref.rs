@@ -33,6 +33,7 @@ struct Source {
     key_source: Option<Arc<crate::server::config::model_key_source::Source>>,
     output: Weak<super::super::catpaw_turn::output::OutputSlot>,
     capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
+    dispatch: crate::server::core::upstream::usage::DispatchTracker,
 }
 
 #[derive(Clone)]
@@ -84,7 +85,7 @@ impl Context {
             egress: Arc::downgrade(&call.egress),
             material, key_source,
             output: call.output.as_ref().map(Arc::downgrade).ok_or_else(unavailable)?,
-            capture: call.capture.clone(),
+            capture: call.capture.clone(), dispatch: call.dispatch.clone(),
         });
         state.source_issued = true;
         Ok(SourceRef { source })
@@ -92,6 +93,7 @@ impl Context {
 }
 
 impl SourceRef {
+    pub(in crate::server::core::plugin_host::wasm) fn dispatch_tracker(&self) -> &crate::server::core::upstream::usage::DispatchTracker { &self.source.dispatch }
     pub(in crate::server::core::plugin_host::wasm) fn provider(&self) -> &str { &self.source.provider }
     pub(in crate::server::core::plugin_host::wasm) fn material(&self) -> &CatPawMaterial { self.source.material.as_ref() }
     pub(in crate::server::core::plugin_host::wasm) fn account(&self) -> &str { &self.source.account }

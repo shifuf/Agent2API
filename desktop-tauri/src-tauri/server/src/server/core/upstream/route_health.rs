@@ -15,6 +15,7 @@ pub(super) struct ChannelLease {
 
 struct ChannelEntry {
     failures: u32,
+    failed_candidate: Option<String>,
     frozen_until: i64,
     last_seen: i64,
     generation: u64,
@@ -55,13 +56,14 @@ impl RouteHealth {
             }
             table.generation = table.generation.wrapping_add(1);
             let generation = table.generation;
-            table.entries.insert(key.clone(), ChannelEntry { failures: 0, frozen_until: 0, last_seen: now, generation });
+            table.entries.insert(key.clone(), ChannelEntry { failures: 0, failed_candidate: None, frozen_until: 0, last_seen: now, generation });
         }
         if table.entries.get(&key).is_some_and(|entry| entry.frozen_until > 0 && entry.frozen_until <= now) {
             table.generation = table.generation.wrapping_add(1);
             let generation = table.generation;
             let entry = table.entries.get_mut(&key).expect("entry exists");
             entry.failures = 0;
+            entry.failed_candidate = None;
             entry.frozen_until = 0;
             entry.generation = generation;
         }
@@ -74,6 +76,12 @@ impl RouteHealth {
     pub fn frozen_until(&self, scope: &str, candidate: &str, now: i64) -> Option<i64> {
         self.table.lock().unwrap_or_else(|error| error.into_inner()).entries.get(&channel_key(scope, candidate))
             .map(|entry| entry.frozen_until).filter(|until| *until > now)
+    }
+
+    /// Only a completed response clears this preference across requests.
+    pub fn failed_candidate(&self, scope: &str, candidate: &str) -> Option<String> {
+        self.table.lock().unwrap_or_else(|error| error.into_inner()).entries.get(&channel_key(scope, candidate))
+            .and_then(|entry| entry.failed_candidate.clone())
     }
 
     /// Both callbacks run under the health lock, always health -> sticky. A
@@ -91,6 +99,7 @@ impl RouteHealth {
         } else { lease.generation };
         let entry = table.entries.get_mut(&key).expect("entry exists");
         entry.failures = failures;
+        entry.failed_candidate = Some(lease.candidate.clone());
         entry.last_seen = now;
         entry.generation = generation;
         let frozen_until = if failures >= 2 {
@@ -107,6 +116,7 @@ impl RouteHealth {
         let Some(entry) = table.entries.get_mut(&channel_key(&lease.scope, &lease.candidate)) else { return false; };
         if entry.generation != lease.generation || entry.frozen_until > 0 { return false; }
         entry.failures = 0;
+        entry.failed_candidate = None;
         entry.last_seen = now;
         on_success();
         true

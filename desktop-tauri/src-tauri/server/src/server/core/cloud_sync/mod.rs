@@ -35,11 +35,13 @@
 pub(crate) mod auto_sync;
 pub(crate) mod keyfile;
 pub(crate) mod manifest;
+pub(crate) mod policy;
 pub(crate) mod s3;
 pub(crate) mod settings;
 pub(crate) mod snapshot;
 pub(crate) mod transport;
 pub(crate) mod webdav;
+mod xml;
 
 use std::sync::OnceLock;
 
@@ -98,6 +100,7 @@ pub(crate) fn save_settings(input: settings::SaveInput) -> Result<Value, String>
             if saved.enabled { "（已启用）" } else { "（未启用）" }
         ),
     );
+    auto_sync::notify_change();
     Ok(saved.public_json())
 }
 
@@ -259,19 +262,70 @@ pub(crate) async fn upload_locked(
     transport
         .put(REMOTE_SNAPSHOT, snapshot_bytes.clone(), "application/json")
         .await?;
-    if let Some(envelope) = key_envelope {
+    if let Some(envelope) = key_envelope.as_ref() {
         transport
-            .put(REMOTE_KEY_FILE, envelope, "application/json")
+            .put(REMOTE_KEY_FILE, envelope.clone(), "application/json")
             .await?;
     }
     transport
-        .put(REMOTE_MANIFEST, manifest_bytes, "application/json")
+        .put(REMOTE_MANIFEST, manifest_bytes.clone(), "application/json")
         .await?;
 
+    let uploaded_at = logging::now_ms();
+    let date = policy::day_label(uploaded_at);
+    let history = format!("history/{date}");
+    let previous_history = transport.get(&format!("{history}/{REMOTE_MANIFEST}"),manifest::MAX_MANIFEST_BYTES).await?
+        .and_then(|bytes|serde_json::from_slice::<manifest::SyncManifest>(&bytes).ok());
+    // Immutable generation artifacts preserve the previous day's committed backup on a failed update.
+    let generation = manifest.snapshot_id.clone();
+    let staged = format!("{history}/{generation}");
+    let mut history_manifest = manifest.clone();
+    history_manifest.artifacts = manifest.artifacts.iter()
+        .map(|(name,meta)|(format!("{generation}/{name}"),meta.clone())).collect();
+    history_manifest.snapshot_id = manifest::snapshot_id_of(&history_manifest.artifacts);
+    let history_manifest_bytes = serde_json::to_vec_pretty(&history_manifest).map_err(|e|e.to_string())?;
+    let mut history_commit_attempted = false;
+    let staged_result: Result<(),String> = async {
+        transport.ensure_directory(&staged).await?;
+        transport.put(&format!("{staged}/{REMOTE_SNAPSHOT}"), snapshot_bytes.clone(), "application/json").await?;
+        if let Some(envelope) = key_envelope.as_ref() {
+            transport.put(&format!("{staged}/{REMOTE_KEY_FILE}"), envelope.clone(), "application/json").await?;
+        }
+        // This marker also identifies an interrupted immutable generation as application-owned.
+        transport.put(&format!("{staged}/{REMOTE_MANIFEST}"), manifest_bytes.clone(), "application/json").await?;
+        history_commit_attempted = true;
+        transport.put(&format!("{history}/{REMOTE_MANIFEST}"), history_manifest_bytes, "application/json").await?;
+        Ok(())
+    }.await;
+    if let Err(error) = staged_result {
+        let referenced = previous_history.as_ref().is_some_and(|previous|
+            previous.artifacts.keys().any(|key|key.starts_with(&format!("{generation}/"))));
+        // A failed response cannot prove the remote pointer was not committed.
+        // Keep a complete staged generation until a later successful upload can
+        // identify the current pointer and safely prune unreferenced generations.
+        if !history_commit_attempted && !referenced {
+            let _ = transport.remove_history_artifacts(&staged,&manifest,None).await;
+            let _ = transport.delete_regular(&format!("{staged}/{REMOTE_MANIFEST}")).await;
+        }
+        return Err(error);
+    }
+    if let Some(previous) = previous_history.as_ref() {
+        if let Err(error) = transport.remove_history_artifacts(&history, previous, Some(&history_manifest.artifacts)).await {
+            logging::log_with_level("[CloudSync]", &format!("⚠️ 当天旧历史文件清理失败：{error}"), "warn");
+        }
+    }
+    let upload_state = policy::UploadState {
+        scope: policy::target_scope(settings), uploaded_at,
+        account_ids: snapshot.account_ids(), key_fingerprint: key_fingerprint.clone(),
+    };
+    auto_sync::note_upload(upload_state.clone());
     let content_hash = snapshot.content_hash();
     let snapshot_id = manifest.snapshot_id.clone();
     settings::update_status(|status| {
-        status.last_sync_at = Some(logging::now_ms());
+        status.last_upload = Some(upload_state.clone());
+        status.sync_baselines.insert(upload_state.scope.clone(),upload_state.clone());
+        prune_baselines(&mut status.sync_baselines, uploaded_at);
+        status.last_sync_at = Some(uploaded_at);
         status.last_action = Some("upload".to_string());
         status.last_snapshot_id = Some(snapshot_id.clone());
         status.last_local_hash = Some(content_hash.clone());
@@ -279,6 +333,9 @@ pub(crate) async fn upload_locked(
         status.last_error = None;
         status.last_error_source = None;
     });
+    if let Err(error) = transport.prune_history(uploaded_at).await {
+        logging::log_with_level("[CloudSync]", &format!("⚠️ 七天历史备份清理失败，下次上传将重试：{error}"), "warn");
+    }
     logging::log(
         "[CloudSync]",
         &format!(
@@ -318,7 +375,7 @@ pub(crate) async fn download_locked(
     settings: &settings::CloudSyncSettings,
 ) -> Result<Value, String> {
     let transport = Transport::from_settings(settings)?;
-    let Some((manifest_bytes, manifest)) = transport.get_manifest().await? else {
+    let Some((_manifest_bytes, manifest)) = transport.get_manifest().await? else {
         return Err("远端还没有可下载的同步数据".to_string());
     };
     manifest::validate_compat(&manifest)?;
@@ -356,15 +413,22 @@ pub(crate) async fn download_locked(
         applied
     };
 
-    let manifest_hash = sha256_hex(&manifest_bytes);
+    let current = snapshot::build(db)?;
+    let content_hash = current.content_hash();
+    let synchronized_at = logging::now_ms();
+    let baseline = policy::UploadState { scope: policy::target_scope(settings), uploaded_at: synchronized_at,
+        account_ids: current.account_ids(), key_fingerprint: crypto::key_fingerprint(SecretScope::Accounts) };
+    auto_sync::note_upload(baseline.clone());
     let snapshot_id = manifest.snapshot_id.clone();
     let device = manifest.device_name.clone();
     let created_at = manifest.created_at.clone();
     settings::update_status(|status| {
+        status.sync_baselines.insert(baseline.scope.clone(),baseline.clone());
+        prune_baselines(&mut status.sync_baselines, synchronized_at);
         status.last_sync_at = Some(logging::now_ms());
         status.last_action = Some("download".to_string());
         status.last_snapshot_id = Some(snapshot_id.clone());
-        status.last_local_hash = Some(manifest_hash.clone());
+        status.last_local_hash = Some(content_hash.clone());
         status.last_key_fingerprint = manifest.key_fingerprint.clone();
         status.last_error = None;
         status.last_error_source = None;
@@ -458,4 +522,12 @@ pub(crate) fn record_failure(error: &str, source: &str) {
         ),
         "warn",
     );
+}
+
+fn prune_baselines(states: &mut std::collections::BTreeMap<String, policy::UploadState>, now: i64) {
+    states.retain(|_,state| policy::day_number(state.uploaded_at) >= policy::day_number(now) - 7);
+    while states.len() > 32 {
+        let oldest = states.iter().min_by_key(|(_,state)|state.uploaded_at).map(|(scope,_)|scope.clone());
+        if let Some(scope) = oldest { states.remove(&scope); } else { break; }
+    }
 }

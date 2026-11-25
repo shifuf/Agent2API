@@ -33,7 +33,8 @@ pub(super) fn decorate(service: &UpstreamService, route: &RequestRouting, conver
                 .snapshot_for_model(&key, &model, now, routing::sticky_ttl_ms(mode)).sticky_hit);
             let hit = binding.as_deref() == Some(candidate.as_str());
             ranks.push(hit);
-            if hit && mode == config::StickyMode::Strict { account["routingStrict"] = true.into(); }
+            if hit && mode == config::StickyMode::Strict
+                && service.route.health.failed_candidate(&route.scope, &candidate).is_none() { account["routingStrict"] = true.into(); }
             if mode == config::StickyMode::Strict {
                 if let Some(binding) = binding.as_ref() {
                     if !strict.iter().any(|(pool, _): &(String, String)| pool == &model) { strict.push((model, binding.clone())); }
@@ -44,13 +45,19 @@ pub(super) fn decorate(service: &UpstreamService, route: &RequestRouting, conver
     }
     for (model, bound) in strict {
         if tried.contains(&bound) { return Err(GatewayError::with_status(503, "嵌套严格粘性成员本次已失败，未切换其余成员").with_code("route_strict_failed")); }
-        let available = accounts.iter().find(|account| routing_groups::attempt_key(account) == bound)
-            .is_some_and(|account| account.get("enabled").and_then(Value::as_bool) != Some(false) && account.get("hasCredentials").and_then(Value::as_bool) != Some(false));
+        let failed = service.route.health.failed_candidate(&route.scope, &bound).is_some();
+        let matches = |account: &Value| {
+            let candidate = routing_groups::attempt_key(account);
+            if failed { routing_groups::member_key(&candidate) == routing_groups::member_key(&bound) }
+            else { candidate == bound }
+        };
+        let available = accounts.iter().any(|account| matches(account)
+            && account.get("enabled").and_then(Value::as_bool) != Some(false) && account.get("hasCredentials").and_then(Value::as_bool) != Some(false));
         if !available { return Err(GatewayError::with_status(503, "嵌套严格粘性成员不再可用").with_code("route_strict_unavailable")); }
         accounts.retain(|account| {
             let policies = account.get("routingStrategyPath").and_then(Value::as_array).cloned().unwrap_or_default();
             let belongs = (1..policies.len()).any(|depth| layer_model(route, &policies, depth) == model);
-            !belongs || routing_groups::attempt_key(account) == bound
+            !belongs || matches(account)
         });
     }
     Ok(())

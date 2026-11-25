@@ -59,6 +59,10 @@ impl Drop for Opening {
 }
 
 pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
+    open_tracked(params, None).await
+}
+
+pub(in crate::server::core::plugin_host) async fn open_tracked(params: &Value, dispatch: Option<&crate::server::core::upstream::usage::DispatchTracker>) -> Result<Value, proto::WireError> {
     let mut url = url::Url::parse(params["url"].as_str().unwrap_or(""))
         .map_err(|_| error("WebSocket 地址无效"))?;
     if !matches!(url.scheme(), "ws" | "wss") || url.host_str().is_none()
@@ -118,7 +122,9 @@ pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
     let mut opening = Opening(Some(id.clone()));
     let wait = Duration::from_millis(crate::server::config::timeout_settings().headers_ms().clamp(1000, 600_000));
     let connected = async {
-        let response = request.send().await.map_err(|failure| error(egress::describe_error_detail(&failure)))?;
+        let request = request.build().map_err(|failure| error(egress::describe_error_detail(&failure)))?;
+        if let Some(dispatch) = dispatch { dispatch.mark(); }
+        let response = client.execute(request).await.map_err(|failure| error(egress::describe_error_detail(&failure)))?;
         if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
             return Err(error(format!("WebSocket 握手失败：HTTP {}", response.status().as_u16())));
         }

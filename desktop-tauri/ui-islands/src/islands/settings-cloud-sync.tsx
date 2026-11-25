@@ -299,7 +299,7 @@ export function CloudSyncPanel({ active = true }: { active?: boolean }) {
           <span
             className='tip-q'
             data-tip={t(
-              '把账号、网关配置、自定义提供商、Agent 配置、代理池 / 订阅、签到与余额记录同步到 WebDAV 或 S3 兼容存储，换台机器后一键取回。事件日志、请求明细、调试报文与面板登录态不在同步范围内（它们是本机的运行痕迹）。上传的账号凭证仍是加密形态，解密用的账号密钥由「同步密码」单独加密后一并上传 —— 同步密码不会保存到云端，换机下载时需要重新输入。'
+              '把账号、网关配置、自定义提供商、代理池 / 订阅、签到与余额记录同步到 WebDAV 或 S3 兼容存储，换台机器后一键取回。事件日志、请求明细、调试报文与面板登录态不在同步范围内（它们是本机的运行痕迹）。上传的账号凭证仍是加密形态，解密用的账号密钥由「同步密码」单独加密后一并上传 —— 同步密码不会保存到云端，换机下载时需要重新输入。'
             )}
           ></span>
           <Badge variant={loadError ? 'destructive' : view?.enabled ? 'success' : 'outline'}>
@@ -554,7 +554,7 @@ export function CloudSyncPanel({ active = true }: { active?: boolean }) {
                     onCheckedChange={checked => patch({ autoSync: checked })}
                   />
                   <div className='hint'>
-                    {t('本地账号、配置、签到与余额记录变化后自动上传（合并 1 秒内的连续改动，最长 10 秒传一次；内容没变时不发请求）。')}
+                    {t('每天自动上传一次（北京时间）；新增账号时补传并更新当天备份。余额、签到与凭据刷新不会反复上传，历史备份只保留最近七天。')}
                   </div>
                 </div>
                 <div className='retention-row'>
@@ -636,7 +636,7 @@ export function CloudSyncPanel({ active = true }: { active?: boolean }) {
           </DialogHeader>
           <DialogBody>
             <div>
-              {t('本机的业务数据（账号、配置、Agent 配置、代理池 / 订阅、签到与余额记录）将上传并')}
+              {t('本机的业务数据（账号、配置、代理池 / 订阅、签到与余额记录）将上传并')}
               <strong>{t('覆盖')}</strong>
               {t('远端同一路径下的旧快照。事件日志、请求明细与调试报文不会上传。')}
             </div>
@@ -673,7 +673,7 @@ export function CloudSyncPanel({ active = true }: { active?: boolean }) {
           </DialogHeader>
           <DialogBody>
             <Alert variant='destructive' className='danger-zone'>
-              {t('本机的账号、网关配置、Agent 配置、代理池 / 订阅、签到与余额记录将被远端快照')}
+              {t('本机的账号、网关配置、代理池 / 订阅、签到与余额记录将被远端快照')}
               <strong>{t('整体替换')}</strong>
               {t('。事件日志、请求明细、调试报文与面板登录态保持不变。替换前会自动把当前业务数据备份到配置目录的 backups/ 下。')}
             </Alert>

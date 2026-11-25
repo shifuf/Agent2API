@@ -200,6 +200,14 @@ impl Stream for ObservedStream {
     }
 }
 
+impl Drop for ObservedStream {
+    fn drop(&mut self) {
+        // Only actual EOF above can settle success. A client closing its body
+        // leaves the next request to fail over; never replay a partial reply.
+        self.record(false);
+    }
+}
+
 pub(super) async fn deliver(outcome: ForwardOutcome, telemetry: Arc<RequestTelemetry>, started: Instant, first: Option<f64>, slot: Option<InFlightGuard>, stream: bool, completion: Option<RouteCompletion>) -> Result<ForwardOutcome, GatewayError> {
     match outcome {
         ForwardOutcome::Stream { status, stream: inner } => {

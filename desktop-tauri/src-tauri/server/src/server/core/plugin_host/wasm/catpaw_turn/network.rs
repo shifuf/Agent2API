@@ -117,6 +117,7 @@ pub(super) async fn short(
     route: Route,
     conversation: &str,
     call_deadline: Option<Instant>,
+    dispatch: Option<&crate::server::core::upstream::usage::DispatchTracker>,
 ) -> Result<RoundReceipt, proto::WireError> {
     if matches!(route, Route::Catalog | Route::Turn) || prepared.route != route {
         return Err(error::invalid());
@@ -125,12 +126,11 @@ pub(super) async fn short(
     let deadline = Instant::now() + if route == Route::Stop { Duration::from_secs(3) } else { CONTROL_TIMEOUT };
     let deadline = call_deadline.map_or(deadline, |original| deadline.min(original));
     if Instant::now() >= deadline { return Err(error::unknown()); }
+    let client = client.client().map_err(|_| error::unknown())?;
+    if let Some(dispatch) = dispatch { dispatch.mark(); }
     let response = tokio::time::timeout_at(
         deadline,
-        client
-            .client()
-            .map_err(|_| error::unknown())?
-            .execute(request),
+        client.execute(request),
     )
     .await
     .map_err(|_| error::unknown())?
@@ -184,6 +184,7 @@ pub(super) async fn open_turn(
     prepared: PreparedRequest,
     capture: Option<&Arc<crate::server::core::debug_traffic::TrafficCapture>>,
     call_deadline: Instant,
+    dispatch: &crate::server::core::upstream::usage::DispatchTracker,
 ) -> Result<reqwest::Response, proto::WireError> {
     if prepared.route != Route::Turn {
         return Err(error::invalid());
@@ -198,12 +199,11 @@ pub(super) async fn open_turn(
     }
     let deadline = call_deadline.min(Instant::now() + CONTROL_TIMEOUT);
     if Instant::now() >= deadline { return Err(error::unknown()); }
+    let client = client.client().map_err(|_| error::unknown())?;
+    dispatch.mark();
     let response = tokio::time::timeout_at(
         deadline,
-        client
-            .client()
-            .map_err(|_| error::unknown())?
-            .execute(request),
+        client.execute(request),
     )
     .await
     .map_err(|_| error::unknown())?

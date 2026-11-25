@@ -8,6 +8,8 @@ fn sticky_failover_two_failures_freeze_all_keys_of_only_the_matching_member() {
     let event = health.failure(&first, 60, 1_001, || panic!("first failure must not unbind"));
     assert_eq!(event.failures, 1);
     assert_eq!(event.frozen_until, None);
+    assert_eq!(health.failed_candidate("entry", "member-a\0key-two").as_deref(), Some("member-a\0key-one"));
+    assert_eq!(health.failed_candidate("entry", "member-b\0key-one"), None);
     let second = health.begin("entry", "member-a\0key-two", 1_002).unwrap();
     let unbound = AtomicUsize::new(0);
     let event = health.failure(&second, 60, 1_002, || { unbound.fetch_add(1, Ordering::SeqCst); });
@@ -26,6 +28,7 @@ fn sticky_failover_completed_success_resets_the_unfrozen_failure_chain() {
     let lease = health.begin("entry", "a\0key", 1_000).unwrap();
     assert_eq!(health.failure(&lease, 60, 1_001, || {}).failures, 1);
     assert!(health.success(&lease, 1_002, || {}));
+    assert_eq!(health.failed_candidate("entry", "a\0another-key"), None);
     assert_eq!(health.failure(&lease, 60, 1_003, || {}).failures, 1);
     assert_eq!(health.frozen_until("entry", "a\0another-key", 1_004), None);
 }
@@ -38,6 +41,7 @@ fn sticky_failover_late_success_and_failure_cannot_change_a_new_health_generatio
     health.failure(&early, 10, 1_002, || {});
     assert!(!health.success(&early, 1_003, || panic!("late success must not restore affinity")));
     let recovered = health.begin("entry", "a\0key", 11_002).unwrap();
+    assert_eq!(health.failed_candidate("entry", "a\0another-key"), None);
     assert!(!health.success(&early, 11_003, || panic!("old success must not bind after expiry")));
     assert_eq!(health.failure(&early, 10, 11_004, || panic!("old failure must not freeze a recovered member")).failures, 0);
     assert_eq!(health.failure(&recovered, 10, 11_005, || {}).failures, 1);

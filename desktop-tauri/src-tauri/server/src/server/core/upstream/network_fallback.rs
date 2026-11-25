@@ -63,10 +63,11 @@ impl Fallback {
         &self.current
     }
 
-    pub async fn send(&mut self) -> Result<reqwest::Response, UpstreamRequestError> {
+    pub async fn send(&mut self, telemetry: &super::usage::RequestTelemetry) -> Result<reqwest::Response, UpstreamRequestError> {
         self.attempts += 1;
+        let dispatch = telemetry.dispatch_tracker();
         if self.policy.is_none() {
-            return request::send_chat_request(&self.current).await;
+            return request::send_chat_request_tracked(&self.current, Some(&dispatch)).await;
         }
         let host = url::Url::parse(&self.current.url)
             .ok()
@@ -89,7 +90,7 @@ impl Fallback {
             safe_to_retry: true,
             network_failure: false,
         })?;
-        request::send_chat_with_client(&self.current, &client).await
+        request::send_chat_with_client(&self.current, &client, Some(&dispatch)).await
     }
 
     pub fn success(&self) {

@@ -71,12 +71,56 @@ pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
     open_body(params, None).await
 }
 
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::server::core::upstream::usage::DispatchTracker;
+
+    #[tokio::test]
+    async fn tracked_plugin_http_and_ws_mark_only_valid_dispatched_requests() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let received = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move || {
+            received.fetch_add(1, Ordering::SeqCst);
+            async { "local fixture" }
+        });
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for websocket in [false, true] {
+            let mut params = json!({"url":format!("{}://{address}/", if websocket { "ws" } else { "http" }),
+                "id":format!("dispatch-fixture-{websocket}"), "headers":{"bad\nheader":"value"}});
+            let rejected = DispatchTracker::default();
+            let before = hits.load(Ordering::SeqCst);
+            let result = if websocket { super::super::websocket::open_tracked(&params, Some(&rejected)).await }
+                else { open_body_tracked(&params, None, Some(&rejected)).await };
+            assert!(result.is_err());
+            assert!(!rejected.dispatched());
+            assert_eq!(hits.load(Ordering::SeqCst), before, "invalid headers must not reach upstream");
+            params["headers"] = json!({});
+            let dispatched = DispatchTracker::default();
+            let result = if websocket { super::super::websocket::open_tracked(&params, Some(&dispatched)).await }
+                else { open_body_tracked(&params, None, Some(&dispatched)).await };
+            assert!(dispatched.dispatched());
+            assert_eq!(hits.load(Ordering::SeqCst), before + 1);
+            if websocket { assert!(result.is_err(), "the local server rejects WS after receiving the handshake"); }
+            else { assert!(result.is_ok()); close(&params); }
+        }
+        task.abort();
+    }
+}
+
 pub(in crate::server::core::plugin_host) enum RequestBody {
     Bytes(bytes::Bytes),
     Multipart(reqwest::multipart::Form),
 }
 
 pub(in crate::server::core::plugin_host) async fn open_body(params: &Value, body: Option<RequestBody>) -> Result<Value, proto::WireError> {
+    open_body_tracked(params, body, None).await
+}
+
+pub(in crate::server::core::plugin_host) async fn open_body_tracked(params: &Value, body: Option<RequestBody>, dispatch: Option<&crate::server::core::upstream::usage::DispatchTracker>) -> Result<Value, proto::WireError> {
     let url = params["url"]
         .as_str()
         .ok_or_else(|| error("脚本请求缺少地址"))?;
@@ -186,8 +230,12 @@ pub(in crate::server::core::plugin_host) async fn open_body(params: &Value, body
     let response = tokio::select! {
         biased;
         _ = download.cancel.cancelled() => return Err(cancellation()),
-        response = tokio::time::timeout(Duration::from_millis(timeout), request.send()) => response
-            .map_err(|_| proto::WireError::with_code("脚本上游连接等待超时", "timeout"))?.map_err(|failure| error(egress::describe_error_detail(&failure)))?,
+        response = tokio::time::timeout(Duration::from_millis(timeout), async {
+            let request = request.build().map_err(|failure| error(egress::describe_error_detail(&failure)))?;
+            if let Some(dispatch) = dispatch { dispatch.mark(); }
+            client.execute(request).await.map_err(|failure| error(egress::describe_error_detail(&failure)))
+        }) => response
+            .map_err(|_| proto::WireError::with_code("脚本上游连接等待超时", "timeout"))??,
     };
     if let Some(capture) = &capture {
         capture.attach_response(response.status().as_u16(), response.headers());

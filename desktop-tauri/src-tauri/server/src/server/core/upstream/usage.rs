@@ -574,6 +574,17 @@ struct LiveWrite {
 pub(super) struct ActiveAttempt {
     pub candidate_id: String,
     pub started_at: i64,
+    pub dispatch: DispatchTracker,
+}
+
+/// A host-owned sending marker captured by one attempt's transports.
+/// An old transport can never mark a later attempt as dispatched.
+#[derive(Clone, Default)]
+pub(crate) struct DispatchTracker(pub(crate) Arc<std::sync::atomic::AtomicBool>);
+
+impl DispatchTracker {
+    pub(crate) fn mark(&self) { self.0.store(true, std::sync::atomic::Ordering::Release); }
+    pub(crate) fn dispatched(&self) -> bool { self.0.load(std::sync::atomic::Ordering::Acquire) }
 }
 
 /// usage 上报槽：转发链路往里写，记账点在收尾时读。
@@ -589,7 +600,7 @@ pub struct RequestTelemetry {
     host_request_defaults: std::sync::OnceLock<host_defaults::HostRequestDefaults>,
     catpaw_output: Mutex<Option<Arc<crate::server::core::plugin_host::wasm::CatPawOutputSlot>>>,
     catpaw_output_taken: std::sync::atomic::AtomicBool,
-    /// Sending state is independent of the bounded, public attempt history.
+    /// Attempt identity and dispatch are independent of bounded public history.
     active_attempt: Mutex<Option<ActiveAttempt>>,
     /// 0 = unknown, 1 = raw EOF without terminal, 2 = raw terminal observed.
     /// Kept outside the public snapshot and read before committing channel health.
@@ -667,6 +678,10 @@ impl RequestTelemetry {
 
     pub(super) fn active_attempt(&self) -> Option<ActiveAttempt> {
         self.active_attempt.lock().unwrap_or_else(|error| error.into_inner()).clone()
+    }
+
+    pub(crate) fn dispatch_tracker(&self) -> DispatchTracker {
+        self.active_attempt().map(|attempt| attempt.dispatch).unwrap_or_default()
     }
 
     pub(super) fn clear_active_attempt(&self) {

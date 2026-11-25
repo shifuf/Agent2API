@@ -1,38 +1,7 @@
-//! 自动同步：本地数据变了 → 防抖合并 → 自动上传。
-//!
-//! ── 触发源为什么分成两路 ────────────────────────────────────
-//! 业务数据落在两类地方：
-//!   · **三张表**（`accounts` / `account_usage_records` / `checkin_records`）——
-//!     用 SQLite 的 `update_hook` 监听。这是最可靠的一路：不管谁写的（账号
-//!     增删改、token 刷新、签到记账、余额查询），钩子都会响。
-//!   · **kv 键**（配置、Agent 配置、代理池 / 订阅）—— 走**显式通知**，不用钩子。
-//!
-//! ── kv 为什么不能用 update_hook ─────────────────────────────
-//! `kv` 表同时承载 `logsNextId` 这类**每秒都在变**的本机状态，钩子必须能分辨
-//! 「改的是哪个键」。而 `update_hook` 的回调是在 SQLite 执行语句**期间**被调用
-//! 的（此时连接锁已被 `Db::with` 持有），在回调里再查一次库属于重入 —— 轻则
-//! 拖慢每一次日志写入，重则死锁。所以 kv 这一路改为在**写入点**显式调用
-//! [`notify_change`]：`config::update`（配置项，逐键比对同步范围）、
-//! `agents::save_client`、`proxy_pool::write_items`、`subscriptions::write_items`、
-//! `proxy_settings::write_raw` 五处。代价是将来新增一个「同步范围内的 kv 写入点」
-//! 时要记得加一行通知 —— 这条约束写在 `snapshot::is_synced_kv_key` 的注释里。
-//!
-//! ── 为什么要防抖 + 上限 ────────────────────────────────────
-//! 一次「添加账号」会连着写好几行（账号 + 用量记录），token 刷新也可能在几秒内
-//! 连写两三次。每个信号都上传一次等于把同一个快照重复传 N 遍。策略与 cc-switch
-//! 一致：**收到第一个信号后等 1 秒**，期间的新信号合并；若信号连续不断，最多
-//! 等 10 秒就必须传一次（否则高频写入会让同步永远不触发）。
-//!
-//! ── 为什么上传前还要比内容哈希 ──────────────────────────────
-//! 防抖只能合并「短时间内的多次写」。真正的问题是：`update_hook` 会在**内容
-//! 没变**的写入上响（例如 token 刷新写回同样的值）。每次上传都是几十 KB 到
-//! 几 MB 的外网请求，长期跑下来既费流量又可能撞上云盘限流。所以上传前先构建
-//! 快照、算哈希：与 `lastLocalHash` 相同**且**密钥指纹也没变 → 直接跳过，一个
-//! 请求都不发。这条判断也让「刚下载完」不会立刻回传（下载后写库会触发钩子，
-//! 但内容与远端一致 → 跳过）。抑制守卫因此是第二道保险，不是唯一依赖。
-
+//! Daily backup worker: debounce account changes and check the calendar every minute.
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::TrySendError;
@@ -42,7 +11,7 @@ use crate::server::core::crypto::{self, SecretScope};
 use crate::server::db::Db;
 use crate::server::logging;
 
-use super::{settings, snapshot};
+use super::{policy, settings, snapshot};
 
 /// 第一个信号之后的等待窗口（合并窗口内到达的信号不再单独上传）
 const DEBOUNCE_MS: u64 = 1_000;
@@ -129,7 +98,14 @@ pub(crate) fn spawn_worker(db: Db) {
 }
 
 async fn run_worker(db: Db, mut rx: Receiver<()>) {
-    while rx.recv().await.is_some() {
+    let mut timer = tokio::time::interval(Duration::from_secs(60));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut retry: Option<(String, Instant)> = None;
+    loop {
+        tokio::select! {
+            value = rx.recv() => if value.is_none() { return; },
+            _ = timer.tick() => {},
+        }
         let started = Instant::now();
         // 防抖：等到「安静 1 秒」或「总共 10 秒」，以先到者为准
         loop {
@@ -147,41 +123,51 @@ async fn run_worker(db: Db, mut rx: Receiver<()>) {
                 Err(_) => break,
             }
         }
-        if let Err(error) = run_once(&db).await {
-            super::record_failure(&error, "auto");
+        let scope = policy::target_scope(&settings::load());
+        if retry.as_ref().is_some_and(|(target, until)| target == &scope && Instant::now() < *until) { continue; }
+        match run_once(&db).await {
+            Err(error) => {
+                retry = Some((scope, Instant::now() + Duration::from_secs(300)));
+                super::record_failure(&error, "auto");
+            }
+            Ok(_) => retry = None,
         }
     }
 }
 
-/// 跑一轮自动上传。`Ok(false)` = 内容没变 / 未启用，跳过。
+static RECENT_UPLOADS: OnceLock<Mutex<BTreeMap<String, policy::UploadState>>> = OnceLock::new();
+/// Keep a successful commit in memory too, so failed status persistence cannot cause a loop.
+pub(crate) fn note_upload(state: policy::UploadState) {
+    let mut recent = RECENT_UPLOADS.get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock().unwrap_or_else(|error| error.into_inner());
+    recent.insert(state.scope.clone(), state);
+}
+fn upload_due(settings: &settings::CloudSyncSettings, ids: &BTreeSet<String>, now: i64) -> bool {
+    let scope = policy::target_scope(settings);
+    let recent = RECENT_UPLOADS.get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock().unwrap_or_else(|error| error.into_inner());
+    let persisted = settings.status.sync_baselines.get(&scope)
+        .or_else(|| settings.status.last_upload.as_ref().filter(|state| state.scope == scope));
+    let memory = recent.get(&scope);
+    let state = match (persisted, memory) {
+        (Some(a), Some(b)) => Some(if a.uploaded_at >= b.uploaded_at { a } else { b }),
+        (a, b) => a.or(b),
+    };
+    policy::should_upload(state, &scope, now, ids, &crypto::key_fingerprint(SecretScope::Accounts))
+}
 async fn run_once(db: &Db) -> Result<bool, String> {
-    let settings = settings::load();
-    if !settings.enabled || !settings.auto_sync {
-        return Ok(false);
-    }
-    if is_suppressed() {
-        return Ok(false);
-    }
-    settings.validate()?;
-
-    // 内容没变就跳过：先构建快照算哈希（本地操作，不发网络请求）
-    let snapshot = snapshot::build(db)?;
-    let content_hash = snapshot.content_hash();
-    let key_fingerprint = crypto::key_fingerprint(SecretScope::Accounts);
-    let unchanged = settings.status.last_local_hash.as_deref() == Some(content_hash.as_str())
-        && settings.status.last_key_fingerprint == key_fingerprint;
-    if unchanged {
-        return Ok(false);
-    }
-
     let _guard = super::sync_lock().lock().await;
-    // 拿到锁之后再读一次设置：排队期间用户可能关了开关
     let settings = settings::load();
-    if !settings.enabled || !settings.auto_sync {
-        return Ok(false);
-    }
+    if !settings.enabled || !settings.auto_sync || is_suppressed() { return Ok(false); }
+    settings.validate()?;
+    let ids = db.with(|conn| {
+        let mut stmt = conn.prepare("SELECT id FROM accounts ORDER BY id").map_err(|e|e.to_string())?;
+        let rows = stmt.query_map([], |row| row.get::<_,String>(0)).map_err(|e|e.to_string())?;
+        rows.collect::<Result<BTreeSet<_>,_>>().map_err(|e|e.to_string())
+    }).ok_or_else(|| "数据库连接不可用".to_string())??;
+    if !upload_due(&settings, &ids, logging::now_ms()) { return Ok(false); }
     super::upload_locked(db, &settings).await?;
-    logging::verbose("[CloudSync]", "自动同步：已上传本地变更");
+    logging::verbose("[CloudSync]", "自动备份：每日或新增账号快照已上传");
     Ok(true)
 }
 

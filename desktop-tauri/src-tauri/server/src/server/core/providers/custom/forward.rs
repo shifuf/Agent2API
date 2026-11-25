@@ -83,7 +83,7 @@ use crate::server::core::protocol::{anthropic_outbound, responses_outbound};
 use crate::server::core::proxies::ResolvedProxy;
 use crate::server::core::providers::custom::emulation;
 use crate::server::core::upstream::connections::ConnectionGuard;
-use crate::server::core::upstream::request::{read_upstream_error, send_chat_request, TransportRequest};
+use crate::server::core::upstream::request::{read_upstream_error, TransportRequest};
 // `FramePolicy::with_rewrite(...)`：自定义家只带 model 回写，保活换行的丢弃
 // 保持关闭 —— 那一项的依据是 WorkBuddy / AutoClaw 两条上游的实测，不能替
 // 用户自配的上游猜。
@@ -299,7 +299,7 @@ pub(crate) async fn forward(
         // 自定义家没有能力位（用户自己配的出口就是唯一口径：配了就代理，没配就直连）
         system_proxy_when_unset: false,
     };
-    let response = send_chat_request(&transport)
+    let response = crate::server::core::upstream::request::send_chat_request_tracked(&transport, Some(&telemetry.dispatch_tracker()))
         .await
         .map_err(|error| error.to_gateway_error())?;
 
@@ -629,7 +629,7 @@ async fn forward_translated(
         // 自定义家没有能力位（用户自己配的出口就是唯一口径：配了就代理，没配就直连）
         system_proxy_when_unset: false,
     };
-    let response = send_chat_request(&transport)
+    let response = crate::server::core::upstream::request::send_chat_request_tracked(&transport, Some(&telemetry.dispatch_tracker()))
         .await
         .map_err(|error| error.to_gateway_error())?;
 

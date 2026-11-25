@@ -287,7 +287,8 @@ impl Context {
                     if provider == "catpaw" { None } else { Some(call.freeze_http()?) }
                 } else { None };
                 self.resources.insert(id.clone(), if websocket { "ws" } else { "http" });
-                let result = if websocket { script::open_ws(&params).await } else { script::open_body(&params, body).await };
+                let dispatch = submission.as_ref().map(|submission| &submission.dispatch);
+                let result = if websocket { script::open_ws_tracked(&params, dispatch).await } else { script::open_body_tracked(&params, body, dispatch).await };
                 drop(submission);
                 if result.is_err() { self.resources.remove(&id); }
                 result

@@ -3,6 +3,33 @@ use serde_json::Value;
 use crate::server::logging;
 use super::{route_context::RequestRouting, route_health::ChannelLease, usage::RequestTelemetry, UpstreamService};
 
+/// Own the selected attempt until the response can hand settlement to its stream.
+/// Dropping the handler before that handoff is also an incomplete attempt.
+pub(super) struct PendingAttempt {
+    service: UpstreamService,
+    routing: RequestRouting,
+    telemetry: std::sync::Arc<RequestTelemetry>,
+}
+
+impl PendingAttempt {
+    pub fn new(service: &UpstreamService, routing: &RequestRouting, telemetry: std::sync::Arc<RequestTelemetry>) -> Self {
+        Self { service: service.clone(), routing: routing.clone(), telemetry }
+    }
+}
+
+impl Drop for PendingAttempt {
+    fn drop(&mut self) {
+        let lease = self.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()).take();
+        if self.telemetry.is_cancelled() { return; }
+        let Some(lease) = lease else { return; };
+        // Token preparation and account selection alone are not a failed send.
+        if !self.telemetry.active_attempt().is_some_and(|attempt| attempt.candidate_id == lease.candidate && attempt.dispatch.dispatched()) { return; }
+        self.routing.with_current_configuration(|| {
+            self.service.route.channel_failure(&lease, self.routing.settings.breaker_timeout_seconds, logging::now_ms());
+        });
+    }
+}
+
 pub(super) struct RouteCompletion {
     service: UpstreamService,
     routing: RequestRouting,
