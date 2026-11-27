@@ -15,6 +15,7 @@ pub(crate) fn generation() -> u64 {
 
 pub(crate) fn invalidate() {
     GENERATION.fetch_add(1, Ordering::AcqRel);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Accounts);
 }
 
 pub(crate) fn validation_snapshot(store: &AccountStore) -> std::sync::Arc<ValidationSnapshot> {

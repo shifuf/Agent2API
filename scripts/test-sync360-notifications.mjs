@@ -44,7 +44,7 @@ async function call(url, method, headers, payload) {
   const response = await fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...headers },
     body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(20000) })
   const text = await response.text()
-  assert.ok(!text.includes(marker), 'no notification secrets or provider error body in any management reply')
+  for (const suffix of ['-header', '-bot', '-device', '-echo']) assert.ok(!text.includes(marker + suffix), 'no notification credentials or provider error body in management replies')
   let json
   try { json = JSON.parse(text) } catch {}
   return { status: response.status, data: json?.data ?? json }
@@ -72,7 +72,7 @@ try {
   } }
   const saved = await call(route, 'PUT', headers, config)
   assert.equal(saved.status, 200)
-  assert.equal(saved.data.channels.webhook.urlSet, true)
+  assert.equal(saved.data.channels.webhook.url, config.channels.webhook.url)
   assert.equal(saved.data.channels.telegram.botTokenSet, true)
   assert.equal(saved.data.channels.bark.deviceKeySet, true)
   assert.equal((await call('/api/panel/login', 'POST', {}, { ...credentials, password: 'incorrect' })).status, 401)
@@ -157,7 +157,7 @@ try {
     for (const entry of await readdir(home, { recursive: true, withFileTypes: true })) {
       if (!entry.isFile()) continue
       const bytes = await readFile(path.join(entry.parentPath, entry.name))
-      assert.ok(!bytes.includes(marker), 'no notification credentials or echoed errors in logs, database or WAL')
+      for (const suffix of ['-header', '-bot', '-device', '-echo']) assert.ok(!bytes.includes(marker + suffix), 'no notification credentials or echoed errors in logs, database or WAL')
     }
   } finally { await rm(home, { recursive: true, force: true, maxRetries: 3 }) }
 }

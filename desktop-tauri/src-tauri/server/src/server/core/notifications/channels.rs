@@ -1,82 +1,214 @@
+//! 三类通知源的 HTTP 发送实现：Webhook（通用 JSON）、Telegram、Bark。
+
 use std::time::Duration;
 
-use reqwest::{header::{HeaderName, HeaderValue}, Client};
-use serde_json::{json, Value};
-use url::Url;
+use serde_json::{json, Map, Value};
 
-use super::{object, Error, Fields};
+use super::{
+    apply_patch, decrypt_secret, decrypt_webhook_headers, validate_http_url, BarkChannelConfig,
+    NotificationSettings, TelegramChannelConfig, WebhookChannelConfig,
+};
+use crate::server::core::egress;
+use crate::server::logging;
 
-pub(super) fn validate(key: &str, value: &Value) -> Result<(), Error> {
-    if key == "headers" {
-        let headers = object(value)?;
-        if headers.len() > 32 { return Err((400, "通知请求头过多")); }
-        for (name, text) in headers {
-            let header = HeaderName::from_bytes(name.as_bytes()).map_err(|_| (400, "通知请求头无效"))?;
-            if matches!(header.as_str(), "host" | "content-length" | "transfer-encoding" | "connection" | "proxy-authorization" | "content-type") {
-                return Err((400, "不允许覆盖该通知请求头"));
-            }
-            HeaderValue::from_str(text.as_str().filter(|s| s.len() <= 4096).ok_or((400, "通知请求头无效"))?)
-                .map_err(|_| (400, "通知请求头无效"))?;
+const NOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub async fn dispatch_all(
+    settings: &NotificationSettings,
+    event: &str,
+    title: &str,
+    body: &str,
+    data: &Value,
+) -> Vec<(&'static str, Result<(), String>)> {
+    let mut results = Vec::new();
+    if settings.webhook.enabled {
+        results.push((
+            "Webhook",
+            send_webhook(&settings.webhook, event, title, body, data).await,
+        ));
+    }
+    if settings.telegram.enabled {
+        results.push(("Telegram", send_telegram(&settings.telegram, title, body).await));
+    }
+    if settings.bark.enabled {
+        results.push(("Bark", send_bark(&settings.bark, title, body).await));
+    }
+    results
+}
+
+pub async fn send_test(payload: &Map<String, Value>) -> Result<&'static str, (i32, String)> {
+    let channel = payload
+        .get("channel")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let mut settings = NotificationSettings::current();
+    // 允许用户在点击「保存」前直接携带当前表单草稿点击「测试发送」
+    let mut draft = payload.clone();
+    draft.remove("channel");
+    if !draft.is_empty() {
+        apply_patch(&mut settings, &draft).map_err(|msg| (400, msg))?;
+    }
+    let title = "Agent2API 通知测试";
+    let body = "这是一条来自 Agent2API 的测试通知，当前通道配置正常。";
+    let data = json!({
+        "test": true,
+        "channel": channel,
+    });
+    match channel.as_str() {
+        "webhook" => {
+            send_webhook(&settings.webhook, "test", title, body, &data)
+                .await
+                .map_err(|msg| (502, msg))?;
+            Ok("Webhook")
         }
-        return Ok(());
+        "telegram" => {
+            send_telegram(&settings.telegram, title, body)
+                .await
+                .map_err(|msg| (502, msg))?;
+            Ok("Telegram")
+        }
+        "bark" => {
+            send_bark(&settings.bark, title, body)
+                .await
+                .map_err(|msg| (502, msg))?;
+            Ok("Bark")
+        }
+        _ => Err((
+            400,
+            "未知通知渠道，请选择 webhook、telegram 或 bark".to_string(),
+        )),
     }
-    let text = value.as_str().filter(|text| text.len() <= 4096 && !text.chars().any(char::is_control)).ok_or((400, "通知参数无效"))?;
-    if matches!(key, "url" | "apiBase" | "serverUrl" | "proxyUrl") {
-        let url = Url::parse(text).map_err(|_| (400, "通知地址无效"))?;
-        let valid_scheme = matches!(url.scheme(), "http" | "https") || (key == "proxyUrl" && matches!(url.scheme(), "socks5" | "socks5h"));
-        if !valid_scheme || url.host().is_none() || url.fragment().is_some() || (key != "url" && url.query().is_some())
-            || (key != "proxyUrl" && (!url.username().is_empty() || url.password().is_some())) { return Err((400, "通知地址无效")); }
+}
+
+pub async fn send_webhook(
+    config: &WebhookChannelConfig,
+    event: &str,
+    title: &str,
+    body: &str,
+    data: &Value,
+) -> Result<(), String> {
+    let url = validate_http_url(&config.url, "Webhook 地址")?;
+    let headers = decrypt_webhook_headers(&config.headers_enc)?;
+    let client = egress::client_for_system_proxy();
+    let payload = json!({
+        "title": title,
+        "body": body,
+        "event": event,
+        "timestamp": logging::now_ms(),
+        "source": "Agent2API",
+        "data": data,
+    });
+    let mut req = client
+        .post(&url)
+        .timeout(NOTIFY_TIMEOUT)
+        .header("Content-Type", "application/json")
+        .json(&payload);
+    for (k, v) in headers {
+        req = req.header(k, v);
     }
-    if key == "botToken" && !text.bytes().all(|byte| byte.is_ascii_alphanumeric() || b":_-".contains(&byte)) { return Err((400, "Telegram Bot Token 格式无效")); }
+    let response = req
+        .send()
+        .await
+        .map_err(|err| transport_error("Webhook", &err))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Webhook 返回 HTTP {status}"));
+    }
     Ok(())
 }
 
-pub(super) async fn send(kind: &str, secrets: &Fields, event: &str, title: &str, body: &str, data: &Value) -> Result<(), Error> {
-    let empty = Value::Null;
-    let section = secrets.get(kind).unwrap_or(&empty);
-    let text = |key: &str| section.get(key).and_then(Value::as_str).unwrap_or("");
-    let mut builder = Client::builder().timeout(Duration::from_secs(8)).redirect(reqwest::redirect::Policy::none());
-    if kind == "telegram" && !text("proxyUrl").is_empty() {
-        builder = builder.no_proxy().proxy(reqwest::Proxy::all(text("proxyUrl")).map_err(|_| (400, "Telegram 代理地址无效"))?);
+pub async fn send_telegram(
+    config: &TelegramChannelConfig,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    let token = decrypt_secret(&config.bot_token_enc, "Telegram Bot Token")?;
+    let chat_id = config.chat_id.trim();
+    if chat_id.is_empty() {
+        return Err("请先填写 Telegram Chat ID".to_string());
     }
-    let client = builder.build().map_err(|_| (502, "通知连接不可用"))?;
-    let request = match kind {
-        "webhook" => {
-            if text("url").is_empty() { return Err((400, "请先配置 Webhook 地址")); }
-            let mut request = client.post(text("url")).json(&json!({"source":"Agent2API", "event":event, "title":title,
-                "body":body,"timestamp":crate::server::logging::now_ms(),"data":data}));
-            if let Some(headers) = section["headers"].as_object() {
-                for (name, content) in headers { request = request.header(name.as_str(), content.as_str().ok_or((400, "通知请求头无效"))?); }
-            }
-            request
-        }
-        "telegram" => {
-            if text("botToken").is_empty() || text("chatId").is_empty() { return Err((400, "请配置 Telegram Bot Token 和 Chat ID")); }
-            let base = if text("apiBase").is_empty() { "https://api.telegram.org" } else { text("apiBase") };
-            client.post(format!("{}/bot{}/sendMessage", base.trim_end_matches('/'), text("botToken")))
-                .json(&json!({"chat_id":text("chatId"),"text":format!("{title}\n{body}"),"disable_web_page_preview":true}))
-        }
-        "bark" => {
-            if text("deviceKey").is_empty() { return Err((400, "请配置 Bark Device Key")); }
-            let base = if text("serverUrl").is_empty() { "https://api.day.app" } else { text("serverUrl") };
-            let mut message = json!({"device_key":text("deviceKey"),"title":title,"body":body,
-                "group":if text("group").is_empty() { "Agent2API" } else { text("group") }});
-            if !text("sound").is_empty() { message["sound"] = json!(text("sound")); }
-            client.post(format!("{}/push", base.trim_end_matches('/'))).json(&message)
-        }
-        _ => return Err((400, "未知通知渠道")),
+    let base = validate_http_url(&config.api_base, "Telegram 接口地址")?;
+    let endpoint = format!("{base}/bot{}/sendMessage", token.as_str());
+    let payload = json!({
+        "chat_id": chat_id,
+        "text": format!("【{title}】\n{body}"),
+        "disable_web_page_preview": true,
+    });
+    let proxy = super::parse_telegram_proxy(&config.proxy_url)?;
+    let client = if let Some(ref resolved) = proxy {
+        egress::client_for(Some(resolved))
+    } else {
+        egress::client_for_system_proxy()
     };
-    let mut response = request.send().await.map_err(|_| (502, "通知请求失败或超时"))?;
-    if !response.status().is_success() { return Err((502, "通知服务拒绝了请求")); }
-    if kind == "webhook" { return Ok(()); }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| (502, "通知响应不完整"))? {
-        if bytes.len() + chunk.len() > 64 * 1024 { return Err((502, "通知响应过大")); }
-        bytes.extend_from_slice(&chunk);
-    }
-    let result: Value = serde_json::from_slice(&bytes).map_err(|_| (502, "通知服务响应无效"))?;
-    if (kind == "telegram" && result["ok"] != true) || (kind == "bark" && result["code"] != 200) {
-        return Err((502, "通知服务未确认送达"));
+    let response = client
+        .post(&endpoint)
+        .timeout(NOTIFY_TIMEOUT)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|err| transport_error("Telegram", &err))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&text).ok();
+    if !status.is_success()
+        || parsed
+            .as_ref()
+            .and_then(|v| v.get("ok"))
+            .and_then(Value::as_bool)
+            == Some(false)
+    {
+        return Err(format!("Telegram 发送失败（HTTP {status}）"));
     }
     Ok(())
+}
+
+pub async fn send_bark(
+    config: &BarkChannelConfig,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    let device_key = decrypt_secret(&config.device_key_enc, "Bark Device Key")?;
+    let base = validate_http_url(&config.server_url, "Bark 服务地址")?;
+    let endpoint = format!("{base}/push");
+    let group = if config.group.trim().is_empty() {
+        super::DEFAULT_BARK_GROUP
+    } else {
+        config.group.trim()
+    };
+    let mut payload = json!({
+        "device_key": device_key.as_str(),
+        "title": title,
+        "body": body,
+        "group": group,
+    });
+    if !config.sound.trim().is_empty() {
+        payload["sound"] = Value::String(config.sound.trim().to_string());
+    }
+    let client = egress::client_for_system_proxy();
+    let response = client
+        .post(&endpoint)
+        .timeout(NOTIFY_TIMEOUT)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|err| transport_error("Bark", &err))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&text).ok();
+    let code_err = parsed
+        .as_ref()
+        .and_then(|v| v.get("code"))
+        .and_then(Value::as_i64)
+        .is_some_and(|code| code != 200);
+    if !status.is_success() || code_err {
+        return Err(format!("Bark 发送失败（HTTP {status}）"));
+    }
+    Ok(())
+}
+
+fn transport_error(channel: &str, error: &reqwest::Error) -> String {
+    let reason = if error.is_timeout() { "请求超时" } else if error.is_connect() { "连接失败" } else { "请求失败" };
+    format!("{channel} {reason}")
 }

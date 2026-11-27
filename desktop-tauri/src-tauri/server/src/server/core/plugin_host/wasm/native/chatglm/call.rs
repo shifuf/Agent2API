@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server::core::account_store::AccountStore;
 use crate::server::core::plugin_host::install::PackRegistry;
+use crate::server::core::plugin_host::packages::provenance::{self, InstallLease};
 use crate::server::core::plugin_host::wasm::{context::Shared, manifest, runtime::Runtime};
 use crate::server::core::plugin_host::{self as plugin, Host};
 
@@ -24,99 +25,197 @@ pub(super) struct Binding {
     shared: Weak<Shared>,
     pub stopped: CancellationToken,
     generation: u64,
+    lease: Option<Arc<InstallLease>>,
     package_id: String,
     package_version: String,
     archive_digest: String,
+    loaded_attempt: u64,
     source_digest: [u8; 32],
     module_digest: String,
-    entry_path: std::path::PathBuf,
 }
 
 impl Binding {
     pub(super) fn capture() -> Result<Self, ImportError> {
-        if plugin::registry::is_switching(PROVIDER) { return Err(ImportError::unavailable()); }
+        if plugin::runtime::admission_closed() || plugin::registry::is_switching(PROVIDER) {
+            return Err(ImportError::unavailable());
+        }
         let registry = PackRegistry::load();
-        let id = plugin::provider_pack(PROVIDER).ok_or_else(ImportError::unavailable)?;
-        let mut found = registry.packs.iter().filter(|pack| pack.id == id);
+        let owners = plugin::ownership::owners(&registry);
+        let id = owners.get(PROVIDER).ok_or_else(ImportError::unavailable)?;
+        let mut found = registry.packs.iter().filter(|pack| &pack.id == id);
         let pack = found.next().ok_or_else(ImportError::unavailable)?;
-        if found.next().is_some() || !pack.enabled
+        if found.next().is_some()
+            || !pack.enabled
             || !pack.providers.get(PROVIDER).copied().unwrap_or(true)
-            || pack.manifest_providers.len() != 1 || pack.manifest_providers[0].id.as_str() != PROVIDER {
+            || pack.manifest_providers.len() != 1
+            || pack.manifest_providers[0].id.as_str() != PROVIDER
+        {
             return Err(ImportError::unavailable());
         }
-        let host = plugin::host_for_pack(&id).ok_or_else(ImportError::unavailable)?;
+        // 先区分缺少进程内安装见证与检查不可用；忙、写入中或坏见证不能回落。
+        let lease = provenance::try_current_optional(id).map_err(|_| ImportError::unavailable())?;
+        let host = plugin::host_for_pack(id).ok_or_else(ImportError::unavailable)?;
         if !plugin::host_for_provider(PROVIDER).is_some_and(|owner| Arc::ptr_eq(&owner, &host))
-            || !plugin::serves_provider(PROVIDER) || !host.ready() {
+            || !plugin::serves_provider(PROVIDER)
+            || host.options.script
+        {
             return Err(ImportError::unavailable());
         }
-        let runtime = host.embedded.runtime.try_read().map_err(|_| ImportError::unavailable())?
-            .clone().ok_or_else(ImportError::unavailable)?;
-        let directory = plugin::install::plugins_dir().join(&id).join(&pack.version);
-        let entry_path = manifest::checked_entry(&directory, &pack.entry).map_err(|_| ImportError::unavailable())?;
-        if host.options.exe != entry_path { return Err(ImportError::unavailable()); }
-        // The hashes describe the bytes actually loaded. A changed file or
-        // declaration cannot silently become the source of a prepared intent.
-        let declaration = std::fs::read(directory.join("wasm.json")).map_err(|_| ImportError::unavailable())?;
-        if declaration.len() > 32 * 1024 { return Err(ImportError::unavailable()); }
-        let source_digest: [u8; 32] = Sha256::digest(&declaration).into();
-        let metadata = std::fs::metadata(&entry_path).map_err(|_| ImportError::unavailable())?;
-        if metadata.len() > 16 * 1024 * 1024 { return Err(ImportError::unavailable()); }
-        let module = std::fs::read(&entry_path).map_err(|_| ImportError::unavailable())?;
-        if module.len() > 16 * 1024 * 1024 { return Err(ImportError::unavailable()); }
-        let module_digest = plugin::install::sha256_hex(&module);
-        if runtime.shared.options.source_digest() != &source_digest || runtime.module_digest() != module_digest {
+        let runtime = host
+            .embedded
+            .runtime
+            .try_read()
+            .map_err(|_| ImportError::unavailable())?
+            .clone()
+            .ok_or_else(ImportError::unavailable)?;
+        let generation = host.generation.load(Ordering::Acquire);
+        let source_digest = *runtime.shared.options.source_digest();
+        let module_digest = runtime.module_digest().to_string();
+        let loaded = plugin::startup::provider(PROVIDER).ok_or_else(ImportError::unavailable)?;
+        if loaded.pack_id != *id
+            || !loaded.pack_enabled
+            || !loaded.enabled
+            || !loaded.available
+            || loaded.startup.attempt == 0
+            || host.options.exe
+                != plugin::install::plugins_dir()
+                    .join(id)
+                    .join(&pack.version)
+                    .join(&pack.entry)
+        {
             return Err(ImportError::unavailable());
         }
-        let binding = Self { host: Arc::downgrade(&host), runtime: Arc::downgrade(&runtime),
-            shared: Arc::downgrade(&runtime.shared), stopped: runtime.shared.cancel.clone(),
-            generation: host.generation.load(Ordering::Acquire), package_id: id,
-            package_version: pack.version.clone(), archive_digest: pack.sha256.clone(),
-            source_digest, module_digest, entry_path };
+        if let Some(lease) = &lease {
+            let artifact = lease.artifact();
+            let declaration_digest: [u8; 32] =
+                Sha256::digest(artifact.wasm_bytes().ok_or_else(ImportError::unavailable)?).into();
+            if !lease.matches_record(pack)
+                || artifact.wasm_provider() != Some(PROVIDER)
+                || artifact.target() != manifest::TARGET
+                || declaration_digest != source_digest
+                || hex(artifact
+                    .module_digest()
+                    .ok_or_else(ImportError::unavailable)?)
+                    != module_digest
+                || !lease
+                    .started_runtime()
+                    .is_some_and(|started| started.matches(&host, &runtime, generation))
+            {
+                return Err(ImportError::unavailable());
+            }
+        }
+        // 冷启动没有原归档见证，只绑定此次真正已就绪的Host/Runtime；登记摘要仅供显示。
+        let archive_digest = lease
+            .as_ref()
+            .map(|lease| hex(lease.artifact().archive_digest()))
+            .unwrap_or_else(|| pack.sha256.clone());
+        let binding = Self {
+            host: Arc::downgrade(&host),
+            runtime: Arc::downgrade(&runtime),
+            shared: Arc::downgrade(&runtime.shared),
+            stopped: runtime.shared.cancel.clone(),
+            generation,
+            lease,
+            package_id: id.clone(),
+            package_version: pack.version.clone(),
+            archive_digest,
+            loaded_attempt: loaded.startup.attempt,
+            source_digest,
+            module_digest,
+        };
         binding.with_current(|_| Ok(()))?;
         Ok(binding)
     }
 
     pub(super) fn package(&self) -> Value {
-        json!({ "id": self.package_id, "version": self.package_version, "archiveDigest": self.archive_digest,
-            "moduleDigest": self.module_digest, "declarationDigest": hex(&self.source_digest) })
+        json!({ "id":self.package_id, "version":self.package_version, "archiveDigest":self.archive_digest,
+            "moduleDigest":self.module_digest, "declarationDigest":hex(&self.source_digest) })
     }
 
-    /// Host lifecycle -> original Runtime -> operation state. This gate only
-    /// admits bounded synchronous work; it never reopens files or reads a DB.
-    pub(super) fn with_current<R>(&self, action: impl FnOnce(&Host) -> Result<R, ImportError>) -> Result<R, ImportError> {
+    /// 锁序 Host lifecycle → Runtime try_read → 原运行/安装来源。action 不读文件/库、不 await。
+    pub(super) fn with_current<R>(
+        &self,
+        action: impl FnOnce(&Host) -> Result<R, ImportError>,
+    ) -> Result<R, ImportError> {
         let host = self.host.upgrade().ok_or_else(ImportError::unavailable)?;
-        let _lifecycle = host.lifecycle.try_lock().map_err(|_| ImportError::unavailable())?;
-        let current = host.embedded.runtime.try_read().map_err(|_| ImportError::unavailable())?;
+        let _lifecycle = host
+            .lifecycle
+            .try_lock()
+            .map_err(|_| ImportError::unavailable())?;
+        let current = host
+            .embedded
+            .runtime
+            .try_read()
+            .map_err(|_| ImportError::unavailable())?;
         let runtime = current.as_ref().ok_or_else(ImportError::unavailable)?;
         let options = &runtime.shared.options;
-        if self.generation == 0 || host.generation.load(Ordering::Acquire) != self.generation
+        if self.generation == 0
+            || host.generation.load(Ordering::Acquire) != self.generation
             || !std::ptr::eq(self.runtime.as_ptr(), Arc::as_ptr(runtime))
             || !std::ptr::eq(self.shared.as_ptr(), Arc::as_ptr(&runtime.shared))
-            || host.closing.load(Ordering::Acquire) || !host.ready() || host.activity.retired()
-            || self.stopped.is_cancelled() || runtime.shared.cancel.is_cancelled()
-            || host.options.exe != self.entry_path || options.provider != PROVIDER
-            || options.source_digest() != &self.source_digest || runtime.module_digest() != self.module_digest
-            || !options.allows(CAPABILITY) || !options.allows("accounts.cas.v1") || !options.allows("login.forms.v1")
-            || host.options.wasm.as_ref().is_none_or(|actual| actual.provider != PROVIDER
-                || actual.source_digest() != &self.source_digest || !actual.allows(CAPABILITY))
-            || plugin::registry::is_switching(PROVIDER) || !plugin::serves_provider(PROVIDER)
-            || !host.callbacks.provider_allowed(PROVIDER)
-            || plugin::provider_pack(PROVIDER).as_deref() != Some(self.package_id.as_str())
-            || !plugin::host_for_pack(&self.package_id).is_some_and(|current| Arc::ptr_eq(&current, &host))
-            || !plugin::host_for_provider(PROVIDER).is_some_and(|current| Arc::ptr_eq(&current, &host)) {
+            || host.closing.load(Ordering::Acquire)
+            || !host.ready()
+            || plugin::runtime::admission_closed()
+            || host.activity.retired()
+            || self.stopped.is_cancelled()
+            || runtime.shared.cancel.is_cancelled()
+            || options.provider != PROVIDER
+            || options.source_digest() != &self.source_digest
+            || runtime.module_digest() != self.module_digest
+            || !options.allows(CAPABILITY)
+            || !options.allows("accounts.cas.v1")
+            || !options.allows("login.forms.v1")
+            || host.options.wasm.as_ref().is_none_or(|options| {
+                options.provider != PROVIDER
+                    || options.source_digest() != &self.source_digest
+                    || !options.allows(CAPABILITY)
+            })
+            || plugin::registry::is_switching(PROVIDER)
+            || !plugin::host_for_pack(&self.package_id)
+                .is_some_and(|current| Arc::ptr_eq(&current, &host))
+            || !plugin::host_for_provider(PROVIDER)
+                .is_some_and(|current| Arc::ptr_eq(&current, &host))
+            || plugin::startup::provider(PROVIDER).is_none_or(|current| {
+                current.pack_id != self.package_id
+                    || !current.pack_enabled
+                    || !current.enabled
+                    || !current.available
+                    || current.startup.attempt != self.loaded_attempt
+            })
+        {
             return Err(ImportError::unavailable());
         }
+        let current_lease = provenance::try_current_optional(&self.package_id)
+            .map_err(|_| ImportError::unavailable())?;
+        let _install = match (&self.lease, current_lease) {
+            (Some(lease), Some(current))
+                if Arc::ptr_eq(lease, &current)
+                    && lease.started_runtime().is_some_and(|started| {
+                        started.matches(&host, runtime, self.generation)
+                    }) =>
+            {
+                Some(lease.try_hold().map_err(|_| ImportError::unavailable())?)
+            }
+            (None, None) => None,
+            _ => return Err(ImportError::unavailable()),
+        };
+        // 原用户确认和原Host生命周期门内执行；安装切换要先暂停Activity，实际读取/保存已持UsageLease。
         action(&host)
     }
 
-    fn runtime(&self) -> Result<Arc<Runtime>, ImportError> { self.runtime.upgrade().ok_or_else(ImportError::unavailable) }
-    fn host(&self) -> Result<Arc<Host>, ImportError> { self.host.upgrade().ok_or_else(ImportError::unavailable) }
+    fn runtime(&self) -> Result<Arc<Runtime>, ImportError> {
+        self.runtime.upgrade().ok_or_else(ImportError::unavailable)
+    }
+    fn host(&self) -> Result<Arc<Host>, ImportError> {
+        self.host.upgrade().ok_or_else(ImportError::unavailable)
+    }
     fn matches_shared(&self, shared: &Shared) -> bool {
-        std::ptr::eq(self.shared.as_ptr(), shared) && shared.options.provider == PROVIDER
-            && shared.options.source_digest() == &self.source_digest && shared.options.allows(CAPABILITY)
+        std::ptr::eq(self.shared.as_ptr(), shared)
+            && shared.options.provider == PROVIDER
+            && shared.options.source_digest() == &self.source_digest
+            && shared.options.allows(CAPABILITY)
     }
 }
-
 fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

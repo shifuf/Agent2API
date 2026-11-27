@@ -115,10 +115,10 @@ pub(super) async fn install(cancel: tokio_util::sync::CancellationToken) -> Resu
     native::authorized_builtin("qoder-intl", super::HELPER)?;
     if !supported() { return Err(super::invalid()); }
     if discover()?.is_some() { return super::status(); }
-    let client = super::super::fixed_http::FrozenHttpClient::from_selected(None).await
+    let client = crate::server::core::egress::managed::FrozenHttpClient::from_selected(None).await
         .map_err(|_| super::invalid())?;
     let metadata = download(&client, METADATA, 1024 * 1024, &cancel).await?;
-    let meta: Value = super::super::strict_json::parse_object(&metadata, 1024 * 1024)
+    let meta: Value = super::super::managed_task::declaration::parse_object(&metadata, 1024 * 1024)
         .map_err(|_| super::invalid())?;
     if meta["name"] != "@qoder-ai/qodercli" || meta["version"] != VERSION || meta["dist"]["tarball"] != TARBALL
         || meta["dist"]["integrity"] != format!("sha512-{INTEGRITY}") { return Err(super::invalid()); }
@@ -130,7 +130,7 @@ pub(super) async fn install(cancel: tokio_util::sync::CancellationToken) -> Resu
     super::status()
 }
 
-async fn download(client: &super::super::fixed_http::FrozenHttpClient, url: &str, limit: usize,
+async fn download(client: &crate::server::core::egress::managed::FrozenHttpClient, url: &str, limit: usize,
     cancel: &tokio_util::sync::CancellationToken) -> Result<Vec<u8>, proto::WireError> {
     let work = async {
         let mut response = client.client().map_err(|_| super::invalid())?.get(url).send().await.map_err(|_| super::invalid())?;

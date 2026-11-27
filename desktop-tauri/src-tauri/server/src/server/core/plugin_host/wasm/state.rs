@@ -5,13 +5,13 @@ use serde_json::{json, Value};
 
 use super::context::Context;
 
-#[derive(Clone)]
 struct Entry {
     revision: u64,
     schema: u32,
     expires: i64,
     value: Value,
     bytes: usize,
+    _memory: std::sync::Arc<crate::server::core::runtime_capacity::Allocation>,
 }
 
 #[derive(Default)]
@@ -44,6 +44,20 @@ impl Transient {
         let prefix = format!("{namespace}\0");
         self.entries.retain(|key, _| !key.starts_with(&prefix));
     }
+    /// 固定 Kiro 两阶段交接内部清理，不开放任意 namespace/key 删除给插件。
+    pub(super) fn clear_kiro_oauth(&mut self, flow: &str) -> Result<(), proto::WireError> {
+        let id = format!("kiro:{flow}\0kiro.oauth");
+        if !self.entries.contains_key(&id) {
+            return Err(super::error("Kiro 原授权状态缺失，未生成新空状态覆盖"));
+        }
+        let revision = self.sequence.checked_add(1).ok_or_else(|| super::error("登录状态版本已耗尽"))?;
+        self.sequence = revision;
+        // 留非零revision的空条目，撤销旧CAS但不留下verifier/code/state；防缺键revision=0 ABA。
+        let memory = std::sync::Arc::new(crate::server::core::runtime_capacity::Allocation::new(id.len() + 128)?);
+        self.entries.insert(id, Entry { revision, schema: 1, expires: crate::server::logging::now_ms() + 900_000,
+            value: Value::Null, bytes: 4, _memory: memory });
+        Ok(())
+    }
     pub(super) fn value(&self, namespace: &str, key: &str) -> Option<&Value> {
         self.entries.get(&format!("{namespace}\0{key}")).filter(|entry| entry.expires > crate::server::logging::now_ms())
             .map(|entry| &entry.value)
@@ -54,6 +68,7 @@ impl Transient {
         let Some(entry) = self.entries.get_mut(&id).filter(|entry| entry.value["request"]["requestId"] == request) else { return; };
         entry.value["request"] = Value::Null;
         entry.bytes = entry.value.to_string().len();
+        entry._memory.shrink_to(crate::server::core::runtime_capacity::value_bytes(&entry.value).saturating_add(id.len() + 128));
         if let Some(revision) = self.sequence.checked_add(1) { self.sequence = revision; entry.revision = revision; }
         else { self.entries.remove(&id); }
     }
@@ -78,22 +93,17 @@ impl Transient {
         let bytes = value.to_string().len();
         let total: usize = self.entries.values().map(|entry| entry.bytes).sum();
         let namespaced = self.entries.keys().filter(|entry| entry.starts_with(&format!("{namespace}\0"))).count();
-        if let Some((provider, _)) = namespace.split_once('\0') {
-            let prefix = format!("{provider}\0");
-            let provider_entries: Vec<_> = self.entries.iter().filter(|(key, _)| key.starts_with(&prefix)).collect();
-            let provider_bytes: usize = provider_entries.iter().map(|(_, entry)| entry.bytes).sum();
-            if provider_entries.len() >= 1024 && previous.is_none()
-                || provider_bytes.saturating_sub(previous.map(|entry| entry.bytes).unwrap_or(0)) + bytes > 16 * 1024 * 1024 {
-                return Err(proto::WireError::with_code("提供商会话状态超过容量限制", "plugin_resource_limit"));
-            }
-        }
-        if bytes > 256 * 1024 || total.saturating_sub(previous.map(|entry| entry.bytes).unwrap_or(0)) + bytes > 64 * 1024 * 1024
-            || previous.is_none() && (namespaced >= limit || self.entries.len() >= 4096) {
+        let state_limit = (crate::server::core::runtime_capacity::limits().memory_bytes / 8)
+            .clamp(8 * 1024 * 1024, 512 * 1024 * 1024);
+        if bytes > 256 * 1024 || total.saturating_sub(previous.map(|entry| entry.bytes).unwrap_or(0)) + bytes > state_limit
+            || previous.is_none() && namespaced >= limit {
             return Err(proto::WireError::with_code("插件临时状态超过容量限制", "plugin_resource_limit"));
         }
         self.sequence = self.sequence.checked_add(1).ok_or_else(|| super::error("状态版本已耗尽"))?;
         let revision = self.sequence;
-        self.entries.insert(id, Entry { revision, schema, expires: now + ttl, value, bytes });
+        let memory = std::sync::Arc::new(crate::server::core::runtime_capacity::Allocation::new(
+            crate::server::core::runtime_capacity::value_bytes(&value).saturating_add(id.len() + 128))?);
+        self.entries.insert(id, Entry { revision, schema, expires: now + ttl, value, bytes, _memory: memory });
         Ok(json!({ "updated": true, "revision": revision }))
     }
 }
@@ -111,9 +121,14 @@ impl Context {
         match params["scope"].as_str() {
             Some("login") => {
                 if self.flow.is_empty() { return Err(super::error("当前调用未绑定登录流程")); }
+                if self.flow.starts_with("managed_") && self.managed.is_none() {
+                    return Err(proto::WireError::with_code("托管状态只允许当前可信登录调用访问", "forbidden"));
+                }
                 let namespace = format!("{}:{}", provider, self.flow);
-                self.shared.login_state.lock().map_err(|_| super::error("登录状态不可用"))?
-                    .invoke(method, &namespace, key, params, 900_000, 64)
+                let mut state = self.shared.login_state.lock().map_err(|_| super::error("登录状态不可用"))?;
+                // 与取消清理使用同一状态锁：已撤销调用不能在清理之后复活临时凭据。
+                if let Some(call) = &self.managed { call.validate(provider).map_err(super::managed::wire)?; }
+                state.invoke(method, &namespace, key, params, 900_000, 64)
             }
             Some("conversation") => {
                 let account = self.account()?;

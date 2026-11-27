@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::{cleanup::{CleanupOwner, Outcome, Reason}, error, input::StartInput, network, reader::{Chunk, Reader}, registry::{nonce, Record}, source};
 use crate::server::core::plugin_host::wasm::conversation::SourceRef;
-use super::super::fixed_http::FrozenHttpClient;
+use crate::server::core::egress::managed::FrozenHttpClient;
 use super::super::catpaw_account::Account as RowSource;
 
 pub(super) struct Owner {
@@ -106,13 +106,13 @@ impl Owner {
                 self.cleanup.client().ok_or_else(error::unavailable)?, &record.prepared).await?;
             self.catalog = Some(witness);
             let request = network::prepare(self.cleanup.client().ok_or_else(error::unknown)?,
-                self.cleanup.account(), network::Route::Turn, &self.input.turn)?;
+                self.cleanup.account(), network::Route::Turn, &self.input.turn)?.tracked(self.source.dispatch_tracker());
             source::submit(&self.source, self.cleanup.account(), record).await?;
             record.accept_inherited_round(&self.receipt)?;
             source::subsequent(&self.source, self.cleanup.account(), || record.mark_turn_submission()).await?;
             self.cleanup.mark_turn();
             let capture = self.source.capture();
-            let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline(), self.source.dispatch_tracker()).await?;
+            let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline()).await?;
             self.reader = Some(Reader::new(response, &record.ids.conversation, capture));
             return Ok(());
         }
@@ -123,7 +123,7 @@ impl Owner {
             biased;
             _ = record_end.cancelled() => return Err(error::ended()),
             _ = call_end.cancelled() => return Err(error::ended()),
-            result = tokio::time::timeout_at(self.source.deadline(), FrozenHttpClient::from_selected(path)) => {
+            result = tokio::time::timeout_at(self.source.deadline(), FrozenHttpClient::from_path(path)) => {
                 result.map_err(|_| error::unavailable())?.map_err(|_| error::unavailable())?
             }
         };
@@ -143,16 +143,15 @@ impl Owner {
         if record.abandoned() { return Err(error::ended()); }
         source::check(&self.source, self.cleanup.account())?;
         self.catalog.as_ref().ok_or_else(error::unavailable)?.check(&self.source, &record.prepared)?;
-        let round_request = network::prepare(self.cleanup.client().ok_or_else(error::unavailable)?, self.cleanup.account(), network::Route::Round, &self.input.round)?;
+        let round_request = network::prepare(self.cleanup.client().ok_or_else(error::unavailable)?, self.cleanup.account(), network::Route::Round, &self.input.round)?.tracked(self.source.dispatch_tracker());
         // 构造先于原Call/原行最终门，门内仅freeze与CAS，无锁内网络。
         source::submit(&self.source, self.cleanup.account(), record).await?;
-        let round = match network::short(self.cleanup.client().ok_or_else(error::unknown)?, round_request, network::Route::Round, &record.ids.conversation, Some(self.source.deadline()), Some(self.source.dispatch_tracker())).await {
+        let round = match network::short(self.cleanup.client().ok_or_else(error::unknown)?, round_request, network::Route::Round, &record.ids.conversation, Some(self.source.deadline())).await {
             Ok(round) => {
                 self.source.lock_permanent_replay();
                 round
             }
             Err(err) => {
-                // round 已投递后，任何状态或正文都不能证明没有创建；保留真实错误供健康结算。
                 self.source.lock_permanent_replay();
                 return Err(err);
             }
@@ -163,19 +162,19 @@ impl Owner {
         if record.abandoned() { return Err(error::ended()); }
         source::check(&self.source, self.cleanup.account())?;
         let running = json!({"conversationId": record.ids.conversation, "eventType": "conversation", "data": {"status": "running"}});
-        let request = network::prepare(self.cleanup.client().ok_or_else(error::unknown)?, self.cleanup.account(), network::Route::Running, &running.to_string())?;
+        let request = network::prepare(self.cleanup.client().ok_or_else(error::unknown)?, self.cleanup.account(), network::Route::Running, &running.to_string())?.tracked(self.source.dispatch_tracker());
         source::subsequent(&self.source, self.cleanup.account(), || record.mark_running_submission()).await?;
-        network::short(self.cleanup.client().ok_or_else(error::unknown)?, request, network::Route::Running, &record.ids.conversation, Some(self.source.deadline()), Some(self.source.dispatch_tracker())).await?;
+        network::short(self.cleanup.client().ok_or_else(error::unknown)?, request, network::Route::Running, &record.ids.conversation, Some(self.source.deadline())).await?;
         record.running_accepted()?;
         if record.abandoned() { return Err(error::ended()); }
         source::check(&self.source, self.cleanup.account())?;
-        let request = network::prepare(self.cleanup.client().ok_or_else(error::unknown)?, self.cleanup.account(), network::Route::Turn, &self.input.turn)?;
+        let request = network::prepare(self.cleanup.client().ok_or_else(error::unknown)?, self.cleanup.account(), network::Route::Turn, &self.input.turn)?.tracked(self.source.dispatch_tracker());
         source::subsequent(&self.source, self.cleanup.account(), || record.mark_turn_submission()).await?;
         // 最终门确实成功且即将poll原请求才登记实际turn投递；门内CAS不能冒充投递。
         self.cleanup.mark_turn();
         // 已投递的future不受等待端取消影响；成功后同一worker持有唯一Response。
         let capture = self.source.capture();
-        let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline(), self.source.dispatch_tracker()).await?;
+        let response = network::open_turn(self.cleanup.client().ok_or_else(error::unknown)?, request, capture.as_ref(), self.source.deadline()).await?;
         self.reader = Some(Reader::new(response, &record.ids.conversation, capture));
         Ok(())
     }

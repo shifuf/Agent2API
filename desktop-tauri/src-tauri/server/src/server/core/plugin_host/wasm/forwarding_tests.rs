@@ -45,18 +45,23 @@ async fn scheduled_checkin_sends_one_sanitized_round_notification() {
         &json!({"uid":"second-local", "name":"synthetic-checkin-private-name"}), false).unwrap();
     let target = super::test_support::transport_url("https://www.workbuddy.ai/notify-fixture");
     assert!(target.starts_with("http://127.0.0.1:"));
-    notifications::save(&json!({"enabled":true,"events":{"checkinFailure":true},"channels":{"webhook":{"enabled":true,"url":target}}})).unwrap();
+    notifications::save(json!({"enabled":true,"events":{"checkinFailure":true},"channels":{"webhook":{"enabled":true,"url":target}}}).as_object().unwrap()).unwrap();
     auto_checkin::write_state(json!({"enabled":true}));
     checkin_schedules::upsert(&json!({"id":"one-round", "time":"00:00", "timeEnd":"00:00", "retryTime":"", "retryGapMinutes":0, "providers":[PROVIDER], "enabled":true})).unwrap();
     let checkin = AutoCheckin::new(fixture.store.clone(), BillingService::new(AuthService::new(fixture.store.clone())));
     checkin.tick().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let initial_count = fixture.http.requests.lock().unwrap().iter().filter(|request| request.path == "/notify-fixture").count();
+    assert_eq!(initial_count, 2, "each due account completes one independent scheduled attempt");
     checkin.tick().await;
     tokio::time::sleep(Duration::from_millis(400)).await;
     let delivered = fixture.http.requests.lock().unwrap().iter().filter(|request| request.path == "/notify-fixture").map(|request| request.body.clone()).collect::<Vec<_>>();
-    assert_eq!(delivered.len(), 1, "one notification per failed round, not per account or tick");
-    assert_eq!(delivered[0]["event"], "checkin_failure");
-    assert_eq!(delivered[0]["data"]["failedCount"], 2);
-    assert!(!delivered[0].to_string().contains("synthetic-checkin-private"));
+    assert_eq!(delivered.len(), initial_count, "repeating the scheduler tick must not repeat an account attempt or its notification");
+    for delivery in delivered {
+        assert_eq!(delivery["event"], "checkin_failure");
+        assert_eq!(delivery["data"]["failedCount"], 1);
+        assert!(!delivery.to_string().contains("synthetic-checkin-private"));
+    }
     fixture.close().await;
 }
 
@@ -136,7 +141,7 @@ impl Fixture {
     async fn close(mut self) {
         self.adapter.take();
         plugin_host::shutdown_all().await;
-        assert!(self.host.wasm_shutdown_complete(), "finished requests release their real guest ownership");
+        assert!(self.host.local_shutdown_complete(), "finished requests release their real guest ownership");
         registry::remove(PROVIDER);
     }
 }
@@ -282,7 +287,7 @@ async fn official_wasm_packages_use_their_response_interfaces() {
             package.version, package.stateful, package.generation, package.editing);
     }
     plugin_host::shutdown_all().await;
-    assert!(hosts.iter().all(|host| host.wasm_shutdown_complete()));
+    assert!(hosts.iter().all(|host| host.local_shutdown_complete()));
     for package in packages { registry::remove(&package.provider); }
 }
 

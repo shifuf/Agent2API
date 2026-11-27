@@ -8,8 +8,7 @@ use agent2api_provider_protocol as proto;
 use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE, LOCATION};
 use url::Url;
 
-use std::sync::OnceLock;
-use tokio::sync::Semaphore;
+use super::managed_task::OrdinaryPolicy;
 
 pub(super) const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
@@ -132,21 +131,24 @@ fn check_content(bytes: &[u8], mime: &str) -> Result<(), proto::WireError> {
     Ok(())
 }
 
-pub(super) async fn download(url: &str, remaining: usize, downloaded: &mut usize) -> Result<Image, proto::WireError> {
+pub(super) async fn download(url: &str, remaining: usize, downloaded: &mut usize,
+    ordinary: OrdinaryPolicy) -> Result<Image, proto::WireError> {
     if *downloaded >= MAX_TOTAL_BYTES { return Err(limit("单次调用公共图片下载累计超过 64 MiB")); }
     if remaining == 0 { return Err(limit("单次调用资源总量超过 96 MiB")); }
     reference(url)?;
+    ordinary.check_public_url(url)?;
     let url = Url::parse(url).map_err(|_| invalid("公共图片地址格式无效"))?;
     // 不 spawn：宿主取消/关闭实例会直接 drop 此 future 和响应体；预算按已读取字节立即记账。
-    tokio::time::timeout(DOWNLOAD_TIMEOUT, request(url, remaining, downloaded)).await
+    tokio::time::timeout(DOWNLOAD_TIMEOUT, request(url, remaining, downloaded, ordinary)).await
         .map_err(|_| proto::WireError::with_code("公共图片下载超时", "timeout"))?
 }
 
-async fn request(mut url: Url, remaining: usize, downloaded: &mut usize) -> Result<Image, proto::WireError> {
-    static SLOTS: OnceLock<Semaphore> = OnceLock::new();
-    let _network = SLOTS.get_or_init(|| Semaphore::new(8)).try_acquire()
-        .map_err(|_| limit("公共图片并发下载数量已达上限"))?;
+async fn request(mut url: Url, remaining: usize, downloaded: &mut usize,
+    ordinary: OrdinaryPolicy) -> Result<Image, proto::WireError> {
+    let _network = crate::server::core::runtime_capacity::try_acquire(
+        crate::server::core::runtime_capacity::Class::Network, "public-images")?;
     for redirects in 0..=MAX_REDIRECTS {
+        ordinary.check_public_url(url.as_str())?;
         let (host, addresses) = addresses(&url).await?;
         // 复用宿主现有 no_proxy + no_redirect + resolve_to_addrs 客户端；
         // TLS 仍验证 URL 的原始域名，不使用插件/账号/系统代理及任何凭据头。
@@ -167,7 +169,7 @@ async fn request(mut url: Url, remaining: usize, downloaded: &mut usize) -> Resu
                 .ok_or_else(|| super::error("公共图片跳转缺少有效的目标地址"))?;
             if locations.next().is_some() { return Err(super::error("公共图片跳转目标不明确")); }
             reference(location)?;
-            url = url.join(location).map_err(|_| invalid("公共图片跳转目标无效"))?;
+            url = ordinary.redirect(&url, location)?;
             continue;
         }
         // 无 Range 请求只接受完整 200 响应，不把 206 或空响应当成完整图片。
@@ -183,6 +185,7 @@ async fn request(mut url: Url, remaining: usize, downloaded: &mut usize) -> Resu
         if response.content_length().is_some_and(|length| length > budget as u64) {
             return Err(limit("公共图片超过单图 32 MiB、累计 64 MiB 或资源总量 96 MiB 限制"));
         }
+        let memory = crate::server::core::runtime_capacity::MemoryBudget::new();
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| super::error("公共图片下载中断"))? {
             // 即使这片越界、之后图片无效或下载失败，也不返还已经读取的累计预算。
@@ -190,6 +193,7 @@ async fn request(mut url: Url, remaining: usize, downloaded: &mut usize) -> Resu
             if *downloaded > MAX_TOTAL_BYTES || bytes.len().saturating_add(chunk.len()) > budget {
                 return Err(limit("公共图片超过单图 32 MiB、累计 64 MiB 或资源总量 96 MiB 限制"));
             }
+            memory.grow(chunk.len())?;
             bytes.extend_from_slice(&chunk);
         }
         if bytes.is_empty() { return Err(super::error("公共图片内容为空")); }

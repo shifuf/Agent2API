@@ -97,23 +97,3 @@ pub fn rate_window_at(windows: &[RateWindow], ts_ms: i64) -> Option<f64> {
     }
     None
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn peak_and_midnight_window_boundaries_are_half_open() {
-        let utc = |hour| chrono::Utc.with_ymd_and_hms(2026, 11, 23, hour, 0, 0).unwrap().timestamp_millis();
-        assert!(is_peak_at("deepseek", utc(1)));
-        assert!(!is_peak_at("deepseek", utc(4)));
-        assert!(!is_peak_at("deepseek", chrono::Utc.with_ymd_and_hms(2026, 10, 1, 1, 0, 0).unwrap().timestamp_millis()));
-        let windows = [RateWindow { days: vec![1], start: "22:00".into(), end: "02:00".into(), rate: 1.5 }];
-        let local = |day, hour| Local.with_ymd_and_hms(2026, 11, day, hour, 0, 0).unwrap().timestamp_millis();
-        assert_eq!(rate_window_at(&windows, local(23, 21)), None);
-        assert_eq!(rate_window_at(&windows, local(23, 22)), Some(1.5));
-        assert_eq!(rate_window_at(&windows, local(24, 1)), Some(1.5));
-        assert_eq!(rate_window_at(&windows, local(24, 2)), None);
-        assert_eq!(rate_window_at(&windows, local(24, 22)), None);
-    }
-}

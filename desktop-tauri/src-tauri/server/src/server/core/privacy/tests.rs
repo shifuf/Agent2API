@@ -1,133 +1,345 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use bytes::Bytes;
+use futures::{stream, StreamExt};
+use serde_json::json;
 
-use super::{stream::Events, Rules, Vault};
+use crate::server::core::protocol::native::WireProtocol;
+use crate::server::core::upstream::native::{NativeBody, NativeResponse};
+use crate::server::core::upstream::usage::RequestTelemetry;
+use crate::server::core::upstream::ForwardOutcome;
 
-fn vault(word: &str) -> Arc<Vault> {
-    Arc::new(
-        Vault::new(&Rules {
-            words: vec![word.to_owned()],
-        })
-        .unwrap(),
-    )
-}
+use super::*;
 
-fn frame(value: Value) -> String {
-    format!("data: {value}\r\n\r\n")
-}
-
-#[test]
-fn masks_encoded_tool_values_and_fails_closed_on_keys_ids_and_binary_input() {
-    let vault = vault("démo");
-    let mut request =
-        json!({"function":{"arguments":r#"{"value":"d\u00e9mo"}"#}, "content":"démo"});
-    vault.mask_json(&mut request).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(request["function"]["arguments"].as_str().unwrap()).unwrap()
-            ["value"],
-        request["content"]
-    );
-    for mut request in [
-        json!({"démo":"v"}),
-        json!({"id":"démo"}),
-        json!({"type":"input_file","file_id":"fixture"}),
-        json!({"value":13900000001i64}),
-    ] {
-        assert!(vault.mask_json(&mut request).is_err());
-    }
-    let token = request["content"].as_str().unwrap();
-    assert_eq!(vault.restore(token, false).unwrap(), "démo");
-    assert_eq!(
-        super::Vault::new(&Rules::default())
-            .unwrap()
-            .restore(token, false)
-            .unwrap(),
-        token
-    );
+fn full_settings() -> PrivacySettings {
+    let mut s = PrivacySettings {
+        enabled: true,
+        reversible: true,
+        action: PrivacyAction::Mask,
+        secrets: true,
+        personal: true,
+        ..PrivacySettings::default()
+    };
+    s.categories.insert("public_ip".to_string(), true);
+    s.categories.insert("home_path".to_string(), true);
+    s
 }
 
 #[test]
-fn builtins_are_masked_and_other_requests_cannot_restore_them() {
-    let vault = vault("example-term");
-    let other = super::Vault::new(&Rules::default()).unwrap();
-    for literal in [
-        "test@fixture.invalid",
-        concat!("1390", "0000001"),
-        concat!("110101", "20001130", "123X"),
-        concat!("sk-", "fixture-0123456789"),
-        "example-term",
-    ] {
-        let token = vault.mask(literal).unwrap();
-        assert_ne!(token, literal);
-        assert_eq!(vault.mask(&token).unwrap(), token);
-        assert_eq!(vault.restore(&token, false).unwrap(), literal);
-        assert_eq!(other.restore(&token, false).unwrap(), token);
-    }
+fn secret_detection_and_deterministic_roundtrip() {
+    let compiled = CompiledPrivacySettings::compile(full_settings()).unwrap();
+    let vault = PrivacyVault::ephemeral();
+    let input = "OPENAI_API_KEY=sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd \
+                 postgres://admin:SuperSecr3tPass@db.internal:5432/app \
+                 密码：myPass1234 密钥为 2048 位 DB_PASS=${ENV_PASS} token=toBase64Url(x)";
+    let MaskTextResult::Handled {
+        text: Some(masked),
+        hits,
+        blocked_message: None,
+    } = mask_text(input, &compiled, &vault)
+    else {
+        panic!("expected masked output");
+    };
+    assert!(!masked.contains("sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd"));
+    assert!(!masked.contains("SuperSecr3tPass"));
+    assert!(!masked.contains("myPass1234"));
+    // 数量词、环境变量与函数调用不误伤
+    assert!(masked.contains("2048 位"));
+    assert!(masked.contains("${ENV_PASS}"));
+    assert!(masked.contains("toBase64Url(x)"));
+    assert!(!hits.is_empty());
+
+    // 同一进程/保险库多次铸造得到相同占位符，保护提示词缓存
+    let MaskTextResult::Handled {
+        text: Some(masked2),
+        ..
+    } = mask_text("key sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd", &compiled, &vault)
+    else {
+        panic!("expected second masked output");
+    };
+    let ph1 = masked
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .strip_prefix("OPENAI_API_KEY=")
+        .unwrap();
+    let ph2 = masked2.split_whitespace().nth(1).unwrap();
+    assert_eq!(ph1, ph2);
+
+    // 还原应与原值一致，且大小写或花括号内空格变体也容错还原
+    let (restored, restored_stats) = vault.restore_text(&masked, false);
+    assert_eq!(restored, input);
+    assert!(!restored_stats.is_empty());
 }
 
 #[test]
-fn all_fragment_boundaries_and_crlf_are_safe_for_each_tool_protocol() {
-    let literal = "fixture \"quote\" \\ 秘";
-    let vault = vault(literal);
-    let token = vault.mask(literal).unwrap();
-    for kind in ["chat", "responses", "anthropic"] {
-        let (wrap, pointer): (fn(&str) -> Value, &str) = match kind {
-            "chat" => (
-                |text| json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":text}}]}}]}),
-                "/choices/0/delta/tool_calls/0/function/arguments",
-            ),
-            "responses" => (
-                |text| json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":text}),
-                "/delta",
-            ),
-            _ => (
-                |text| json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":text}}),
-                "/delta/partial_json",
-            ),
-        };
-        for cut in 0..=token.len() {
-            let mut events = Events::new(vault.clone());
-            let input = frame(wrap(&format!("{{\"v\":\"{}", &token[..cut])))
-                + &frame(wrap(&format!("{}\"}}", &token[cut..])))
-                + "data: [DONE]\n\n";
-            let mut out = Vec::new();
-            for byte in input.as_bytes() {
-                out.extend(events.push(std::slice::from_ref(byte), false).unwrap());
+fn personal_pii_and_false_positive_guards() {
+    let compiled = CompiledPrivacySettings::compile(full_settings()).unwrap();
+    let vault = PrivacyVault::ephemeral();
+    let input = "Mail alice@example.com or icon@2x.png, phone 13800138000, \
+                 order_id=13912345678, id 11010519491231002X, badid 110105194912310021, \
+                 pub 8.8.8.8, priv 192.168.1.10, path /Users/alice_dev/src and /Users/root/tmp";
+    let MaskTextResult::Handled {
+        text: Some(masked),
+        ..
+    } = mask_text(input, &compiled, &vault)
+    else {
+        panic!("expected pii mask");
+    };
+    assert!(!masked.contains("alice@example.com"));
+    assert!(masked.contains("icon@2x.png"));
+    assert!(!masked.contains("13800138000"));
+    assert!(masked.contains("13912345678")); // 订单号上下文跳过
+    assert!(!masked.contains("11010519491231002X")); // 合法校验位身份证
+    assert!(masked.contains("110105194912310021")); // 非法校验位跳过
+    assert!(!masked.contains("8.8.8.8"));
+    assert!(masked.contains("192.168.1.10")); // 私网 IP 跳过
+    assert!(!masked.contains("alice_dev"));
+    assert!(masked.contains("/Users/root/tmp")); // 通用系统名跳过
+
+    let (restored, _) = vault.restore_text(&masked, false);
+    assert_eq!(restored, input);
+}
+
+#[test]
+fn words_custom_rules_allowlist_and_block_mode() {
+    let mut s = PrivacySettings {
+        enabled: true,
+        reversible: true,
+        action: PrivacyAction::Mask,
+        secrets: true,
+        personal: true,
+        words: vec!["Nightjar".to_string(), "ABC".to_string()],
+        words_ignore_case: true,
+        words_whole_word: true,
+        allowlist: vec!["public@demo.org".to_string()],
+        custom_rules: vec![PrivacyCustomRule {
+            id: "gw-key".to_string(),
+            name: "网关密钥".to_string(),
+            kind: "GW_KEY".to_string(),
+            enabled: true,
+            match_type: CustomRuleMatchType::Prefix,
+            pattern: "oc_sk_".to_string(),
+            action: Some(PrivacyAction::Block),
+        }],
+        ..PrivacySettings::default()
+    };
+    s.kind_actions
+        .insert("API_KEY".to_string(), PrivacyAction::Mask);
+    let compiled = CompiledPrivacySettings::compile(s).unwrap();
+    let vault = PrivacyVault::ephemeral();
+
+    let text = "deploy NIGHTJAR and ABC but keep XABCD and public@demo.org";
+    let MaskTextResult::Handled {
+        text: Some(masked),
+        blocked_message: None,
+        ..
+    } = mask_text(text, &compiled, &vault)
+    else {
+        panic!("expected words masked");
+    };
+    assert!(!masked.contains("NIGHTJAR"));
+    assert!(!masked.contains(" ABC "));
+    assert!(masked.contains("XABCD"));
+    assert!(masked.contains("public@demo.org"));
+
+    let blocked = mask_text("secret oc_sk_1234567890", &compiled, &vault);
+    let MaskTextResult::Handled {
+        blocked_message: Some(msg),
+        ..
+    } = blocked
+    else {
+        panic!("expected block");
+    };
+    assert!(!msg.contains("1234567890"));
+}
+
+#[test]
+fn native_anthropic_preserves_signed_thinking_blocks() {
+    let compiled = CompiledPrivacySettings::compile(full_settings()).unwrap();
+    let vault = PrivacyVault::ephemeral();
+    let body = json!({
+        "model": "claude-sonnet-4-5",
+        "system": "Key is sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "signed ordinary reasoning", "signature": "sig_123" },
+                    { "type": "text", "text": "Use sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd" }
+                ]
             }
-            out.extend(events.push(&[], true).unwrap());
-            let text = std::str::from_utf8(&out).unwrap();
-            let args = text
-                .lines()
-                .filter_map(|line| line.strip_prefix("data: "))
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .map(|v| v.pointer(pointer).unwrap().as_str().unwrap().to_owned())
-                .collect::<String>();
-            assert_eq!(serde_json::from_str::<Value>(&args).unwrap()["v"], literal);
-        }
+        ]
+    });
+    let PrivacyBodyOutcome::Masked { body: next, .. } =
+        mask_native_body(&body, WireProtocol::Anthropic, &compiled, &vault)
+    else {
+        panic!("expected native body masked");
+    };
+    // 签名思考块必须一字不动
+    assert_eq!(
+        next["messages"][0]["content"][0]["thinking"],
+        "signed ordinary reasoning"
+    );
+    assert_ne!(
+        next["messages"][0]["content"][1]["text"],
+        "Use sk-proj-8fK2mQx7Lp4Rt9Vw3Yz6Ab1Cd"
+    );
+}
+
+#[test]
+fn unmodifiable_sensitive_fields_and_opaque_attachments_fail_closed() {
+    let compiled = CompiledPrivacySettings::compile(full_settings()).unwrap();
+    let vault = PrivacyVault::ephemeral();
+    for body in [
+        json!({"model":"alice@example.com","messages":[{"role":"user","content":"ordinary"}]}),
+        json!({"metadata":{"alice@example.com":"ordinary"},"messages":[]}),
+        json!({"metadata":{"unhandled":"alice@example.com"},"messages":[]}),
+        json!({"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"ZmFrZQ=="}}]}]}),
+    ] {
+        assert!(matches!(mask_chat_body(&body, &compiled, &vault), PrivacyBodyOutcome::Blocked { .. }));
+    }
+    let signed = json!({"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"alice@example.com","signature":"sig_123"}]}]});
+    assert!(matches!(mask_native_body(&signed, WireProtocol::Anthropic, &compiled, &vault), PrivacyBodyOutcome::Blocked { .. }));
+    let encrypted = json!({"input":[{"type":"reasoning","encrypted_content":"opaque-value"}]});
+    assert!(matches!(mask_native_body(&encrypted, WireProtocol::Responses, &compiled, &vault), PrivacyBodyOutcome::Blocked { .. }));
+    let redacted = json!({"messages":[{"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque-value"}]}]});
+    assert!(matches!(mask_native_body(&redacted, WireProtocol::Anthropic, &compiled, &vault), PrivacyBodyOutcome::Blocked { .. }));
+    let mut warning = full_settings();
+    warning.action = PrivacyAction::Warn;
+    let warning = CompiledPrivacySettings::compile(warning).unwrap();
+    for (body, protocol) in [(signed, WireProtocol::Anthropic), (encrypted, WireProtocol::Responses), (redacted, WireProtocol::Anthropic)] {
+        assert!(matches!(mask_native_body(&body, protocol, &warning, &vault), PrivacyBodyOutcome::Unchanged | PrivacyBodyOutcome::Warned { .. }));
     }
 }
 
 #[test]
-fn partial_literal_and_interleaved_choices_survive_end() {
-    let vault = vault("fixture-word");
-    let token = vault.mask("fixture-word").unwrap();
-    let mut events = Events::new(vault);
-    let input = [(0, "["), (1, &token[..5]), (2, "other"), (1, &token[5..])]
-        .into_iter()
-        .map(|(index, text)| frame(json!({"choices":[{"index":index,"delta":{"content":text}}]})))
-        .collect::<String>()
-        + "data: [DONE]\n\n";
-    let out = String::from_utf8(events.push(input.as_bytes(), true).unwrap()).unwrap();
-    let mut results = [String::new(), String::new(), String::new()];
-    for data in out
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
-    {
-        let choice = &data["choices"][0];
-        results[choice["index"].as_u64().unwrap() as usize]
-            .push_str(choice["delta"]["content"].as_str().unwrap());
+fn stream_channel_restorer_handles_split_chunks_and_json_escape() {
+    let vault = PrivacyVault::ephemeral();
+    let ph = vault.mint("PASSWORD", "pa\"ss\nword");
+    let mut restorer = StreamChannelRestorer::new(true);
+    let mut stats = HashMap::new();
+
+    let mid = ph.len() / 2;
+    let p1 = format!(r#"{{"pw":"{}"#, &ph[..mid]);
+    let p2 = format!(r#"{}"}}"#, &ph[mid..]);
+    let out1 = restorer.push(&p1, &vault, &mut stats);
+    let out2 = restorer.push(&p2, &vault, &mut stats);
+    let tail = restorer.flush();
+    let combined = format!("{out1}{out2}{tail}");
+    let parsed: serde_json::Value = serde_json::from_str(&combined).unwrap();
+    assert_eq!(parsed["pw"], "pa\"ss\nword");
+    assert_eq!(stats.get("PASSWORD"), Some(&1));
+}
+
+#[tokio::test]
+async fn unmask_outcome_restores_chat_and_anthropic_sse() {
+    let telemetry = Arc::new(RequestTelemetry::new());
+    let vault = telemetry.privacy_vault();
+    let ph = vault.mint("EMAIL", "sse_test_user@example.com");
+    let mid = ph.len() / 2;
+    let c1 = format!(
+        "data: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"hi {}\"}}}}]}}\n\n",
+        &ph[..mid]
+    );
+    let c2 = format!(
+        "data: {{\"id\":\"1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}!\"}}}}]}}\n\n",
+        &ph[mid..]
+    );
+    let c3 = "data: [DONE]\n\n".to_string();
+
+    let s = stream::iter(vec![
+        Ok(Bytes::from(c1)),
+        Ok(Bytes::from(c2)),
+        Ok(Bytes::from(c3)),
+    ]);
+    let outcome = unmask_outcome(
+        ForwardOutcome::Stream {
+            status: 200,
+            stream: Box::new(s),
+        },
+        telemetry.clone(),
+    );
+    let ForwardOutcome::Stream { mut stream, .. } = outcome else {
+        panic!("expected stream");
+    };
+    let mut joined = String::new();
+    while let Some(item) = stream.next().await {
+        joined.push_str(std::str::from_utf8(&item.unwrap()).unwrap());
     }
-    assert_eq!(results, ["[", "fixture-word", "other"]);
+    assert!(joined.contains("sse_test_user@example.com!"));
+    assert!(!joined.contains(&ph));
+    let snap = telemetry.snapshot();
+    assert_eq!(snap.privacy_hits.first().map(|h| h.restored), Some(1));
+
+    // Anthropic 原生 SSE 流（含 input_json_delta 转义与 content_block_stop 冲刷）
+    let t2 = Arc::new(RequestTelemetry::new());
+    let ph_key = t2.privacy_vault().mint("API_KEY", "sk-line\"1\n2");
+    let kmid = ph_key.len() / 2;
+    let a1 = format!(
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{{\\\"k\\\":\\\"{}\"}}}}\n\n",
+        &ph_key[..kmid]
+    );
+    let a2 = format!(
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{}\\\"}}\"}}}}\n\n",
+        &ph_key[kmid..]
+    );
+    let a3 = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n".to_string();
+    let a4 = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string();
+
+    let native_outcome = unmask_outcome(
+        ForwardOutcome::Native(NativeResponse {
+            protocol: WireProtocol::Anthropic,
+            status: 200,
+            headers: Default::default(),
+            body: NativeBody::Stream(Box::new(stream::iter(vec![
+                Ok(Bytes::from(a1)),
+                Ok(Bytes::from(a2)),
+                Ok(Bytes::from(a3)),
+                Ok(Bytes::from(a4)),
+            ]))),
+        }),
+        t2,
+    );
+    let ForwardOutcome::Native(NativeResponse {
+        body: NativeBody::Stream(mut nstream),
+        ..
+    }) = native_outcome
+    else {
+        panic!("expected native stream");
+    };
+    let mut nj = String::new();
+    let mut partial_json = String::new();
+    while let Some(item) = nstream.next().await {
+        let chunk = std::str::from_utf8(&item.unwrap()).unwrap().to_string();
+        for line in chunk.lines() {
+            if let Some(raw) = line.strip_prefix("data: ") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
+                    if let Some(p) = val
+                        .pointer("/delta/partial_json")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        partial_json.push_str(p);
+                    }
+                }
+            }
+        }
+        nj.push_str(&chunk);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&partial_json).unwrap();
+    assert_eq!(parsed["k"], "sk-line\"1\n2");
+    assert!(!nj.contains(&ph_key));
+}
+
+#[test]
+fn response_cannot_restore_another_request_placeholder() {
+    let source = Arc::new(RequestTelemetry::new());
+    let placeholder = source.privacy_vault().mint("PASSWORD", "request-private-fixture");
+    let response = || ForwardOutcome::Completion { body: json!({"choices":[{"message":{"content":placeholder}}]}) };
+    let other = Arc::new(RequestTelemetry::new());
+    let ForwardOutcome::Completion { body } = unmask_outcome(response(), other) else { panic!("completion expected") };
+    assert_eq!(body["choices"][0]["message"]["content"], placeholder);
+    let ForwardOutcome::Completion { body } = unmask_outcome(response(), source) else { panic!("completion expected") };
+    assert_eq!(body["choices"][0]["message"]["content"], "request-private-fixture");
 }

@@ -36,6 +36,7 @@ import { t } from '../i18n'
 
 /** 一行模型（后端 `catalog::manage_view` 的 models[] 与本模块的适配结果同形） */
 export type ManageModel = {
+  toolCallingMode?: string | null
   id: string
   name: string
   provider: string

@@ -1,4 +1,5 @@
 import * as React from 'react'
+export type SpecialKey = 'compact' | 'vision' | 'title'
 import { Button, Empty, Input, NavItem, NavList, Sidebar, SidebarContent, SidebarFooter, SidebarGroupLabel, SidebarHeader, StatusDot } from '@ui'
 import { t } from '../i18n'
 import { groupDirty, type RouteGroupEditor } from './routing-group-state'

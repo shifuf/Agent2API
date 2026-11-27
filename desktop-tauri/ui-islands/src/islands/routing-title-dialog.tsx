@@ -2,7 +2,7 @@ import * as React from 'react'
 import { Button, Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle, Spinner, confirmDialog } from '@ui'
 import { t } from '../i18n'
 
-type Rule = { enabled: boolean; model: string; clients: string[]; fallback: 'error' }
+type Rule = { enabled: boolean; model: string; clients: string[]; fallback: 'original' | 'error' }
 type Config = { enabled: boolean; rules: Rule[] }
 type View = { config: Config; revision: string; models: { id: string }[]; clients: { id: string; label: string }[] }
 export type TitleRoutesApi = { getTitleRoutes(): Promise<View>; saveTitleRoutes(input: { config: Config; revision: string }): Promise<View> }
@@ -42,7 +42,7 @@ export function TitleRouteSettings({ api }: { api?: TitleRoutesApi }) {
         {busy && !view ? <Spinner /> : null}
         {error ? <p role='alert' className='text-danger'>{error}</p> : null}
         {view && draft ? <fieldset disabled={busy} className='grid gap-3'>
-          <p>{t('只改写被识别为标题生成的小请求，普通对话不受影响。')}</p><p>{t('目标不可用或未授权时返回错误，不回退原模型。')}</p>
+          <p>{t('只改写被识别为标题生成的小请求，普通对话不受影响。')}</p>
           <label><input type='checkbox' checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} /> {t('启用')}</label>
           {draft.rules.map((rule, index) => <fieldset key={index} className='grid gap-2 rounded-md border border-border p-3'>
             <legend>{t('优先级 {index}', { index: index + 1 })}</legend>
@@ -54,6 +54,9 @@ export function TitleRouteSettings({ api }: { api?: TitleRoutesApi }) {
               <option value=''>{t('选择模型')}</option>
               {rule.model && !view.models.some(model => model.id === rule.model) ? <option value={rule.model}>{rule.model} · {t('不可用')}</option> : null}
               {view.models.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
+            </select></label>
+            <label>{t('失败处理')} <select value={rule.fallback} onChange={event => update(index, { fallback: event.target.value as Rule['fallback'] })}>
+              <option value='error'>{t('直接报错')}</option><option value='original'>{t('退回原模型')}</option>
             </select></label>
             <div className='flex flex-wrap gap-2'><Button size='sm' variant='outline' aria-label={t('提高优先级')} disabled={!index} onClick={() => move(index, -1)}>↑</Button>
               <Button size='sm' variant='outline' aria-label={t('降低优先级')} disabled={index === draft.rules.length - 1} onClick={() => move(index, 1)}>↓</Button>

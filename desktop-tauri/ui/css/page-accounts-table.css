@@ -436,10 +436,7 @@ body.queue-dragging * { cursor: grabbing; }
    与图标已经说清楚了。分组带只负责两件事：说清这是谁、以及可拖（顺位）。
 
    ── 整条可点折叠（2026-10）────────────────────────────────
-   带宽里的家名、统计、合计、空白处都能点：收起一家是高频动作，要求用户瞄准
-   右侧那颗小箭头是没必要的。按钮与拖动把手各自保留原动作（见 GroupBandRow 的
-   onClick 排除名单）。箭头在悬停整条时提亮 —— 它是键盘 / 读屏的真正入口，
-   鼠标用户则由整条承载。 */
+   带宽里的家名、统计、合计、空白处都能点；按钮与拖动把手各自保留原动作。 */
 .acct-group .grp-band > td {
   padding: 0;
   background: var(--surface-2);
@@ -458,7 +455,9 @@ body.queue-dragging * { cursor: grabbing; }
 /* 控件与把手在自己的地盘上换回各自的光标：一眼就能分出「这几处是控件」 */
 .grp-band .grp-iconbtn { cursor: pointer; }
 .grp-band .queue-grip { cursor: grab; }
-.grp-band:hover .grp-iconbtn.grp-fold { background: var(--nav-hover); color: var(--text); }
+.order-grip.locked,
+.queue-grip.locked,
+.grp-band .queue-grip.locked { opacity: .4; cursor: not-allowed; }
 
 /* 组顺位：与 .order-rank 同色同一档字号 —— 组的先后与组内先后是同一类读数。
    title 里说清「拖动可改」，格子本身不放控件。 */
@@ -555,9 +554,6 @@ body.queue-dragging * { cursor: grabbing; }
 
 .grp-iconbtn:hover { background: var(--nav-hover); color: var(--text); }
 .grp-iconbtn svg { display: block; transition: transform .16s ease; }
-
-/* 折叠态：箭头转成「指向右」，与展开态共用一个图标（少一枚图标，状态靠旋转表达） */
-.acct-group.collapsed .grp-fold svg { transform: rotate(-90deg); }
 
 /* 折叠时分组带的下边框仍然留着：它同时是与下一段的分隔线 */
 
@@ -921,9 +917,83 @@ body.queue-dragging * { cursor: grabbing; }
 .usage-pop-view.bad { color: var(--danger); }
 .usage-pop-view.muted { color: var(--text-3); font-weight: 500; }
 
-.usage-toggle:has(.usage-toggle-soon) { padding-right: 18px; gap: 4px; }
-.usage-toggle:has(.usage-toggle-soon) .val { padding: 0 2px; text-align: left; }
-.usage-toggle-soon,
+/* ─── 快到期积分：底部双色占比细条（左绿安全余额 · 右暖快到期）───
+   不再在按钮内部右侧硬套一颗胶囊（宽列下左右分家、中间拉出大片空洞）；
+   改为上行左主读数 + 右无框快到期文案，下方嵌一条 3px 双色占比线把左右
+   视觉连成一体。拿不到真比例（如不限额度或上游缺剩余数）时不画假条，
+   退回单行居中聚合排布。 */
+.usage-toggle.usage-toggle-has-soon {
+  padding: 0 18px;
+  gap: 0;
+}
+.usage-toggle.usage-toggle-has-soon.has-ratio {
+  height: auto;
+  min-height: 38px;
+  padding: 5px 22px 6px 10px;
+}
+.usage-soon-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  gap: 5px;
+}
+.usage-soon-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  line-height: 1.25;
+}
+.usage-toggle.usage-toggle-has-soon.has-ratio .usage-soon-head {
+  justify-content: space-between;
+}
+.usage-toggle.usage-toggle-has-soon .val {
+  flex: 0 1 auto;
+  padding: 0;
+  text-align: left;
+}
+.usage-toggle-soon {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--warn);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.usage-toggle-soon.is-today { color: var(--danger); }
+
+.usage-soon-track {
+  display: flex;
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--hairline);
+  gap: 1.5px;
+}
+.usage-soon-safe {
+  height: 100%;
+  border-radius: 999px 0 0 999px;
+  background: color-mix(in srgb, var(--ok) 65%, transparent);
+  transition: width 220ms ease;
+}
+.usage-toggle.warn .usage-soon-safe { background: color-mix(in srgb, var(--warn) 45%, transparent); }
+.usage-toggle.bad .usage-soon-safe { background: color-mix(in srgb, var(--danger) 45%, transparent); }
+.usage-toggle.muted .usage-soon-safe { background: color-mix(in srgb, var(--text-3) 45%, transparent); }
+.usage-soon-risk {
+  height: 100%;
+  border-radius: 0 999px 999px 0;
+  background: var(--warn);
+  transition: width 220ms ease;
+}
+.usage-soon-risk.is-today { background: var(--danger); }
+.usage-soon-risk.is-full { border-radius: 999px; }
+
 .usage-pop-soon-tag {
   flex: 0 1 auto;
   min-width: 0;
@@ -937,7 +1007,7 @@ body.queue-dragging * { cursor: grabbing; }
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.usage-toggle-soon { max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
+.usage-pop-soon-tag.is-today { background: var(--danger-soft); color: var(--danger); }
 .usage-toggle.usage-pool-line:has(.usage-pool-soon) { height: auto; }
 .usage-pool-soon { display: block; margin-top: 3px; color: var(--warn); font-size: 10.5px; }
 .usage-pop-soon {
@@ -1084,9 +1154,8 @@ body.queue-dragging * { cursor: grabbing; }
   line-height: 1.5;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ─── 操作列 ─── */
@@ -1101,14 +1170,14 @@ body.queue-dragging * { cursor: grabbing; }
   gap: 4px;
 }
 
-.acct-actions button {
+.acct-actions > button {
   height: 25px;
   padding: 0 8px;
   border-radius: var(--r-sm);
   font-size: 11.5px;
 }
 
-.acct-actions button:hover:not(:disabled) {
+.acct-actions > button:hover:not(:disabled) {
   border-color: var(--primary-bd);
   background: var(--primary-soft);
   color: var(--primary-fg);

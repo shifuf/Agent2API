@@ -1,112 +1,185 @@
-//! Cache SQL enumerations; display rules remain live in RequestStats::filter_options.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use serde_json::Value;
 
-use super::{source_report, sql, RequestSource, MAX_FILTER_OPTIONS};
-
+/// 下拉筛选项缓存：避免每次打开「请求日志」都对百万级大表做 4 次全表 GROUP BY。
+///
+/// 命中规则：
+/// - 只要数据库未清理/压缩、外部进程未改库，且新写入的请求未出现缓存外的新值，就沿用内存快照；
+/// - 流量活跃且仅复用已知值时，最长 5 分钟做一次后台自然刷新，以更新「按出现次数排序」的前后顺位；
+/// - 一旦出现未见过的新模型 / 提供商 / 客户端 / API Key，或发生清理 / 裁剪 / 重算，立即标脏并在下一次请求重算。
 const MEMORY_TRUST_WINDOW: Duration = Duration::from_secs(15);
 const ACTIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 
-#[derive(Clone)]
-pub(super) struct FilterData {
-    pub models: Vec<String>,
-    pub providers: Vec<String>,
-    pub sources: Value,
-}
-
 struct CachedFilters {
     external: i64,
-    local: u64,
+    database: u64,
+    requests: u64,
     computed_at: Instant,
-    checked_at: Instant,
-    invalidated: bool,
-    written: bool,
     models: HashSet<String>,
     providers: HashSet<String>,
-    clients: HashMap<String, String>,
-    api_keys: HashMap<String, String>,
-    data: FilterData,
+    clients: HashSet<String>,
+    api_keys: HashSet<String>,
+    full: bool,
+    value: Value,
 }
 
 #[derive(Default)]
 pub(super) struct FilterOptionsCache {
+    dirty: AtomicBool,
     cached: Mutex<Option<CachedFilters>>,
 }
 
-fn labels(value: &Value, field: &str) -> HashMap<String, String> {
-    value[field].as_array().into_iter().flatten().filter_map(|item| {
-        Some((item["value"].as_str()?.to_owned(), item["label"].as_str().unwrap_or("").to_owned()))
-    }).collect()
-}
-
 impl FilterOptionsCache {
+    pub fn new() -> Self {
+        Self {
+            dirty: AtomicBool::new(true),
+            cached: Mutex::new(None),
+        }
+    }
+
     pub fn invalidate(&self) {
-        if let Some(cached) = self.cached.lock().unwrap_or_else(|error| error.into_inner()).as_mut() {
-            cached.invalidated = true;
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    /// 记账写入时轻量核对是否引入了下拉清单尚未知晓的新枚举值。
+    pub fn note_written(
+        &self,
+        model: &str,
+        upstream_model: &str,
+        provider: &str,
+        client: &str,
+        api_key_filter: &str,
+    ) {
+        if self.dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(guard) = self.cached.try_lock() else {
+            return;
+        };
+        let Some(cached) = guard.as_ref() else {
+            self.dirty.store(true, Ordering::Release);
+            return;
+        };
+        if cached.full {
+            // 清单已达上限时仍可能受频率排序影响，交由时间兜底更新，不因长尾项反复标脏。
+            return;
+        }
+        let unseen = (!model.is_empty() && !cached.models.contains(model))
+            || (!upstream_model.is_empty() && !cached.models.contains(upstream_model))
+            || (!provider.is_empty() && !cached.providers.contains(provider))
+            || (!client.is_empty() && !cached.clients.contains(client))
+            || (!api_key_filter.is_empty() && !cached.api_keys.contains(api_key_filter));
+        if unseen {
+            self.dirty.store(true, Ordering::Release);
         }
     }
 
-    /// Called after a successful commit, before releasing the connection lock.
-    /// Test caps independently: a full model list must not hide a new API Key.
-    pub fn note_written(&self, model: &str, upstream_model: &str, provider: &str, source: Option<&RequestSource>, before: u64, after: u64) {
-        let mut guard = self.cached.lock().unwrap_or_else(|error| error.into_inner());
-        let Some(cached) = guard.as_mut() else { return; };
-        cached.invalidated |= cached.local != before;
-        cached.local = after;
-        cached.written = true;
-        let unseen = |value: &str, known: &HashSet<String>| !value.is_empty() && known.len() < MAX_FILTER_OPTIONS && !known.contains(value);
-        cached.invalidated |= unseen(model, &cached.models) || unseen(upstream_model, &cached.models) || unseen(provider, &cached.providers);
-        if let Some(source) = source {
-            let client_label = if source.recorded_client_name().is_empty() { source_report::client_label(&source.client) } else { source.recorded_client_name() };
-            if !source.client.is_empty() {
-                cached.invalidated |= match cached.clients.get(&source.client) {
-                    Some(label) => label != client_label,
-                    None => cached.clients.len().saturating_sub(1) < MAX_FILTER_OPTIONS,
-                };
-            }
-            let key = source.api_key.filter_value();
-            cached.invalidated |= match cached.api_keys.get(&key) {
-                Some(label) => !source.api_key.name.is_empty() && *label != source_report::key_label(&source.api_key),
-                None => cached.api_keys.len() < MAX_FILTER_OPTIONS,
-            };
-        }
-    }
-
-    pub fn read_fast(&self, now: Instant, local: u64) -> Option<FilterData> {
-        let guard = self.cached.lock().unwrap_or_else(|error| error.into_inner());
-        let cached = guard.as_ref()?;
-        if cached.invalidated || cached.local != local || now.saturating_duration_since(cached.checked_at) >= MEMORY_TRUST_WINDOW
-            || (cached.written && now.saturating_duration_since(cached.computed_at) >= ACTIVE_REFRESH_INTERVAL) {
+    /// 短窗内无需进库锁，直接读取内存快照。
+    pub fn read_fast(&self, current_database: u64, current_requests: u64) -> Option<Value> {
+        if self.dirty.load(Ordering::Acquire) {
             return None;
         }
-        Some(cached.data.clone())
+        let guard = self.cached.lock().unwrap_or_else(|error| error.into_inner());
+        let cached = guard.as_ref()?;
+        if cached.database != current_database {
+            return None;
+        }
+        if cached.requests != current_requests && cached.computed_at.elapsed() >= ACTIVE_REFRESH_INTERVAL {
+            return None;
+        }
+        if cached.computed_at.elapsed() < MEMORY_TRUST_WINDOW {
+            return Some(cached.value.clone());
+        }
+        None
     }
 
-    /// Lock ordering is always stats -> connection -> cache. The fast read never
-    /// holds its cache lock while asking for the database, so writes cannot race
-    /// a stale cache publication or deadlock with a reader.
-    pub fn read_or_compute(&self, conn: &Connection, now: Instant, local: u64) -> rusqlite::Result<FilterData> {
-        let external = conn.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))?;
-        let mut guard = self.cached.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(cached) = guard.as_mut() {
-            if !cached.invalidated && cached.local == local && cached.external == external
-                && (!cached.written || now.saturating_duration_since(cached.computed_at) < ACTIVE_REFRESH_INTERVAL) {
-                cached.checked_at = now;
-                return Ok(cached.data.clone());
+    /// 持库锁后按外部版本号与脏标记核对是否复用缓存；未命中才执行给定查询闭包。
+    pub fn read_or_compute(
+        &self,
+        conn: &Connection,
+        current_database: u64,
+        current_requests: u64,
+        max_options: usize,
+        compute: impl FnOnce(&Connection) -> rusqlite::Result<Value>,
+    ) -> rusqlite::Result<Value> {
+        let external: i64 = conn.pragma_query_value(None, "data_version", |row| row.get(0))?;
+        let dirty = self.dirty.load(Ordering::Acquire);
+        if !dirty {
+            let guard = self.cached.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(cached) = guard.as_ref() {
+                let version_ok = cached.external == external && cached.database == current_database;
+                let fresh_enough = cached.requests == current_requests
+                    || cached.computed_at.elapsed() < ACTIVE_REFRESH_INTERVAL;
+                if version_ok && fresh_enough {
+                    return Ok(cached.value.clone());
+                }
             }
         }
-        let (models, providers) = sql::select_filter_options(conn, MAX_FILTER_OPTIONS)?;
-        let sources = sql::source_filter_options(conn, MAX_FILTER_OPTIONS)?;
-        let data = FilterData { models, providers, sources };
-        *guard = Some(CachedFilters {
-            external, local, computed_at: now, checked_at: now, invalidated: false, written: false,
-            models: data.models.iter().cloned().collect(), providers: data.providers.iter().cloned().collect(),
-            clients: labels(&data.sources, "clients"), api_keys: labels(&data.sources, "apiKeys"), data: data.clone(),
-        });
-        Ok(data)
+        let value = compute(conn)?;
+        let snapshot = build_cached(external, current_database, current_requests, max_options, value.clone());
+        {
+            let mut guard = self.cached.lock().unwrap_or_else(|error| error.into_inner());
+            *guard = Some(snapshot);
+            self.dirty.store(false, Ordering::Release);
+        }
+        Ok(value)
+    }
+}
+
+fn build_cached(
+    external: i64,
+    database: u64,
+    requests: u64,
+    max_options: usize,
+    value: Value,
+) -> CachedFilters {
+    let models = value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let providers = value["providers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let clients = value["clients"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("value").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let api_keys = value["apiKeys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("value").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let full = models.len() >= max_options
+        || providers.len() >= max_options
+        || clients.len() >= max_options
+        || api_keys.len() >= max_options;
+    CachedFilters {
+        external,
+        database,
+        requests,
+        computed_at: Instant::now(),
+        models,
+        providers,
+        clients,
+        api_keys,
+        full,
+        value,
     }
 }

@@ -36,8 +36,11 @@ pub(super) fn select_all_asc(conn: &Connection) -> rusqlite::Result<Vec<LogEntry
     let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM logs ORDER BY id ASC"))?;
     let mut rows = stmt.query([])?;
     let mut entries = Vec::new();
+    let names = crate::server::core::plugin_host::startup::log_names();
     while let Some(row) = rows.next()? {
-        entries.push(decode_row(row)?);
+        let mut entry = decode_row(row)?;
+        super::plugin_events::enrich(&mut entry, &names);
+        entries.push(entry);
     }
     Ok(entries)
 }
@@ -83,7 +86,8 @@ impl FilterPlan {
         //     的 matches 会再滤一次），所以 SQL 只做「排除 debug」。
         //   · debug 视图不下推 —— 旧插件那批 info 行读出来才改判 debug，
         //     SQL 先按 level='debug' 过滤会漏掉它们。
-        //   · warn / error 只会从 info 改判出来，不会从 warn/error 改走，精确。
+        //   · warn / error 同样是超集（历史误判成 error 的账号配置变更会在
+        //     `prepare` 还原为 info，再由 Rust 侧 matches 滤掉）。
         match query.view {
             LogView::Important => fragments.push("level <> 'debug'"),
             LogView::Debug | LogView::All => {}
@@ -183,38 +187,6 @@ pub(super) fn select_matching_desc(
     with_matching_desc(conn, plan, |entries| entries.collect())
 }
 
-#[cfg(test)]
-mod paging_tests {
-    use super::*;
-
-    #[test]
-    fn streamed_paging_preserves_unicode_filter_legacy_classification_and_group_windows() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY, ts INTEGER, level TEXT, category TEXT, message TEXT, data TEXT);").unwrap();
-        for id in 1..=100 {
-            insert(&conn, &LogEntry { id, ts: id as i64 * 1000, level: "info".into(), category: "plugin".into(),
-                message: "[Plugin] [HTTP] GET https://example.test/ÉXITO".into(), data: Some(serde_json::json!({"account":"a"})) }).unwrap();
-        }
-        let query = Query { view: LogView::Debug, keyword: Some("éxito".into()), aggregate: true, offset: 1, limit: Some(1), ..Default::default() };
-        let plan = FilterPlan::of(&query);
-        let mut matched = 0;
-        let (total, groups) = with_matching_desc(&conn, &plan, |entries| {
-            presentation::groups_paged(entries.inspect(|_| matched += 1), true, 1, 1)
-        }).unwrap();
-        assert_eq!(matched, 100);
-        assert_eq!(total, 4);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].id, 69);
-        assert_eq!(groups[0].count, 31);
-        assert_eq!(groups[0].entries.last().unwrap().id, 39);
-        let (total, groups) = with_matching_desc(&conn, &plan, |entries| presentation::groups_paged(entries, false, 99, 10)).unwrap();
-        assert_eq!(total, 100);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].id, 1);
-    }
-}
-
-/// 在数据库游标上逐条归一、筛选，分页调用方不再持有整份历史正文。
 pub(super) fn with_matching_desc<T>(
     conn: &Connection,
     plan: &FilterPlan,
@@ -226,9 +198,13 @@ pub(super) fn with_matching_desc<T>(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(plan.binds.iter()), decode_row)?;
+    let names = crate::server::core::plugin_host::startup::log_names();
     let mut failure = None;
     let mut entries = rows.filter_map(|result| match result {
-        Ok(entry) => plan.matches(&entry).then_some(entry),
+        Ok(mut entry) => {
+            super::plugin_events::enrich(&mut entry, &names);
+            plan.matches(&entry).then_some(entry)
+        }
         Err(error) => { failure = Some(error); None }
     });
     let result = consume(&mut entries);

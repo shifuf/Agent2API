@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
@@ -32,8 +32,8 @@ pub struct Settings {
     pub site_key: String,
     #[serde(default)]
     pub widget_origin: String,
-    secret: String,
-    hostnames: Vec<String>,
+    pub(crate) secret: String,
+    pub(crate) hostnames: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -64,6 +64,32 @@ fn hostname_valid(host: &str) -> bool {
 }
 
 impl Settings {
+    pub(crate) fn from_captcha(settings: &crate::server::config::captcha::CaptchaSettings) -> Result<Self, String> {
+        // ALTCHA can legitimately have no retained Turnstile key.
+        Ok(Self {
+            provider: if settings.provider == "turnstile" { Provider::Turnstile } else { Provider::Altcha },
+            site_key: settings.site_key.clone(), widget_origin: settings.widget_origin.clone(),
+            hostnames: settings.hostnames.clone(),
+            secret: if settings.has_secret() { String::from(settings.secret()?.as_str()) } else { String::new() },
+        })
+    }
+
+    pub(crate) fn patch(mut self, map: &serde_json::Map<String, Value>) -> Result<Self, (i32, &'static str)> {
+        if map.is_empty() || map.keys().any(|name| !matches!(name.as_str(), "provider" | "siteKey" | "secret" | "hostnames" | "widgetOrigin")) {
+            return Err((400, INVALID));
+        }
+        if let Some(value) = map.get("provider") { self.provider = serde_json::from_value(value.clone()).map_err(|_| (400, INVALID))?; }
+        if let Some(value) = map.get("siteKey") { self.site_key = value.as_str().ok_or((400, INVALID))?.to_owned(); }
+        if let Some(value) = map.get("widgetOrigin") { self.widget_origin = value.as_str().ok_or((400, INVALID))?.trim().trim_end_matches('/').to_ascii_lowercase(); }
+        if let Some(value) = map.get("secret") { self.secret = value.as_str().ok_or((400, INVALID))?.to_owned(); }
+        if let Some(value) = map.get("hostnames") {
+            let hosts: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| (400, INVALID))?;
+            self.hostnames = hosts.into_iter().map(|host| host.trim().to_ascii_lowercase()).collect();
+            self.hostnames.sort(); self.hostnames.dedup();
+        }
+        self.validate().map_err(|error| (400, error))?;
+        Ok(self)
+    }
     fn widget_host(&self) -> Option<&str> {
         let host = self.widget_origin.strip_prefix("https://")?;
         (hostname_valid(host) && host.contains('.') && host.parse::<std::net::IpAddr>().is_err())
@@ -91,62 +117,53 @@ impl Settings {
     }
 }
 
-fn read(conn: &rusqlite::Connection) -> Result<Settings, &'static str> {
+fn read(conn: &rusqlite::Connection) -> Result<Option<Settings>, &'static str> {
     let raw: Option<String> = conn
         .query_row("SELECT value FROM kv WHERE key=?1", [KEY], |row| row.get(0))
         .optional()
         .map_err(|_| UNAVAILABLE)?;
     let Some(raw) = raw else {
-        return Ok(Settings::default());
+        return Ok(None);
     };
     let stored: Stored = serde_json::from_str(&raw).map_err(|_| UNAVAILABLE)?;
     if stored.version != 1 || !crypto::is_envelope(&stored.settings_enc) {
         return Err(UNAVAILABLE);
     }
-    let bytes = Zeroizing::new(
-        crypto::open(&stored.settings_enc, SecretScope::Accounts).map_err(|_| UNAVAILABLE)?,
-    );
+    let key = crypto::existing_key_bytes(SecretScope::Accounts).ok_or(UNAVAILABLE)?;
+    let bytes = Zeroizing::new(crypto::open_with_key(&stored.settings_enc, &key).map_err(|_| UNAVAILABLE)?);
     let settings: Settings = serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE)?;
     settings.validate().map_err(|_| UNAVAILABLE)?;
-    Ok(settings)
+    Ok(Some(settings))
+}
+
+pub(crate) fn read_legacy(db: Option<&Db>) -> Result<Option<Settings>, &'static str> {
+    let Some(db) = db else { return Ok(None); };
+    db.with(read).ok_or(UNAVAILABLE)?
 }
 
 pub fn load(db: Option<&Db>) -> Result<Settings, &'static str> {
-    db.and_then(|db| db.with(read)).ok_or(UNAVAILABLE)?
+    let current = crate::server::config::current();
+    if current.raw().contains_key(crate::server::config::captcha::KEY_PANEL_CAPTCHA) {
+        return Settings::from_captcha(&crate::server::config::captcha::CaptchaSettings::from_config(&current)).map_err(|_| UNAVAILABLE);
+    }
+    let db = db.ok_or(UNAVAILABLE)?;
+    Ok(read_legacy(Some(db))?.unwrap_or_default())
 }
 
-pub fn save(db: &Db, body: Value) -> Result<Value, (i32, &'static str)> {
-    let map = body.as_object().ok_or((400, INVALID))?;
-    if map.is_empty()
-        || map.keys().any(|name| {
-            !matches!(
-                name.as_str(),
-                "provider" | "siteKey" | "secret" | "hostnames" | "widgetOrigin"
-            )
-        })
-    {
-        return Err((400, INVALID));
+pub fn save(db: &Db, body: Value) -> Result<Value, (i32, String)> {
+    let map = body.as_object().ok_or((400, INVALID.to_owned()))?;
+    crate::server::config::captcha::save_legacy(map, db)?;
+    management(Some(db)).map_err(|message| (503, message.to_owned()))
+}
+
+pub fn management(db: Option<&Db>) -> Result<Value, &'static str> {
+    let current = crate::server::config::current();
+    if current.raw().contains_key(crate::server::config::captcha::KEY_PANEL_CAPTCHA) {
+        let settings = crate::server::config::captcha::CaptchaSettings::from_config(&current);
+        return Ok(json!({"provider": settings.provider, "siteKey": settings.site_key,
+            "widgetOrigin": settings.widget_origin, "hasSecret": settings.has_secret(), "hostnames": settings.hostnames}));
     }
-    db.with_mut(|conn| {
-        let tx = conn.transaction().map_err(|_| (503,UNAVAILABLE))?;
-        let mut settings = read(&tx).or_else(|_| if map.get("provider").and_then(Value::as_str)==Some("altcha") { Ok(Settings::default()) } else { Err((503,UNAVAILABLE)) })?;
-        if let Some(value) = map.get("provider") { settings.provider = serde_json::from_value(value.clone()).map_err(|_| (400,INVALID))?; }
-        if let Some(value) = map.get("siteKey") { settings.site_key = value.as_str().ok_or((400,INVALID))?.to_owned(); }
-        if let Some(value) = map.get("widgetOrigin") { settings.widget_origin = value.as_str().ok_or((400,INVALID))?.trim().trim_end_matches('/').to_ascii_lowercase(); }
-        if let Some(value) = map.get("secret") { settings.secret = value.as_str().ok_or((400,INVALID))?.to_owned(); }
-        if let Some(value) = map.get("hostnames") {
-            let hosts: Vec<String> = serde_json::from_value(value.clone()).map_err(|_| (400,INVALID))?;
-            settings.hostnames = hosts.into_iter().map(|host| host.trim().to_ascii_lowercase()).collect();
-            settings.hostnames.sort(); settings.hostnames.dedup();
-        }
-        settings.validate().map_err(|err| (400,err))?;
-        let bytes = Zeroizing::new(serde_json::to_vec(&settings).map_err(|_| (503,UNAVAILABLE))?);
-        let settings_enc = crypto::seal(&bytes,SecretScope::Accounts).map_err(|_| (503,UNAVAILABLE))?;
-        let raw = serde_json::to_string(&Stored{version:1,settings_enc}).map_err(|_| (503,UNAVAILABLE))?;
-        tx.execute("INSERT INTO kv(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![KEY,raw]).map_err(|_| (503,UNAVAILABLE))?;
-        tx.commit().map_err(|_| (503,UNAVAILABLE))?;
-        Ok(settings.admin())
-    }).ok_or((503,UNAVAILABLE))?
+    load(db).map(|settings| settings.admin())
 }
 
 fn client() -> Option<&'static reqwest::Client> {

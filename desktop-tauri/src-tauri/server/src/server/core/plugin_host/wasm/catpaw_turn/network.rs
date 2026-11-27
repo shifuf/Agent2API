@@ -1,5 +1,5 @@
 //! 固定CatPaw round/running/turn与原回执stop/终态POST，单次发送不随Location换来源。
-//! 短响应只支持 HTTP 200、顶层 code=0/200 及可选 data/result 对象或 null；清理受理不代表远端销毁。
+//! 短响应须有明确成功业务码；清理受理不代表远端资源已销毁。
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use super::{error, json_text, registry::nonce};
-use super::super::fixed_http::FrozenHttpClient;
+use crate::server::core::egress::managed::FrozenHttpClient;
 use super::super::catpaw_account::Account as RowSource;
 
 const ORIGIN: &str = "https://ai.catpaw.meituan.com";
@@ -58,9 +58,15 @@ impl RoundReceipt {
 pub(super) struct PreparedRequest {
     request: reqwest::Request,
     route: Route,
+    dispatch: Option<crate::server::core::upstream::usage::DispatchTracker>,
 }
 
 impl PreparedRequest {
+    pub(super) fn tracked(mut self, dispatch: crate::server::core::upstream::usage::DispatchTracker) -> Self {
+        self.dispatch = Some(dispatch);
+        self
+    }
+
     pub(super) fn into_catalog(self) -> Result<reqwest::Request, proto::WireError> {
         if self.route != Route::Catalog {
             return Err(error::invalid());
@@ -108,7 +114,7 @@ pub(super) fn prepare(
         .body(body.to_string())
         .build()
         .map_err(|_| error::unavailable())?;
-    Ok(PreparedRequest { request, route })
+    Ok(PreparedRequest { request, route, dispatch: None })
 }
 
 pub(super) async fn short(
@@ -117,20 +123,21 @@ pub(super) async fn short(
     route: Route,
     conversation: &str,
     call_deadline: Option<Instant>,
-    dispatch: Option<&crate::server::core::upstream::usage::DispatchTracker>,
 ) -> Result<RoundReceipt, proto::WireError> {
     if matches!(route, Route::Catalog | Route::Turn) || prepared.route != route {
         return Err(error::invalid());
     }
-    let PreparedRequest { request, .. } = prepared;
+    let PreparedRequest { request, dispatch, .. } = prepared;
     let deadline = Instant::now() + if route == Route::Stop { Duration::from_secs(3) } else { CONTROL_TIMEOUT };
     let deadline = call_deadline.map_or(deadline, |original| deadline.min(original));
     if Instant::now() >= deadline { return Err(error::unknown()); }
-    let client = client.client().map_err(|_| error::unknown())?;
-    if let Some(dispatch) = dispatch { dispatch.mark(); }
     let response = tokio::time::timeout_at(
         deadline,
-        client.execute(request),
+        async {
+            let client = client.client().map_err(|_| error::unknown())?;
+            if let Some(dispatch) = dispatch { dispatch.mark(); }
+            client.execute(request).await.map_err(|_| error::unknown())
+        },
     )
     .await
     .map_err(|_| error::unknown())?
@@ -169,7 +176,7 @@ pub(super) async fn short(
         return Err(error);
     }
     let accepted_at = crate::server::logging::now_ms();
-    if accepted_at <= 0 || Instant::now() >= deadline {
+    if accepted_at <= 0 {
         return Err(error::unknown());
     }
     Ok(RoundReceipt {
@@ -184,12 +191,11 @@ pub(super) async fn open_turn(
     prepared: PreparedRequest,
     capture: Option<&Arc<crate::server::core::debug_traffic::TrafficCapture>>,
     call_deadline: Instant,
-    dispatch: &crate::server::core::upstream::usage::DispatchTracker,
 ) -> Result<reqwest::Response, proto::WireError> {
     if prepared.route != Route::Turn {
         return Err(error::invalid());
     }
-    let PreparedRequest { request, .. } = prepared;
+    let PreparedRequest { request, dispatch, .. } = prepared;
     if let Some(capture) = capture {
         let headers = request.headers().iter()
             .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("[binary]").to_string())).collect::<Vec<_>>();
@@ -199,11 +205,13 @@ pub(super) async fn open_turn(
     }
     let deadline = call_deadline.min(Instant::now() + CONTROL_TIMEOUT);
     if Instant::now() >= deadline { return Err(error::unknown()); }
-    let client = client.client().map_err(|_| error::unknown())?;
-    dispatch.mark();
     let response = tokio::time::timeout_at(
         deadline,
-        client.execute(request),
+        async {
+            let client = client.client().map_err(|_| error::unknown())?;
+            if let Some(dispatch) = dispatch { dispatch.mark(); }
+            client.execute(request).await.map_err(|_| error::unknown())
+        },
     )
     .await
     .map_err(|_| error::unknown())?
@@ -215,14 +223,6 @@ pub(super) async fn open_turn(
 }
 
 fn check_response(response: &reqwest::Response, route: Route) -> Result<(), proto::WireError> {
-    let status = response.status().as_u16();
-    if (400..600).contains(&status) {
-        // 真实状态供原 RPC 分类器和路由健康结算使用；创建事实由请求级 ReplayGuard 裁决。
-        return Err(proto::WireError::with_code(
-            format!("CatPaw 固定轮次请求返回 HTTP {status}，本次提交未确认"),
-            format!("provider_http:{}", serde_json::json!({"status":status,"code":"catpaw_turn_upstream_rejected"})),
-        ));
-    }
     let expected = format!("{ORIGIN}{}", route.path());
     #[cfg(test)]
     let expected = super::super::test_support::transport_url(&expected);
@@ -248,6 +248,13 @@ fn check_response(response: &reqwest::Response, route: Route) -> Result<(), prot
             return Err(error::stream());
         }
     } else if response.status() != reqwest::StatusCode::OK {
+        let status = response.status().as_u16();
+        if (400..600).contains(&status) {
+            return Err(proto::WireError::with_code(
+                "CatPaw 原轮次请求收到上游错误，提交结果未确认，未自动重发",
+                format!("provider_http:{}", serde_json::json!({"status":status,"code":"catpaw_turn_submission_unconfirmed"})),
+            ));
+        }
         return Err(error::unknown());
     }
     Ok(())
@@ -303,14 +310,14 @@ fn accept_branch(value: &Value, conversation: &str, depth: usize) -> Result<(), 
     {
         return Err(error::unknown());
     }
-    if object.get("type").is_some_and(|value| !matches!(value.as_str(), Some("success" | "ok")))
-        || object.get("status").is_some_and(|value| !matches!(value.as_str(), Some("success" | "ok" | "accepted" | "completed" | "running"))) {
-        return Err(error::unknown());
-    }
     if let Some(id) = object.get("conversationId") {
         if id.as_str() != Some(conversation) {
             return Err(error::unknown());
         }
+    }
+    if object.get("type").is_some_and(|value| !matches!(value.as_str(), Some("success" | "ok")))
+        || object.get("status").is_some_and(|value| !matches!(value.as_str(), Some("success" | "ok" | "accepted" | "completed" | "running"))) {
+        return Err(error::unknown());
     }
     for name in ["data", "result"] {
         if let Some(inner) = object.get(name) {

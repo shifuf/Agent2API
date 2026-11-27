@@ -1,4 +1,5 @@
-//! 保存事实与托管任务终态独立；进入写库后异常不能授予重试资格。
+//! 托管登录的保存事实独立于任务终态；保存入场后异常不能改成确定未写或重新发送。
+
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use agent2api_provider_protocol::NormalizedAccount;
@@ -31,50 +32,71 @@ pub(super) fn wait_response(task: &LoginTaskState) -> Value {
         SaveState::NotEntered if task.done => "failed",
         SaveState::NotEntered => "waiting",
     };
-    let mut result = json!({ "managedLogin": true, "provider": task.provider,
-        "flow": task.state, "methodIndex": task.method_index, "phase": phase, "saved": saved });
+    let mut result = json!({
+        "managedLogin": true, "provider": task.provider, "flow": task.state,
+        "methodIndex": task.method_index, "phase": phase, "saved": saved,
+    });
     if !task.done {
         result["pending"] = json!(true);
         if let Some(text) = &task.instructions { result["instructions"] = json!(text); }
         if let Some(text) = &task.hint { result["hint"] = json!(text); }
     } else {
         result["done"] = json!(true);
-        if task.persistence == SaveState::Confirmed { result["session"] = task.session.clone().unwrap_or(Value::Null); }
-        else { result["error"] = json!(if task.persistence == SaveState::Unconfirmed {
-            UNKNOWN
-        } else { task.error.as_deref().unwrap_or("托管登录未确认保存账号") }); }
+        if task.persistence == SaveState::Confirmed {
+            result["session"] = task.session.clone().unwrap_or(Value::Null);
+        } else {
+            result["error"] = json!(if task.persistence == SaveState::Unconfirmed {
+                UNKNOWN
+            } else {
+                task.error.as_deref().unwrap_or("托管登录未确认保存账号")
+            });
+        }
     }
     result
 }
 
-pub(super) fn persist(handle: &LoginTaskHandle, adapter: &dyn ProviderAdapter,
-    account: &NormalizedAccount) -> Result<Option<String>, GatewayError> {
+pub(super) fn persist(
+    handle: &LoginTaskHandle, adapter: &dyn ProviderAdapter, account: &NormalizedAccount,
+) -> Result<Option<String>, GatewayError> {
     let mut task = handle.lock();
     if task.canceled { return Ok(None); }
     if task.done {
-        return match &task.error { Some(error) => Err(GatewayError::bad_request(error)), None => Ok(None) };
+        return match &task.error {
+            Some(error) => Err(GatewayError::bad_request(error)),
+            None => Ok(None),
+        };
     }
-    if !handle.adapter().is_some_and(|owner| std::ptr::eq(owner.as_ref(), adapter)) {
+    if handle.adapter().is_some_and(|owner| !std::ptr::eq(owner.as_ref(), adapter)) {
         return Err(GatewayError::with_status(500, "登录流程执行体不匹配，已拒绝保存账号"));
     }
-    if task.persistence != SaveState::NotEntered { return Err(GatewayError::with_status(409, UNKNOWN)); }
+    let proxy = handle.context.as_ref().and_then(|context| context.proxy.as_ref());
+    if task.managed && task.persistence != SaveState::NotEntered {
+        return Err(GatewayError::with_status(409, UNKNOWN));
+    }
     managed::admit_persist(handle, &mut task)?;
     let attempt = catch_unwind(AssertUnwindSafe(|| {
-        let id = adapter.persist_login_account(account)?;
-        if !valid_id(&id) { return Err(GatewayError::with_status(503, UNKNOWN)); }
-        // Retain the repository's existing atomic proxy/secret snapshot write.
-        // Either failure leaves an explicit uncertain save fact, never a retry.
-        handle.persist_proxy(&id)?;
-        Ok::<_, GatewayError>(id)
+        adapter.persist_login_account_with_proxy(account, proxy.map(|proxy| &proxy.config))
     }));
     let mut deferred = None;
     let outcome = match attempt {
-        Ok(Ok(id)) => {
-            task.persistence = SaveState::Confirmed;
-            mark_adapter_login_done(&mut task, &id);
+        Ok(Ok(id)) if valid_id(&id) => {
+            if task.managed { task.persistence = SaveState::Confirmed; }
+            mark_adapter_login_done(&mut task, &id, proxy.is_some());
             Ok(id)
         }
-        Ok(Err(_)) => { mark_task_error(&mut task, UNKNOWN); Err(GatewayError::with_status(503, UNKNOWN)) }
+        Ok(Ok(_)) => {
+            mark_task_error(&mut task, UNKNOWN);
+            Err(GatewayError::with_status(503, UNKNOWN))
+        }
+        Ok(Err(error)) => {
+            if task.managed {
+                mark_task_error(&mut task, UNKNOWN);
+                Err(GatewayError::with_status(503, UNKNOWN))
+            } else {
+                mark_task_error(&mut task, &error.message);
+                Err(error)
+            }
+        }
         Err(payload) => {
             deferred = Some(payload);
             mark_task_error(&mut task, UNKNOWN);
@@ -82,8 +104,13 @@ pub(super) fn persist(handle: &LoginTaskHandle, adapter: &dyn ProviderAdapter,
         }
     };
     drop(task);
+    // 自定义异常载荷不能在任务、账号或数据库外层锁内析构。
     drop(deferred);
-    Ok(Some(outcome?))
+    let id = outcome?;
+    if let Some(store) = crate::server::core::account_store::plugin_accounts::shared() {
+        crate::server::core::providers::subscriptions::refresh_after_account_saved(store, adapter.provider_id(), &id);
+    }
+    Ok(Some(id))
 }
 
 fn valid_id(value: &str) -> bool {

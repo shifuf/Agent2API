@@ -41,7 +41,7 @@ pub(crate) fn guarded_action(action: &str) -> bool {
 
 pub(super) struct Permits {
     _local: OwnedSemaphorePermit,
-    _global: OwnedSemaphorePermit,
+    _global: crate::server::core::runtime_capacity::Ticket,
 }
 
 fn failure(status: u16, code: &str, message: &str) -> proto::WireError {
@@ -55,22 +55,23 @@ pub(super) fn unavailable() -> proto::WireError {
 pub(super) fn slots(shared: &Shared) -> Result<Arc<Permits>, proto::WireError> {
     let busy = || failure(429, "verification_busy", "验证码提交通道正忙，请稍后重试");
     let local = shared.verification_slots.clone().try_acquire_owned().map_err(|_| busy())?;
-    static GLOBAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new(); let global = GLOBAL.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(8))).clone().try_acquire_owned().map_err(|_| busy())?;
+    let global = crate::server::core::runtime_capacity::try_acquire(
+        crate::server::core::runtime_capacity::Class::Interactive, &shared.options.provider).map_err(|_| busy())?;
     Ok(Arc::new(Permits { _local: local, _global: global }))
 }
 
 /// 只标识实际安装的原生执行体；脚本、Wasm、占位适配器都不是旧全局票据池。
 pub(crate) fn legacy_native(provider: &str) -> bool {
     super::super::serves_provider(provider) && super::super::host_for_provider(provider)
-        .is_some_and(|host| host.options.wasm.is_none())
+        .is_some_and(|host| !host.options.script && host.options.wasm.is_none())
 }
 
 /// 空账号旧提交不能绕过已安装但停用或加载失败的 WASM 归属。
 pub(crate) fn legacy_global_allowed() -> bool {
     let registry = super::super::PackRegistry::load();
     let owners = super::super::ownership::owners(&registry);
-    !["zcode", "zcode-intl"].into_iter().any(|provider| {
-        let owner = owners.get(provider);
+    !crate::server::core::providers::zcode::region::Region::ALL.into_iter().any(|region| {
+        let owner = owners.get(region.provider_id());
         registry.packs.iter().any(|pack| owner == Some(&pack.id) && pack.entry.ends_with(".wasm"))
     })
 }

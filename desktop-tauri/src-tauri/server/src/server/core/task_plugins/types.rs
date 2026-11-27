@@ -121,11 +121,9 @@ pub struct TaskPlugin {
     pub default_timeout: i64,
     #[serde(default)]
     pub domains: Vec<String>,
-    #[serde(default, skip_deserializing)]
-    pub network_grants: BTreeMap<String, String>,
     #[serde(default)]
     pub declares_notify: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub notify_allowed: bool,
     #[serde(default)]
     pub fields: Vec<TaskFieldDef>,
@@ -223,11 +221,34 @@ pub fn valid_identifier(key: &str) -> bool {
 }
 
 pub fn normalize_domain(raw: &str) -> Result<String, String> {
-    let text = raw.to_ascii_lowercase();
-    if text.len() > 253 || !text.contains('.') || text.split('.').any(|label| label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
-        || !matches!(url::Host::parse(&text), Ok(url::Host::Domain(ref name)) if name == &text)
-        || [".localhost", ".local", ".internal", ".localdomain", ".lan", ".home", ".home.arpa", ".onion"].iter().any(|suffix| text.ends_with(suffix)) {
-        return Err("任务探测只允许精确的公网域名".into());
+    let mut text = raw.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return Err("域名不能为空".to_string());
+    }
+    if text == "*" {
+        return Ok("*".to_string());
+    }
+    if let Some(rest) = text.strip_prefix("https://").or_else(|| text.strip_prefix("http://")) {
+        text = rest.to_string();
+    }
+    if let Some((host, _)) = text.split_once('/') {
+        text = host.to_string();
+    }
+    if let Some((host, _)) = text.split_once(':') {
+        text = host.to_string();
+    }
+    let wildcard = text.starts_with("*.");
+    let check_host = if wildcard { &text[2..] } else { text.as_str() };
+    if check_host.is_empty()
+        || !check_host.contains('.')
+        || check_host.len() > 253
+        || check_host == "localhost"
+        || check_host.ends_with(".local")
+        || !check_host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+    {
+        return Err(format!("无效域名白名单项：{raw}"));
     }
     Ok(text)
 }
@@ -274,9 +295,6 @@ pub fn validate_and_normalize_plugin(mut plugin: TaskPlugin) -> Result<TaskPlugi
     }
     let mut field_keys = HashSet::new();
     for field in &mut plugin.fields {
-        if (field.secret || field.field_type == "password") && field.default_value.is_some() {
-            return Err("密钥字段不能有明文默认值".into());
-        }
         field.key = field.key.trim().to_string();
         if !valid_identifier(&field.key) {
             return Err(format!("输入项标识无效：{}", field.key));
@@ -442,8 +460,13 @@ pub fn parse_single_file(raw: &str, fallback_source: &str) -> Result<TaskPlugin,
     let domains: Vec<String> = meta
         .pointer("/permissions/domains")
         .or_else(|| meta.get("domains"))
-        .map(|value| serde_json::from_value(value.clone()).map_err(|_| "域名声明必须是字符串列表"))
-        .transpose()?
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     let declares_notify = meta
         .pointer("/permissions/notify")
@@ -467,9 +490,8 @@ pub fn parse_single_file(raw: &str, fallback_source: &str) -> Result<TaskPlugin,
             .to_string(),
         default_timeout: meta["defaultTimeout"].as_i64().unwrap_or(30),
         domains,
-        network_grants: BTreeMap::new(),
         declares_notify,
-        notify_allowed: false,
+        notify_allowed: true,
         fields,
         actions,
         status_fields,

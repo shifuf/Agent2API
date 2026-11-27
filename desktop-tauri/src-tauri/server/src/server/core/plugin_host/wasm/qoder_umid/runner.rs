@@ -46,7 +46,7 @@ pub(super) async fn identity(component: &Component, account: &str, uid: &str, se
         }
         if !child.wait().await.map_err(|_| invalid())?.success() { return Err(invalid()); }
         let line = bytes.split(|byte| *byte == b'\n').next().ok_or_else(invalid)?;
-        let value: Value = super::super::strict_json::parse_object(line, 16 * 1024).map_err(|_| invalid())?;
+        let value: Value = super::super::managed_task::declaration::parse_object(line, 16 * 1024).map_err(|_| invalid())?;
         let mut result = json!({});
         for key in ["machineToken", "machineCode", "machineType"] {
             let text = value[key].as_str().filter(|value| !value.is_empty() && value.len() <= 4096

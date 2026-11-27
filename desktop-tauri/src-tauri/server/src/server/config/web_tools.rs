@@ -5,7 +5,7 @@ use crate::server::errors::GatewayError;
 pub const KEY: &str = "webToolEmulation";
 
 pub fn enabled() -> bool {
-    super::with_raw(|raw| enabled_in(raw.get(KEY))).unwrap_or(true)
+    enabled_in(super::current().raw().get(KEY))
 }
 
 pub fn enabled_in(value: Option<&Value>) -> bool {

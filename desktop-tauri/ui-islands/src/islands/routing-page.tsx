@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { RoutingUpstreamPanel } from './routing-upstream-panel'
 import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { Badge, Button, Empty, SegmentedControl, Spinner, confirmDialog } from '@ui'
@@ -32,7 +33,7 @@ let requestTrace: ((row?: ReplayRow | null) => void) | undefined
 let refreshWorkspace: (() => void) | undefined
 
 export function RoutingPage() {
-  const [mode, setMode] = React.useState<'config' | 'replay'>('config')
+  const [mode, setMode] = React.useState<'config' | 'replay' | 'upstream'>('config')
   const [groupOverview, setGroupOverview] = React.useState(true)
   const [selected, setSelected] = React.useState<ReplayRow | null>(null)
   const [refreshToken, setRefreshToken] = React.useState(0)
@@ -169,6 +170,7 @@ export function RoutingPage() {
       <SegmentedControl aria-label={t('路由模式')} value={mode} onValueChange={setMode} options={[
         { value: 'config', label: <><RouteIcon name='route' />{t('路由配置')}{dirtyCount ? <Badge variant='warning' shape='tag'>{dirtyCount}</Badge> : null}</> },
         { value: 'replay', label: <><RouteIcon name='requests' />{t('请求回放')}</> },
+        { value: 'upstream', label: t('特殊请求与错误处理') },
       ]} />
       <span className='routing-page-policy'>{mode === 'config'
         ? workspace && !groupOverview ? `${groups.draft && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy)} · ${t('粘滞 {mode}', { mode: stickyLabel(sticky) })}` : ''
@@ -190,7 +192,7 @@ export function RoutingPage() {
       <RouteIcon name='info' /><span>{replay.error}</span><Button variant='ghost' size='sm' onClick={replay.refresh}>{t('重试')}</Button>
     </div> : null}
 
-    {mode === 'config' ? <div className='routing-config-view'>
+    {mode === 'upstream' ? <RoutingUpstreamPanel /> : mode === 'config' ? <div className='routing-config-view'>
       {editor.error && !editor.draft ? <div className='routing-page-error' role='alert'>
         <RouteIcon name='info' /><span>{editor.error}</span><Button variant='ghost' size='sm' onClick={() => void editor.load(editor.scope, true)}>{t('重新读取')}</Button>
       </div> : null}

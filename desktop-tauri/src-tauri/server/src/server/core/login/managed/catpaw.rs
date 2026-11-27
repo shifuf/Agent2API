@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{loopback::Lease, unavailable, Call, LoginTaskHandle, RuntimeBinding, Session, State};
 use crate::server::{
-    core::{plugin_host::wasm::fixed_http::FrozenHttpClient, plugin_host::wasm::managed_policy::{CATPAW_LOGIN_ENTRY, CATPAW_PROFILE}},
+    core::{egress::managed::FrozenHttpClient, plugin_host::wasm::managed_policy::{CATPAW_LOGIN_ENTRY, CATPAW_PROFILE}},
     errors::GatewayError,
 };
 
@@ -83,7 +83,7 @@ pub(super) async fn prepare_open(call: &Call, callback: &str) -> Result<Opened, 
     let runtime = runtime(call)?;
     let task = call.task.upgrade().ok_or_else(unavailable)?;
     let selected = task.context.as_ref().and_then(|context| context.proxy.as_ref())
-        .ok_or_else(|| GatewayError::with_status(400, "请明确选择本次 CatPaw 登录的直连或代理出口"))?.selected()?;
+        .ok_or_else(|| GatewayError::with_status(400, "请明确选择本次 CatPaw 登录的直连或代理出口"))?.selected.clone();
     {
         let mut state = call.session.state.lock().map_err(|_| unavailable())?;
         if !call.session.valid() || state.catpaw.preparing_claimed || !state.leases.is_empty()
@@ -96,7 +96,7 @@ pub(super) async fn prepare_open(call: &Call, callback: &str) -> Result<Opened, 
         _ = call.ended() => return Err(unavailable()),
         _ = runtime.stopped.cancelled() => return Err(unavailable()),
         _ = sleep_until(deadline) => return Err(expired()),
-        result = FrozenHttpClient::from_selected(selected) => result.map_err(|_| transport())?,
+        result = FrozenHttpClient::from_path(selected) => result.map_err(|_| transport())?,
     };
     call.validate(call.provider())?;
     let value = request(&call.session, &runtime, &client, LOGIN_CONFIG, None, deadline, None).await?;

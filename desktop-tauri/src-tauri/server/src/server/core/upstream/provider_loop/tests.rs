@@ -70,33 +70,16 @@ async fn mock_upstream(
 //
 // 因此在改前的代码上第 1、4 条必红；第 2、3 条是「修复没有过头」的对照组。
 
-static TEMP_SEQ: AtomicUsize = AtomicUsize::new(0);
-
-/// 临时库目录，Drop 时删除。
-///
-/// 刻意不在建库前删了事：文件名带 pid，下一轮 pid 变了就永远删不到（曾在一台机器上
-/// 攒出几百份）。调用方按 `let (_dir, service, id) = temp_service();` 接 —— 局部变量
-/// 逆序析构，先关库再删目录。
-struct TempDbDir(std::path::PathBuf);
-
-impl Drop for TempDbDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// 一份临时库 + 挂在其上的 [`UpstreamService`] + 里面唯一那条账号的 id。
 ///
 /// 不发任何网络请求：记账与读回都只碰存储层，与转发选路用的是同一份读写口径。
-fn temp_service() -> (TempDbDir, UpstreamService, String) {
+fn temp_service() -> (tempfile::TempDir, UpstreamService, String) {
     use crate::server::core::account_store::AccountStore;
     use crate::server::core::auth::AuthService;
     use crate::server::db::Db;
 
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("pl-quota-{}-{seq}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let store = AccountStore::with_db(Some(Db::open(&dir.join("agent2api.db")).expect("临时库应当能建起来")));
+    let dir = tempfile::tempdir().expect("应当能创建临时数据库目录");
+    let store = AccountStore::with_db(Some(Db::open(&dir.path().join("agent2api.db")).expect("临时库应当能建起来")));
     let saved = store
         .add_account(
             &json!({"auth": {"accessToken": "at"}, "account": {"uid": "quota-1"}}),
@@ -106,7 +89,7 @@ fn temp_service() -> (TempDbDir, UpstreamService, String) {
         .expect("临时账号应当能建起来");
     let id = saved["id"].as_str().expect("公开形态应带 id").to_string();
     let service = UpstreamService::new(store.clone(), AuthService::for_store(store));
-    (TempDbDir(dir), service, id)
+    (dir, service, id)
 }
 
 #[test]
@@ -148,8 +131,10 @@ fn sticky_nested_strict_finds_an_enabled_sibling_after_a_disabled_bound_account(
         .expect("a usable sibling in the same channel must keep nested strict routing available");
 }
 
-#[tokio::test]
-async fn sticky_strict_failed_binding_does_not_select_a_cooled_sibling() {
+#[test]
+fn sticky_strict_failed_binding_does_not_select_a_cooled_sibling() {
+    crate::test_support::isolated(concat!(module_path!(), "::sticky_strict_failed_binding_does_not_select_a_cooled_sibling"), || {
+    crate::test_support::runtime().block_on(async {
     crate::server::config::init(None);
     let (_dir, service, _) = temp_service();
     let provider = "custom-sticky-cooldown-fixture";
@@ -181,6 +166,8 @@ async fn sticky_strict_failed_binding_does_not_select_a_cooled_sibling() {
     service.route.health.failure(&lease, 60, logging::now_ms(), || {});
     let result = rotate::select_target_account(&service, &[provider], &keys, &[], None, "session", &route).await;
     assert!(result.is_err(), "after failure, strict replacement must honor account-level cooldown");
+    });
+    });
 }
 
 #[tokio::test]
@@ -436,6 +423,7 @@ async fn a_real_413_response_is_sent_once_and_handed_back() {
         mock_upstream(413, "application/json; charset=utf-8", APIG_TOO_LARGE_BODY).await;
     let mut budget = RetryBudget::new(3);
     let capture = crate::server::core::debug_traffic::TrafficCapture::begin("payload-too-large");
+    let telemetry = Arc::new(RequestTelemetry::new());
     // 适配器只提供「怎么判上游错误」这一半；413 的处置在**编排层**
     // （`transport::RetryBudget` + `fallback_retry_advice`），因此随便挑一个
     // 内置家即可。原先这里用 ZCode 的实例，它随实现搬到插件了 —— 换成本家

@@ -1,4 +1,4 @@
-//! 普通账号写者的CatPaw版本收口。只认本事务原行，传入的私有字段永不回灌。
+//! 普通账号写者的固定三家版本收口。只认本事务原行，传入的私有字段永不回灌。
 //! 没有来源签发或网络能力；保存点释放不代表外层COMMIT，恢复由原Db来源单向失效。
 
 use std::borrow::Cow;
@@ -252,7 +252,7 @@ fn reauthorization_changed(current: &StoredAccount, next: &StoredAccount) -> boo
     // 导入同名JSON也最多导致旧合同失效，不能签发或恢复版本。旧计数饱和后每次保守失效。
     let before = current.get("usageCredentialRevision");
     let after = next.get("usageCredentialRevision");
-    current.enabled() != next.enabled() || before != after
+    before != after
         || [before, after]
             .into_iter()
             .flatten()
@@ -367,7 +367,7 @@ fn removable_from_state(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
 }
 
 /// 整份输入仍差异写，正常save保留纯运营改动；公开save_locked按不可信整份替换失效。
-/// 未取得逐行输入见证前，Imported会保守失效输入集合内CatPaw的已有版本。
+/// 未取得逐行输入见证前，Imported会保守失效输入集合内固定三家的已有版本。
 pub(in crate::server::core::account_store::sql) fn save_state(
     conn: &mut Connection,
     state: &AccountState,

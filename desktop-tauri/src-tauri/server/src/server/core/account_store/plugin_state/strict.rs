@@ -85,11 +85,10 @@ impl AccountStore {
         if schema == 0 || !within_limit(&value, MAX_ENTRY_BYTES) {
             return Err("插件状态版本或大小无效".into());
         }
+        let db = self.database().ok_or(UNAVAILABLE)?;
         let guard = self.guard();
-        self.with_conn_mut(&guard, |conn| {
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let result: Result<Value, String> = (|| {
-            let mut record = record(&tx, provider, id)?;
+        let result = db.plugin_state_transaction(|conn| {
+            let mut record = record(conn, provider, id)?;
             let current = container(&record)?;
             let revision = current.and_then(|state| state.get(key)).map(entry).transpose()?
                 .map(|(revision, _)| revision).unwrap_or(0);
@@ -102,14 +101,17 @@ impl AccountStore {
             state.insert(key.to_string(), json!({ "revision": revision, "schema": schema, "value": value }));
             if !within_limit(&state, MAX_STATE_BYTES) { return Err("账号插件状态总量超过 2 MiB".into()); }
             record.set("pluginState", Value::Object(state));
-            sql::update_in_place(&tx, &record).map_err(|_| UNAVAILABLE)?;
-            let saved = self::record(&tx, provider, id)?;
+            sql::update_in_place(conn, &record).map_err(|_| UNAVAILABLE)?;
+            let saved = self::record(conn, provider, id)?;
             if saved.get("pluginState") != record.get("pluginState") { return Err(UNAVAILABLE.into()); }
             Ok(json!({ "updated": true, "revision": revision }))
-            })();
-            if result.is_ok() { tx.commit()?; }
-            Ok(result)
-        }).map_err(|_| UNAVAILABLE.to_string())?
+        });
+        drop(guard);
+        match result {
+            crate::server::db::Durable::Committed(value) => Ok(value),
+            crate::server::db::Durable::Rejected(error) => Err(error),
+            _ => Err(UNAVAILABLE.into()),
+        }
     }
 }
 

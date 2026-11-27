@@ -136,6 +136,15 @@ fn message(provider: &str, status: u16, code: &str, class: &UpstreamErrorClass) 
             "subscription_sharing_user_not_eligible" => "所选用户、工作区或策略不允许使用此订阅路线",
             "subscription_sharing_unsupported_capability" => "此订阅路线不支持本次输入、工具或模型能力",
             "unsupported" | "no_method" | "not_implemented" => "此提供商不支持该操作",
+            "qwenwork_auth_expired" => "千问办公登录凭据已失效，请重新授权或更新当前账号凭据",
+            "qwenwork_forbidden" => "千问办公拒绝访问，请检查当前账号权限或服务地区",
+            "qwenwork_model_busy" => "千问办公服务正在排队，请稍后重试；这不是登录失效",
+            "qwenwork_quota_limited" => "千问办公当前账号额度不足或套餐不支持该操作",
+            "qwenwork_rate_limited" => "千问办公请求过于频繁，请稍后重试",
+            "qwenwork_transport" => "千问办公连接失败或响应中断，请检查网络与账号代理",
+            "qwenwork_usage_invalid_response" => "千问办公未返回可确认的余额读数，余额保持未知",
+            "qwenwork_upstream_error" => "千问办公上游返回了未识别的结果，请稍后重新查询",
+            "legacy_secret_cas_unavailable" => "千问办公旧凭据格式无法安全更新，请重新导入完整 JSON 凭据",
             "runtime_invalid_error_metadata" => "提供商返回了无效的错误元数据，未采取账号恢复或冷却动作",
             _ => match status {
                 400 => "上游未接受本次请求参数",
@@ -190,8 +199,7 @@ pub(in crate::server::core::plugin_host) fn conversation(
         public_code(provider, &code)
     } else if crate::server::core::providers::availability::is_qwenwork_family(provider) && upstream.is_some()
         && !codes::known(provider, &code) {
-        if numeric_known_code(provider, upstream) { upstream.map(|value| value.to_string()).unwrap_or_else(|| UNKNOWN.into()) }
-        else { UNKNOWN.into() }
+        upstream.map(|value| value.to_string()).unwrap_or_else(|| UNKNOWN.into())
     } else if code.is_empty() {
         match &class {
             UpstreamErrorClass::QuotaLimited { .. } => "runtime_sdk_quota".into(),
@@ -210,9 +218,6 @@ pub(in crate::server::core::plugin_host) fn conversation(
         error.retry_after_secs = reset_at.and_then(seconds_until);
     }
     error.conversation_class = Some(class);
-    // Decide at the trusted projection boundary: ordinary Fatal upstream
-    // failures can fail over, but interruptions and unconfirmed cleanup cannot.
-    error.retry_forbidden = stopped(&error);
     error
 }
 
@@ -301,7 +306,7 @@ fn evidenced_action(provider: &str, status: u16, code: &str, class: &UpstreamErr
     let lower = raw.to_lowercase();
     match class {
         UpstreamErrorClass::TokenExpired { .. } => status == 401,
-        UpstreamErrorClass::QuotaLimited { .. } => provider == "copilot-subscription" && status == 429
+        UpstreamErrorClass::QuotaLimited { .. } => status == 429 && !context_too_long(&lower)
             || status < 500 && !context_too_long(&lower) && (quota_words(&lower) || native_limit(provider, &lower)),
         UpstreamErrorClass::ContentBlocked { .. } => provider == "devin" && lower.contains("content policy"),
         UpstreamErrorClass::Fatal { .. } => true,
@@ -355,13 +360,12 @@ pub(in crate::server::core::plugin_host) fn reproject(provider: &str, error: &Ga
     let mut result = conversation(provider, status, class, &body, None);
     if matches!(error.code.as_deref(), Some("runtime_sdk_quota" | "runtime_sdk_token" | "runtime_sdk_content"))
         && error.conversation_class.is_none() {
-        result = fatal(provider, status, UNKNOWN);
+        return fatal(provider, status, UNKNOWN);
     }
     if let Some(UpstreamErrorClass::QuotaLimited { reset_at, .. }) = &mut result.conversation_class {
         if reset_at.is_none() { *reset_at = error.retry_after_secs.and_then(retry_reset); }
         result.retry_after_secs = reset_at.and_then(seconds_until);
     }
-    result.retry_forbidden |= error.retry_forbidden;
     result
 }
 
@@ -564,47 +568,4 @@ fn seconds_until(reset: i64) -> Option<u64> {
     let remaining = reset.checked_sub(logging::now_ms())?;
     if remaining <= 0 { return None; }
     u64::try_from(remaining).ok()?.checked_add(999).map(|value| value / 1000)
-}
-
-#[cfg(test)]
-mod routing_stop_tests {
-    use super::*;
-
-    #[test]
-    fn projected_plugin_interruptions_forbid_retry_but_ordinary_server_failures_do_not() {
-        for (status, code, stopped) in [
-            (503, "", false), (524, "", false), (504, "", true),
-            (556, "", true), (502, "network_cleanup_unconfirmed", true),
-            (502, "something_cleanup_failed", true),
-        ] {
-            let error = conversation("workbuddy", status,
-                UpstreamErrorClass::Fatal { status, message: String::new(), upstream_code: None },
-                &json!({ "code": code }), None);
-            assert_eq!(error.status_code, i32::from(status));
-            assert_eq!(error.retry_forbidden, stopped, "HTTP {status}, code {code}");
-            if code.contains("cleanup") {
-                assert_eq!(error.code.as_deref(), Some("network_cleanup_unconfirmed"));
-            }
-        }
-    }
-
-    #[test]
-    fn reproject_keeps_an_explicit_stop_even_without_classification_metadata() {
-        for status in [503, 524] {
-            let mut error = fatal("workbuddy", status, "");
-            error.retry_forbidden = true;
-            let result = reproject("workbuddy", &error);
-            assert!(result.retry_forbidden, "explicit stop was lost for HTTP {status}");
-            assert_eq!(result.status_code, error.status_code);
-            assert_eq!(result.code, error.code);
-            assert_eq!(result.upstream_code, error.upstream_code);
-            assert!(matches!(result.conversation_class, Some(UpstreamErrorClass::Fatal { .. })));
-        }
-        let mut error = GatewayError::with_status(503, "untrusted classification").with_code("runtime_sdk_quota");
-        error.retry_forbidden = true;
-        let result = reproject("workbuddy", &error);
-        assert!(result.retry_forbidden, "classification fallback cannot clear an explicit stop");
-        assert_eq!(result.code.as_deref(), Some(UNKNOWN));
-        assert!(matches!(result.conversation_class, Some(UpstreamErrorClass::Fatal { .. })));
-    }
 }

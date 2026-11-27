@@ -1,44 +1,49 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { stripTypeScriptTypes } from 'node:module'
+import vm from 'node:vm'
+import { readManagedInteraction } from './plugin-managed-state.ts'
 
-const parser = await import('./plugin-login-form.ts').catch(error => {
-  if (error.code === 'ERR_MODULE_NOT_FOUND') return {}
-  throw error
+const source = await readFile(new URL('../ui-islands/src/islands/add-account-dynamic-fields.ts', import.meta.url), 'utf8')
+const functions = source.slice(source.indexOf('const UNSAFE_KEYS'), source.indexOf('function parseSms'))
+const { parsePrompt, parseCallbackInput } = vm.runInNewContext(
+  stripTypeScriptTypes(functions.replaceAll('export function ', 'function ')) + '\n({ parsePrompt, parseCallbackInput })',
+  { t: value => value, pluginLoginText: value => value })
+const scope = { provider: 'qoder', methodIndex: 0 }
+const managed = { type: 'managed', id: 'step-one', provider: 'qoder', flow: 'flow-one', methodIndex: 0,
+  status: 'preparing', title: 'Login', message: 'Verify this account', fields: [], expiresAt: 1900000000000,
+  remainingMs: 90000, captcha: null, browser: null }
+
+test('only the current provider, flow and method may supply a managed login step', () => {
+  const result = readManagedInteraction({ ...managed, secretToken: 'must-not-retain' }, 'flow-one', scope)
+  assert.deepEqual(result, managed)
+  assert.throws(() => readManagedInteraction(managed, 'flow-two', scope))
+  assert.throws(() => readManagedInteraction(managed, 'flow-one', { ...scope, provider: 'other' }))
+  assert.throws(() => readManagedInteraction(managed, 'flow-one', { ...scope, methodIndex: 1 }))
 })
-const response = interaction => ({ provider: 'qoder', state: 'flow-one', interaction })
-const form = {
-  id: 'step-one', title: 'Login', message: 'Verify this account',
-  fields: [{ key: 'account', label: 'Account', type: 'select', secret: false, optional: false,
-    options: [{ value: 'one', label: 'First account' }] }],
-  captcha: null,
-}
 
-test('only the current provider and flow may supply an interactive login form', () => {
-  assert.equal(typeof parser.readPluginLoginForm, 'function', 'Missing validated plugin login form parser')
-  const result = parser.readPluginLoginForm(response({ ...form, secretToken: 'must-not-retain' }), 'qoder', 'flow-one')
-  assert.deepEqual(result, form)
-  assert.equal(parser.readPluginLoginForm(response(null), 'qoder', 'flow-one'), null)
-  assert.throws(() => parser.readPluginLoginForm({ ...response(form), state: 'flow-two' }, 'qoder', 'flow-one'))
-  assert.throws(() => parser.readPluginLoginForm(response(form), 'other-provider', 'flow-one'))
-})
-
-test('malformed fields cannot become selectable options or writable object keys', () => {
-  assert.equal(typeof parser.readPluginLoginForm, 'function')
-  for (const field of [null, { ...form.fields[0], key: '__proto__' }, { ...form.fields[0], type: 'html' },
-    { ...form.fields[0], options: null }, { ...form.fields[0], optional: 'false' },
-    { ...form.fields[0], options: [{ value: 'same', label: 'A' }, { value: 'same', label: 'B' }] }]) {
-    assert.throws(() => parser.readPluginLoginForm(response({ ...form, fields: [field] }), 'qoder', 'flow-one'))
+test('actual shared prompt parser rejects unsafe keys, unsupported fields and duplicate choices', () => {
+  const field = { key: 'account', label: 'Account', type: 'select', secret: false, optional: false,
+    options: [{ value: 'one', label: 'First account' }] }
+  assert.equal(parsePrompt(field).options[0].value, 'one')
+  for (const invalid of [null, { ...field, key: '__proto__' }, { ...field, type: 'html' }, { ...field, options: null },
+    { ...field, options: [{ value: 'same' }, { value: 'same' }] }, { ...field, when: { key: 'x', op: 'eval' } }]) {
+    assert.throws(() => parsePrompt(invalid))
   }
-  assert.throws(() => parser.readPluginLoginForm(response({ ...form, fields: [form.fields[0], form.fields[0]] }), 'qoder', 'flow-one'))
+  assert.equal(parsePrompt({ ...field, secret: true, default: 'must-not-retain' }).default, undefined)
+  assert.throws(() => parseCallbackInput('token'))
 })
 
-test('captcha configuration must be complete and inputs obey the host limits', () => {
-  assert.equal(typeof parser.readPluginLoginForm, 'function')
-  const captcha = { gt: 'captcha-id', challenge: 'challenge-one', success: true, new_captcha: true }
-  assert.deepEqual(parser.readPluginLoginForm(response({ ...form, captcha }), 'qoder', 'flow-one').captcha, captcha)
-  for (const invalid of [{ ...captcha, success: 'true' }, { ...captcha, gt: '' }, { challenge: 'missing-id' }]) {
-    assert.throws(() => parser.readPluginLoginForm(response({ ...form, captcha: invalid }), 'qoder', 'flow-one'))
+test('managed captcha and browser steps remain bounded and cannot combine authorities', () => {
+  const captcha = { engine: 'aliyun', protocol: 'v2', configId: 'captcha-one', prefix: 'prefix', sceneId: 'scene', region: 'cn' }
+  assert.deepEqual(readManagedInteraction({ ...managed, status: 'ready', captcha }, 'flow-one', scope).captcha, captcha)
+  for (const config of [{ ...captcha, protocol: 'v1' }, { ...captcha, configId: '' }]) {
+    assert.throws(() => readManagedInteraction({ ...managed, captcha: config }, 'flow-one', scope))
   }
-  assert.throws(() => parser.readPluginLoginForm(response({ ...form, fields: Array.from({ length: 17 }, (_, i) => ({ ...form.fields[0], key: `field${i}` })) }), 'qoder', 'flow-one'))
-  assert.throws(() => parser.readPluginLoginForm(response({ ...form, message: 'a'.repeat(8193) }), 'qoder', 'flow-one'))
+  const browser = { url: 'https://example.org/login', browserMode: 'external', manualCallback: false, callbackInput: 'url' }
+  assert.throws(() => readManagedInteraction({ ...managed, status: 'ready', captcha, browser }, 'flow-one', scope))
+  assert.throws(() => readManagedInteraction({ ...managed, browser: { ...browser, url: 'javascript:alert(1)' } }, 'flow-one', scope))
+  assert.throws(() => readManagedInteraction({ ...managed, fields: [{}] }, 'flow-one', scope))
+  assert.throws(() => readManagedInteraction({ ...managed, message: 'a'.repeat(8193) }, 'flow-one', scope))
 })

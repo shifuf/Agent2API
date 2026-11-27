@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Alert, Button, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle } from '@ui'
 import { PluginTaskSettings } from './plugin-task-settings'
-import { type PluginTaskRequest, type PluginTaskRow } from './plugin-task-types'
+import { isCheckinTask, type PluginTaskRequest, type PluginTaskRow } from './plugin-task-types'
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
 
@@ -18,7 +18,7 @@ export function PluginTasks({ request, t, active = true }: { request: PluginTask
     try {
       const value = await latest.current<{ tasks: PluginTaskRow[] }>('GET', '/api/plugins/tasks')
       if (alive.current && current === sequence.current) {
-        setRows(value.tasks ?? []); setError('')
+        setRows((value.tasks ?? []).filter(row => !isCheckinTask(row))); setError('')
       }
     } catch (cause) {
       if (alive.current && current === sequence.current) setError(cause instanceof Error ? cause.message : String(cause))
@@ -33,15 +33,15 @@ export function PluginTasks({ request, t, active = true }: { request: PluginTask
   }, [load, open, active])
 
   return <>
-    <Button variant='ghost' onClick={() => setOpen(true)}>{t('插件任务')}</Button>
+    <Button variant='outline' size='sm' onClick={() => setOpen(true)}>{t('插件维护任务')}</Button>
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className='max-h-[85dvh] max-w-2xl text-foreground'>
-        <DialogHeader><DialogTitle>{t('插件任务')}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{t('插件维护任务')}</DialogTitle></DialogHeader>
         <DialogBody className='min-h-0 overflow-y-auto'>
-          <p className='m-0 text-sm text-muted-foreground'>{t('查看插件提供的后台任务、执行时间和最近结果。')}</p>
+          <p className='m-0 text-sm text-muted-foreground'>{t('这里只管理模型探测等维护任务；签到、成长和领奖请到签到中心。')}</p>
           {error ? <Alert variant='destructive'>{error}</Alert> : null}
-          <PluginTaskSettings rows={rows} request={request} refresh={load} t={t} expanded title={t('插件任务设置')} />
-          {!rows.length && !error ? <p className='text-sm text-muted-foreground'>{t('暂无插件任务')}</p> : null}
+          <PluginTaskSettings rows={rows} request={request} refresh={load} t={t} expanded title={t('维护任务设置')} />
+          {!rows.length && !error ? <p className='text-sm text-muted-foreground'>{t('暂无插件维护任务')}</p> : null}
         </DialogBody>
       </DialogContent>
     </Dialog>

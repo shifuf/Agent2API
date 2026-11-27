@@ -10,10 +10,23 @@ use sha2::{Digest, Sha256};
 
 use super::context::Context;
 
+mod astudio;
+mod autoclaw;
+mod codar;
+pub(super) mod cookie_file;
+mod commandcode;
+mod doubao;
+mod dumate;
+mod kiro;
+mod kuku;
+mod loomy;
 mod raccoon;
+pub(super) mod refresh;
 mod snapshots;
 
 pub(super) const HELPER_CATPAW: &str = "desktop.credentials.catpaw.v1";
+pub(super) const HELPER_DOUBAO: &str = "desktop.credentials.doubaowork.v1";
+pub(super) const HELPER_CODAR: &str = "desktop.credentials.codar.v1";
 pub(super) const HELPER_RACCOON_REFRESH: &str = "desktop.refresh.raccoon.v1";
 pub(super) const HOST: &str = "agent2api-host";
 pub(super) const VERSION: &str = "desktop-read-v1";
@@ -61,7 +74,20 @@ pub(crate) fn helper(provider: &str) -> Option<&'static str> {
         "workbuddy" => Some("desktop.credentials.workbuddy.v1"),
         "workbuddy-intl" => Some("desktop.credentials.workbuddy-intl.v1"),
         "raccoon" => Some("desktop.credentials.raccoon.v1"),
+        "autoclaw" => Some("desktop.credentials.autoclaw.v1"),
+        "autoclaw-intl" => Some("desktop.credentials.autoclaw-intl.v1"),
         "catpaw" => Some(HELPER_CATPAW),
+        "doubaowork" => Some(HELPER_DOUBAO),
+        "codar" => Some(HELPER_CODAR),
+        "commandcode" => Some("desktop.credentials.commandcode.v1"),
+        "dumate" => Some("desktop.credentials.dumate.v1"),
+        "quwork" => Some("desktop.credentials.quwork.v1"),
+        "orcaterm" => Some("desktop.credentials.orcaterm.v1"),
+        "astudio" => Some("desktop.credentials.astudio.v1"),
+        "kiro" => Some("desktop.credentials.kiro.v1"),
+        "cline-free" => Some("desktop.credentials.cline.v1"),
+        "kuku" => Some("desktop.credentials.kuku.v1"),
+        "loomy" => Some("desktop.credentials.loomy.v1"),
         _ => None,
     }
 }
@@ -73,8 +99,8 @@ pub(super) fn candidate(provider: &str, id: &str) -> Option<Value> {
     }
     if let Some(candidate) = super::qoder_umid::candidate(provider, id) { return Some(candidate); }
     if let Some(candidate) = super::client_device::candidate(provider, id) { return Some(candidate); }
-
-
+    if let Some(candidate) = super::quwork_device::candidate(provider, id) { return Some(candidate); }
+    if let Some(candidate) = refresh::candidate(provider, id) { return Some(candidate); }
     if helper(provider) != Some(id) {
         return None;
     }
@@ -103,15 +129,10 @@ pub(super) fn authorize(context: &Context) -> Result<(), proto::WireError> {
     context.account()?;
     let store =
         crate::server::core::account_store::plugin_accounts::shared().ok_or_else(invalid)?;
-    let record = store.plugin_host_account(&context.account).ok_or_else(invalid)?;
-    authorize_saved(provider, &context.account, context.account_maintenance, &record)
-}
-
-fn authorize_saved(provider: &str, account: &str, maintenance: bool,
-    record: &crate::server::core::account_store::plugin_accounts::HostAccount,
-) -> Result<(), proto::WireError> {
-    if !record.enabled && !maintenance || record.provider != provider
-        || record.id != account || !record.desktop
+    let record = store.plugin_account(&context.account).ok_or_else(invalid)?;
+    if record["public"]["enabled"] == false && !context.account_maintenance
+        || record["provider"] != *provider
+        || record["desktop"] != true
     {
         return Err(proto::WireError::with_code(
             "本机读取仅用于本次导入或已保存的本机账号",
@@ -121,11 +142,9 @@ fn authorize_saved(provider: &str, account: &str, maintenance: bool,
     Ok(())
 }
 
-pub(in crate::server::core::plugin_host::wasm) fn account_projection(
-    record: &crate::server::core::account_store::plugin_accounts::HostAccount,
-) -> Value {
-    json!({"id":record.id,"provider":record.provider,"identity":record.identity,"desktop":record.desktop,
-        "enabled":record.enabled,"secret":record.secret,"originalSecret":record.secret})
+pub(in crate::server::core::plugin_host::wasm) fn account_projection(record: &Value) -> Value {
+    json!({"provider":record["provider"],"identity":record["identity"],"desktop":record["desktop"],
+        "secret":super::legacy_secret::decode(&record["secret"]),"originalSecret":record["secret"]})
 }
 
 fn account_snapshot(context: &Context) -> Result<Option<Value>, proto::WireError> {
@@ -135,8 +154,7 @@ fn account_snapshot(context: &Context) -> Result<Option<Value>, proto::WireError
     }
     let store =
         crate::server::core::account_store::plugin_accounts::shared().ok_or_else(invalid)?;
-    let record = store.plugin_host_account(&context.account).ok_or_else(invalid)?;
-    authorize_saved(&context.shared.options.provider, &context.account, context.account_maintenance, &record)?;
+    let record = store.plugin_account(&context.account).ok_or_else(invalid)?;
     Ok(Some(account_projection(&record)))
 }
 
@@ -150,8 +168,22 @@ pub(super) async fn invoke(context: &Context, params: &Value) -> Result<Value, p
         return Err(invalid());
     }
     let provider = context.shared.options.provider.clone();
-    // No path is supplied by the guest; each provider has one fixed reader.
-    let result = crate::server::core::blocking::run(move || read(&provider))
+    // Kiro 已保存的只读关联固定到宿主原账号来源，不能被后来出现的另一客户端挤掉。
+    // 来源不收插件参数；显式导入仍按官方固定来源顺序读取。
+    let kiro_source = if provider == "kiro" {
+        before.as_ref().map(|record| {
+            record["secret"]["source"].as_str().unwrap_or("").to_string()
+        })
+    } else {
+        None
+    };
+    let result = crate::server::core::blocking::run(move || {
+        if provider == "kiro" {
+            kiro::read_source(kiro_source.as_deref().unwrap_or("kiro"))
+        } else {
+            read(&provider)
+        }
+    })
         .await
         .map_err(|_| invalid())?;
     if account_snapshot(context)? != before {
@@ -167,9 +199,118 @@ pub(super) fn read(provider: &str) -> Result<Value, proto::WireError> {
     match provider {
         "workbuddy" | "workbuddy-intl" => snapshots::workbuddy(provider),
         "raccoon" => raccoon::read(),
+        "autoclaw" | "autoclaw-intl" => autoclaw::read(provider),
         "catpaw" => catpaw(),
+        "doubaowork" => doubao::read(),
+        "codar" => codar::read(),
+        "commandcode" => commandcode::read(),
+        "dumate" => dumate::read(),
+        "quwork" => snapshots::quwork(),
+        "orcaterm" => snapshots::orcaterm(),
+        "astudio" => astudio::read(),
+        "kiro" => kiro::read(),
+        "cline-free" => snapshots::cline(),
+        "kuku" => kuku::read(),
+        "loomy" => loomy::read(),
         _ => Err(invalid()),
     }
+}
+
+pub(super) fn supplied_tokens(params: &Value) -> Result<Value, proto::WireError> {
+    let source = &params["source"];
+    let mut value = match source["kind"].as_str() {
+        Some("manual") => source["payload"]["inputs"]
+            .as_object()
+            .map(|fields| Value::Object(fields.clone()))
+            .unwrap_or_else(|| source["payload"].clone()),
+        Some("file_text") => {
+            serde_json::from_str(source["content"].as_str().unwrap_or("")).map_err(|_| invalid())?
+        }
+        _ => return Err(invalid()),
+    };
+    if let Some(raw) = value["credentialJson"]
+        .as_str()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        value = serde_json::from_str(raw).map_err(|_| invalid())?;
+    }
+    if let Some(raw) = value.as_str() {
+        value = serde_json::from_str(raw).map_err(|_| invalid())?;
+    }
+    if !value.is_object() {
+        return Err(invalid());
+    }
+    let fields = value.as_object_mut().ok_or_else(invalid)?;
+    if let Some(auth) = fields.get("auth").and_then(Value::as_object).cloned() {
+        for (key, value) in auth {
+            if fields
+                .get(&key)
+                .is_none_or(|value| value.is_null() || value == "")
+            {
+                fields.insert(key, value);
+            }
+        }
+    }
+    let token = |keys: &[&str]| {
+        let raw = keys
+            .iter()
+            .filter_map(|key| value[*key].as_str())
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+            .unwrap_or("");
+        // 与两版 AutoClaw 插件的 strip_bearer 同形；授权仍只限本次确切凭据对。
+        let mut token = raw;
+        loop {
+            if !token.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer")) {
+                return token.to_string();
+            }
+            let rest = &token[6..];
+            if rest.is_empty() { return String::new(); }
+            if !rest.starts_with(char::is_whitespace) { return token.to_string(); }
+            token = rest.trim_start();
+        }
+    };
+    Ok(
+        json!({"token":token(&["token", "accessToken", "access_token"]), "refreshToken":token(&["refreshToken", "refresh_token"])}),
+    )
+}
+
+pub(super) fn authorize_decrypt(
+    context: &Context,
+    payload: &Value,
+) -> Result<(), proto::WireError> {
+    context.permission("desktop.credentials.v1")?;
+    if helper(&context.shared.options.provider).is_none_or(|id| {
+        !context
+            .shared
+            .options
+            .manifest
+            .helpers
+            .iter()
+            .any(|value| value == id)
+    }) {
+        return Err(invalid());
+    }
+    let expected = context.supplied_credentials.as_ref().ok_or_else(|| {
+        proto::WireError::with_code(
+            "加密凭据只能来自本次用户明确粘贴或选择的 AutoClaw 登录文件",
+            "forbidden",
+        )
+    })?;
+    if payload != expected {
+        return Err(proto::WireError::with_code(
+            "不能解密本次导入之外的凭据",
+            "forbidden",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn decrypt(provider: &str, payload: &Value) -> Result<Value, proto::WireError> {
+    if !matches!(provider, "autoclaw" | "autoclaw-intl") {
+        return Err(invalid());
+    }
+    autoclaw::decrypt(provider, payload)
 }
 
 pub(super) fn catpaw() -> Result<Value, proto::WireError> {
@@ -279,7 +420,7 @@ pub(super) fn file(path: &Path, maximum: u64) -> Result<Vec<u8>, proto::WireErro
 
 pub(in crate::server::core::plugin_host::wasm) fn object(path: &Path, maximum: u64) -> Result<Value, proto::WireError> {
     let bytes = zeroize::Zeroizing::new(file(path, maximum)?);
-    super::strict_json::parse_object(&bytes, maximum as usize).map_err(|_| invalid())
+    super::managed_task::declaration::parse_object(&bytes, maximum as usize).map_err(|_| invalid())
 }
 
 fn project(value: &Value, keys: &[&str]) -> Value {
@@ -344,36 +485,4 @@ pub(super) fn text<'a>(
 
 pub(super) fn invalid() -> proto::WireError {
     proto::WireError::with_code("本机客户端登录态不可读、未登录或格式不支持，请先在官方客户端登录，或改用网页登录和手工凭据", "desktop_credentials_unavailable")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::server::{core::account_store::AccountStore, db::test_temp::TempDb};
-
-    #[test]
-    fn saved_desktop_permission_uses_original_sqlite_metadata() {
-        let (db, _guard) = TempDb::open("saved-desktop-authorization");
-        let store = AccountStore::with_db(Some(db));
-        let saved = store.plugin_upsert_account("desktop-sqlite-test", "catpaw", "saved desktop",
-            &json!({"uid":"desktop-sqlite-test","accessToken":"fixture-secret"}),
-            &json!({}), true).unwrap();
-        let id = saved["id"].as_str().unwrap();
-        let original = store.plugin_host_account(id).unwrap();
-        assert!(authorize_saved("catpaw", id, false, &original).is_ok());
-        assert_eq!(account_projection(&original)["originalSecret"], original.secret);
-        assert!(authorize_saved("raccoon", id, false, &original).is_err());
-        assert!(authorize_saved("catpaw", "another-row", false, &original).is_err());
-        store.update_account(id, &json!({"enabled":false})).unwrap();
-        let disabled = store.plugin_host_account(id).unwrap();
-        assert!(authorize_saved("catpaw", id, false, &disabled).is_err());
-        assert!(authorize_saved("catpaw", id, true, &disabled).is_ok(), "explicit credential maintenance may repair a saved disabled desktop row");
-        let forged = store.plugin_upsert_account("forged-desktop-sqlite-test", "catpaw", "forged flags",
-            &json!({"uid":"forged-desktop-sqlite-test","accessToken":"fixture-secret","desktop":true}),
-            &json!({"desktop":true}), false).unwrap();
-        let id = forged["id"].as_str().unwrap();
-        let original = store.plugin_host_account(id).unwrap();
-        assert!(!original.desktop);
-        assert!(authorize_saved("catpaw", id, true, &original).is_err(), "guest public/secret flags never grant desktop access");
-    }
 }

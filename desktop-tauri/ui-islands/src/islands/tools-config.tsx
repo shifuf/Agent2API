@@ -1,11 +1,13 @@
 import * as React from 'react'
 import {
   Alert, Button, Card, CardContent, CardHeader, CardTitle, Dialog, DialogBody, DialogContent,
-  DialogFooter, DialogHeader, DialogTitle, Empty, Field, FieldDescription, FieldLabel,
+  DialogFooter, DialogHeader, DialogTitle, Empty, Field, FieldDescription, FieldLabel, Input,
   MultiSelect, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, Switch,
   confirmDialog,
 } from '@ui'
 import { t } from '../i18n'
+import { SearchableSelect } from '../../../ui-shared/searchable-select'
+import { usePageRefreshTimer } from '../../../ui-shared/page-auto-refresh-timer'
 import { providerKeyDrafts, providerKeysPayload, providerReady } from '../../../ui-shared/tools-provider-keys'
 import { ProviderKeyList, ProviderKeysEditor } from '../../../ui-shared/tools-provider-keys-view'
 import { callJson } from './assistant-state'
@@ -13,9 +15,15 @@ import { openExternal } from './update-shared'
 import {
   PROVIDER_KEY_PAGES, clearProviderKey, clearVision, fetchProviders, fetchSelection, fetchVision,
   formatTime, saveProvider, saveSelection, saveVision, testProvider, testVision,
-  type ProviderRow, type ProviderSelection, type ProviderTestResult, type VisionConfig as VisionConfigRow,
-  type VisionKeyOption,
+  type LongQueryPolicy, type ProviderRow, type ProviderSelection, type ProviderTestResult,
+  type VisionConfig as VisionConfigRow, type VisionKeyOption,
 } from './tools-data'
+
+const LONG_QUERY_POLICY_LABEL: Record<LongQueryPolicy, string> = {
+  truncate: t('自动截断后搜索（推荐）'),
+  skip: t('跳过超限提供商'),
+  error: t('保留报错提示'),
+}
 
 /* ─── 网络搜索：上游提供商 ─────────────────────────────────── */
 
@@ -43,7 +51,13 @@ function testFailureText(result: ProviderTestResult): string {
 
 export function WebSearchConfig() {
   const [providers, setProviders] = React.useState<ProviderRow[]>([])
-  const [selection, setSelection] = React.useState<ProviderSelection>({ search_providers: [], fetch_provider: 'tavily' })
+  const [selection, setSelection] = React.useState<ProviderSelection>({
+    search_providers: [],
+    fetch_provider: 'tavily',
+    max_global_sources: 200,
+    long_query_policy: 'truncate',
+  })
+  const [maxGlobalDraft, setMaxGlobalDraft] = React.useState('200')
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -64,7 +78,12 @@ export function WebSearchConfig() {
     try {
       const [providersResult, selectionResult] = await Promise.all([fetchProviders(), fetchSelection()])
       setProviders(providersResult || [])
-      setSelection(selectionResult)
+      setSelection({
+        ...selectionResult,
+        max_global_sources: selectionResult.max_global_sources ?? 200,
+        long_query_policy: selectionResult.long_query_policy || 'truncate',
+      })
+      setMaxGlobalDraft(String(selectionResult.max_global_sources ?? 200))
     } catch (failure) {
       setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
@@ -73,6 +92,9 @@ export function WebSearchConfig() {
   }, [])
 
   React.useEffect(() => { void load() }, [load])
+  usePageRefreshTimer(async () => {
+    try { setProviders(await fetchProviders()) } catch {}
+  }, !loading && !testing, 15_000)
 
   const options = providers.map(provider => ({ value: provider.provider, label: provider.display_name }))
   const fetchOptions = providers.filter(provider => provider.supports_fetch !== false)
@@ -87,10 +109,16 @@ export function WebSearchConfig() {
 
   const saveProviders = async () => {
     if (!selection.search_providers.length) { setError(t('批量网页搜索至少选择一个提供商')); return }
+    const maxGlobal = Number(maxGlobalDraft.trim())
+    if (!Number.isInteger(maxGlobal) || maxGlobal < 20 || maxGlobal > 1000) {
+      setError(t('单次汇总总条数上限需在 20～1000 之间'))
+      return
+    }
     setSaving(true); setError(''); setNotice('')
     try {
-      const next = await saveSelection(selection)
+      const next = await saveSelection({ ...selection, max_global_sources: maxGlobal })
       setSelection(next)
+      setMaxGlobalDraft(String(next.max_global_sources ?? maxGlobal))
       setNotice(t('能力提供商配置已保存'))
     } catch (failure) {
       setError(t(failure instanceof Error ? failure.message : String(failure)))
@@ -121,6 +149,7 @@ export function WebSearchConfig() {
     } catch (failure) {
       setError(t(failure instanceof Error ? failure.message : String(failure)))
     } finally {
+      try { setProviders(await fetchProviders()) } catch {}
       setTesting('')
     }
   }
@@ -155,11 +184,36 @@ export function WebSearchConfig() {
         </Field>
         <Field>
           <FieldLabel>{t('批量网页抓取提供商')}</FieldLabel>
-          <Select value={selection.fetch_provider} onValueChange={value => { if (typeof value === 'string') setSelection(current => ({ ...current, fetch_provider: value })) }}>
-            <SelectTrigger className='w-full'><SelectValue>{fetchOptions.find(option => option.value === selection.fetch_provider)?.label || selection.fetch_provider}</SelectValue></SelectTrigger>
-            <SelectContent>{fetchOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={selection.fetch_provider} options={fetchOptions} className='w-full'
+            displayValue={fetchOptions.find(option => option.value === selection.fetch_provider)?.label || selection.fetch_provider}
+            aria-label={t('批量网页抓取提供商')} searchPlaceholder={t('搜索提供商')}
+            onValueChange={fetch_provider => setSelection(current => ({ ...current, fetch_provider }))} />
           <FieldDescription>{t('仅支持单选，默认为 Tavily。')}</FieldDescription>
+        </Field>
+        <Field>
+          <FieldLabel>{t('单次汇总总条数上限')}</FieldLabel>
+          <Input type='number' min={20} max={1000} value={maxGlobalDraft}
+            onChange={event => setMaxGlobalDraft(event.currentTarget.value)} />
+          <FieldDescription>{t('单次调用去重合并后最多保留的来源数（20～1000，默认 200）。')}</FieldDescription>
+        </Field>
+        <Field>
+          <FieldLabel>{t('搜索词超长处理')}</FieldLabel>
+          <Select value={selection.long_query_policy || 'truncate'}
+            onValueChange={value => {
+              if (value === 'truncate' || value === 'skip' || value === 'error') {
+                setSelection(current => ({ ...current, long_query_policy: value }))
+              }
+            }}>
+            <SelectTrigger className='w-full'>
+              <SelectValue>{LONG_QUERY_POLICY_LABEL[selection.long_query_policy || 'truncate']}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='truncate'>{LONG_QUERY_POLICY_LABEL.truncate}</SelectItem>
+              <SelectItem value='skip'>{LONG_QUERY_POLICY_LABEL.skip}</SelectItem>
+              <SelectItem value='error'>{LONG_QUERY_POLICY_LABEL.error}</SelectItem>
+            </SelectContent>
+          </Select>
+          <FieldDescription>{t('超出提供商字数限制（如 Kiro 200 字、Tavily 400 字、Firecrawl 500 字）时的策略。')}</FieldDescription>
         </Field>
       </div>
       <div><Button disabled={saving} onClick={() => void saveProviders()}>{saving ? <Spinner /> : null}{t('保存能力配置')}</Button></div>
@@ -186,9 +240,12 @@ export function WebSearchConfig() {
             {provider.auth_type === 'account' ? <>
               <div>{t('已有账号')} · {t('仅搜索')}</div>
               <div>{t('搜索账号')}: <span className='text-foreground'>{provider.account_name || t('未选择账号')}</span></div>
-              {provider.max_query_chars ? <div>{t('每条搜索词最多 {count} 字', { count: provider.max_query_chars })}</div> : null}
               {provider.unavailable_reason ? <div className='mt-1 text-warning'>{t(provider.unavailable_reason)}</div> : null}
             </> : <ProviderKeyList provider={provider} />}
+            {provider.supports_max_results && provider.max_results
+              ? <div>{t('单次最多 {count} 条', { count: provider.max_results })}</div>
+              : provider.supports_max_results === false ? <div>{t('固定返回条数')}</div> : null}
+            {provider.max_query_chars ? <div>{t('每条搜索词最多 {count} 字', { count: provider.max_query_chars })}</div> : null}
             <div>{t('更新时间')}: {formatTime(provider.updated_at)}</div>
           </div>
           <div className='mt-auto flex flex-wrap gap-1.5'>
@@ -223,6 +280,7 @@ function ProviderDialog({ provider, onClose, onSaved, onRefresh }: {
   const accountLabel = accounts.find(account => account.id === accountId)?.name
     || (accountId ? t('已绑定账号不可用，请重新选择') : t('未选择账号'))
   const [enabled, setEnabled] = React.useState(provider.enabled)
+  const [maxResultsDraft, setMaxResultsDraft] = React.useState(provider.max_results != null ? String(provider.max_results) : '')
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
 
@@ -242,13 +300,35 @@ function ProviderDialog({ provider, onClose, onSaved, onRefresh }: {
     } finally { setChecking('') }
   }
 
+  const supportsLimit = provider.supports_max_results !== false && Boolean(provider.max_results_limit)
+  const maxLimit = provider.max_results_limit ?? 100
+  const maxResultsHint = provider.provider === 'firecrawl'
+    ? t('范围 1～{max}（默认 {def}），Firecrawl 按每 10 条结果计费；留空恢复默认。', { max: maxLimit, def: provider.default_max_results ?? 20 })
+    : provider.provider === 'querit'
+      ? t('范围 1～{max}（默认 {def}），免费套餐最高 10 条，付费套餐可调高；留空恢复默认。', { max: maxLimit, def: provider.default_max_results ?? 10 })
+      : t('范围 1～{max}（默认 {def}），外部传 limit 时也会受此上限约束；留空恢复默认。', { max: maxLimit, def: provider.default_max_results ?? 10 })
+
   const save = async () => {
     if (!isAccount && keyDrafts.some(draft => !draft.id && !draft.apiKey.trim())) { setError(t('新密钥不能为空')); return }
+    let nextMaxResults: number | null | undefined = undefined
+    if (supportsLimit) {
+      const raw = maxResultsDraft.trim()
+      if (!raw) {
+        nextMaxResults = null
+      } else {
+        const parsed = Number(raw)
+        if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxLimit) {
+          setError(t('单次最多返回条数需在 1～{max} 之间', { max: maxLimit }))
+          return
+        }
+        nextMaxResults = parsed
+      }
+    }
     setBusy(true); setError('')
     try {
       await saveProvider(provider.provider, isAccount
-        ? { account_id: accountId || null, enabled }
-        : { keys: providerKeysPayload(keyDrafts), enabled })
+        ? { account_id: accountId || null, enabled, ...(supportsLimit ? { max_results: nextMaxResults } : {}) }
+        : { keys: providerKeysPayload(keyDrafts), enabled, ...(supportsLimit ? { max_results: nextMaxResults } : {}) })
       onSaved()
     } catch (failure) {
       setError(t(failure instanceof Error ? failure.message : String(failure)))
@@ -263,14 +343,14 @@ function ProviderDialog({ provider, onClose, onSaved, onRefresh }: {
       <DialogBody className='flex flex-col gap-3'>
         {isAccount ? <Field>
           <FieldLabel>{t('搜索账号')}</FieldLabel>
-          <Select value={accountId || '__none__'} onValueChange={value => { if (typeof value === 'string') setAccountId(value === '__none__' ? '' : value) }}>
-            <SelectTrigger className='w-full'><SelectValue>{accountLabel}</SelectValue></SelectTrigger>
-            <SelectContent>
-              <SelectItem value='__none__'>{t('未选择账号')}</SelectItem>
-              {accountId && !accounts.some(account => account.id === accountId) ? <SelectItem value={accountId} disabled>{accountLabel}</SelectItem> : null}
-              {accounts.map(account => <SelectItem key={account.id} value={account.id}>{account.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={accountId || '__none__'} className='w-full' displayValue={accountLabel}
+            aria-label={t('搜索账号')} searchPlaceholder={t('搜索账号…')}
+            onValueChange={value => setAccountId(value === '__none__' ? '' : value)} options={[
+              { value: '__none__', label: t('未选择账号') },
+              ...(accountId && !accounts.some(account => account.id === accountId)
+                ? [{ value: accountId, label: accountLabel, disabled: true }] : []),
+              ...accounts.map(account => ({ value: account.id, label: account.name })),
+            ]} />
           <FieldDescription>{t('复用「账号」页的登录态，不需要额外填写搜索密钥。账号停用或删除后不会自动换号。')}</FieldDescription>
           {!accounts.length ? <Alert variant='warning'>{t('没有可绑定的启用账号，请先到「账号」页添加或启用。')}</Alert> : null}
           {provider.available === false && provider.unavailable_reason ? <Alert variant='warning'>{t(provider.unavailable_reason)}</Alert> : null}
@@ -281,6 +361,14 @@ function ProviderDialog({ provider, onClose, onSaved, onRefresh }: {
             {t('获取 API Key')}
           </Button>
         </div> : null}
+        {supportsLimit ? <Field>
+          <FieldLabel>{t('单次最多返回条数')}</FieldLabel>
+          <Input type='number' min={1} max={maxLimit} disabled={busy || Boolean(checking)}
+            value={maxResultsDraft}
+            placeholder={provider.default_max_results ? t('默认 {count}', { count: provider.default_max_results }) : ''}
+            onChange={event => setMaxResultsDraft(event.currentTarget.value)} />
+          <FieldDescription>{maxResultsHint}</FieldDescription>
+        </Field> : null}
         <div className='flex items-center gap-2'>
           <span className='text-sm'>{t('启用')}</span>
           <Switch checked={enabled} disabled={isAccount && provider.available === false && !enabled} onCheckedChange={checked => setEnabled(checked === true)} aria-label={t('启用')} />
@@ -415,18 +503,17 @@ export function VisionConfigPanel() {
       <div className='grid grid-cols-1 gap-4 md:grid-cols-2'>
         <Field>
           <FieldLabel>{t('上游提供商')}</FieldLabel>
-          <Select value={provider} onValueChange={value => { if (typeof value === 'string') { setProvider(value); setModel('') } }}>
-            <SelectTrigger className='w-full'><SelectValue>{providerOptions.find(option => option.value === provider)?.label || t('请选择提供商')}</SelectValue></SelectTrigger>
-            <SelectContent>{providerOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={provider} options={providerOptions} className='w-full'
+            aria-label={t('上游提供商')} searchPlaceholder={t('搜索提供商')}
+            displayValue={providerOptions.find(option => option.value === provider)?.label || t('请选择提供商')}
+            onValueChange={value => { setProvider(value); setModel('') }} />
           <FieldDescription>{t('仅显示已启用且至少有一个可用模型的提供商。')}</FieldDescription>
         </Field>
         <Field>
           <FieldLabel>{t('上游模型')}</FieldLabel>
-          <Select value={model} onValueChange={value => { if (typeof value === 'string') setModel(value) }}>
-            <SelectTrigger className='w-full' disabled={!provider}><SelectValue>{model || (provider ? t('请选择模型') : t('请先选择提供商'))}</SelectValue></SelectTrigger>
-            <SelectContent>{modelOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-          </Select>
+          <SearchableSelect value={model} options={modelOptions} onValueChange={setModel} disabled={!provider}
+            className='w-full' aria-label={t('上游模型')} searchPlaceholder={t('搜索模型')}
+            displayValue={model || (provider ? t('请选择模型') : t('请先选择提供商'))} />
           <FieldDescription>{t('仅显示该提供商下已启用的模型。')}</FieldDescription>
         </Field>
         <Field>
@@ -442,13 +529,14 @@ export function VisionConfigPanel() {
         </Field>
         <Field>
           <FieldLabel>{t('内部调用 API Key')}</FieldLabel>
-          <Select value={keyId} onValueChange={value => { if (typeof value === 'string') setKeyId(value) }}>
-            <SelectTrigger className='w-full'><SelectValue>{keyOptions.find(option => option.value === keyId)?.label || t('请选择 API Key')}</SelectValue></SelectTrigger>
-            <SelectContent>
-              {savedKeyMissing ? <SelectItem value={config?.api_key_id || ''} disabled>{config?.api_key_name || config?.api_key_id}（{t('已失效')}）</SelectItem> : null}
-              {keyOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <SearchableSelect value={keyId} onValueChange={setKeyId} className='w-full'
+            aria-label={t('内部调用 API Key')} placeholder={t('请选择 API Key')}
+            displayValue={keyOptions.find(option => option.value === keyId)?.label || t('请选择 API Key')}
+            options={[
+              ...(savedKeyMissing ? [{ value: config?.api_key_id || '',
+                label: `${config?.api_key_name || config?.api_key_id}（${t('已失效')}）`, disabled: true }] : []),
+              ...keyOptions,
+            ]} />
           <FieldDescription>{t('内部请求本站网关时使用的网关 Key；额度、限流与请求日志记在该 Key 上。')}</FieldDescription>
         </Field>
       </div>

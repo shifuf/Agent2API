@@ -1,47 +1,66 @@
-//! 插件兼容性取决于实际协议、入口和宿主能力，不取决于网关的产品版本。
+//! 兼容性只由公共接口决定，不比较插件与主程序的产品版本号。
 
-use super::install::{self, InstalledPack, PackRegistry, SignatureState};
+use std::path::Path;
 
-pub(super) fn pack_error(pack: &InstalledPack) -> Option<String> {
+use agent2api_provider_protocol as proto;
+use serde::Deserialize;
+
+use super::install::{self, InstalledPack, PackRegistry};
+
+pub(super) const CAPABILITIES: &[&str] = &[
+    "accounts.cas.v1", "catalog.v1", "chat.stream.v1", "login.forms.v1",
+];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Requirements {
+    protocol: u32,
+    #[serde(default)]
+    requires: Vec<String>,
+}
+
+pub(super) fn validate(dir: &Path, manifest: &proto::PackManifest) -> Result<(), String> {
+    install::validate_manifest(manifest, proto::PROTOCOL_VERSION)?;
+    super::wasm::manifest::read(dir, manifest)?;
+    let path = dir.join("host.json");
+    if !path.exists() { return Ok(()); }
+    let bytes = std::fs::read(path).map_err(|_| "插件公共接口要求不可读")?;
+    if bytes.len() > 16 * 1024 { return Err("插件公共接口声明过大".into()); }
+    let requirements: Requirements = serde_json::from_slice(&bytes).map_err(|_| "插件公共接口要求格式无效")?;
+    if requirements.protocol != proto::PROTOCOL_VERSION {
+        return Err(format!("插件需要通信协议 {}，当前网关支持 {}", requirements.protocol, proto::PROTOCOL_VERSION));
+    }
+    for capability in requirements.requires {
+        if !CAPABILITIES.contains(&capability.as_str()) {
+            return Err(format!("当前网关缺少插件所需公共能力：{capability}"));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn installed_error(pack: &InstalledPack) -> Option<String> {
+    if let Some(reason) = super::support::legacy_reason(pack) { return Some(reason); }
     let dir = install::plugins_dir().join(&pack.id).join(&pack.version);
-    let manifest = match install::read_manifest(&dir) {
-        Ok(manifest) => manifest,
-        Err(error) => return Some(error),
-    };
-    if manifest.id != pack.id || manifest.version != pack.version {
-        return Some("插件清单与安装登记不一致，请重新安装插件包".into());
-    }
-    if let Err(error) = install::validate_manifest(&manifest, agent2api_provider_protocol::PROTOCOL_VERSION) {
-        return Some(error);
-    }
-    if let Err(error) = super::wasm::manifest::read(&dir, &manifest) {
-        return Some(error);
-    }
-    let Some(target) = install::target_for_manifest(&manifest, &super::host_target()) else {
-        return Some("插件包没有为当前网关平台提供入口".into());
-    };
-    let Some(entry) = manifest.entry.get(&target) else {
-        return Some("插件入口不存在".into());
-    };
-    if let Err(error) = super::wasm::manifest::checked_entry(&dir, entry) {
-        return Some(error);
-    }
-    let (signature, error) = install::verify_signature(&dir, &manifest, &target);
-    if signature == SignatureState::Invalid {
-        return Some(format!("签名校验失败：{}", error.unwrap_or_default()));
-    }
-    if pack.signed && signature != SignatureState::Verified {
-        return Some("已签名插件没有适用于当前入口的签名，请重新安装插件包".into());
-    }
-    None
+    install::read_manifest(&dir).and_then(|manifest| {
+        if manifest.id != pack.id || manifest.version != pack.version {
+            return Err("插件清单与安装登记不一致，请重新安装插件包".into());
+        }
+        validate(&dir, &manifest)?;
+        let target = install::target_for_manifest(&manifest, &super::host_target())
+            .ok_or_else(|| "插件包没有为当前平台提供入口".to_string())?;
+        let entry = manifest.entry.get(&target).ok_or("插件入口不存在")?;
+        super::wasm::manifest::checked_entry(&dir, entry)?;
+        let (signature, problem) = install::verify_signature(&dir, &manifest, &target);
+        if signature == install::SignatureState::Invalid || pack.signed && !signature.is_signed() {
+            return Err(format!("插件完整性复核失败：{}", problem.unwrap_or_default()));
+        }
+        Ok(())
+    }).err()
 }
 
 pub(crate) fn provider_error(provider: &str) -> Option<String> {
     let registry = PackRegistry::load();
-    // 运行中的旧执行体优先；未能启动的新包不能使旧账号被错误标为不兼容。
-    let loaded = super::runtime::provider_pack(provider);
     let owners = super::ownership::owners(&registry);
-    let id = loaded.as_ref().or_else(|| owners.get(provider))?;
-    let pack = registry.packs.iter().find(|pack| &pack.id == id)?;
-    pack_error(pack)
+    let owner = owners.get(provider)?;
+    installed_error(registry.packs.iter().find(|pack| &pack.id == owner)?)
 }

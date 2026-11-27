@@ -168,7 +168,7 @@ fn claude_title(messages: &[Value]) -> bool {
 /// `core::client::classify()` 的归类名（如 "Codex"），与规则里保存的配置 id
 /// （如 "codex"）大小写可能不同，比较一律先过 `title_routes::canonical_client`。
 /// `headers` 给 Codex 的显式标记用；提示词类判据不看它。
-pub struct TitleMatch { pub client: &'static str, pub model: String, pub rule_id: String }
+pub struct TitleMatch { pub client: &'static str, pub model: String, pub rule_id: String, pub fallback: title_routes::Fallback }
 
 pub fn client_for_request(
     client: &str,
@@ -182,7 +182,7 @@ pub fn client_for_request(
     // 这家客户端得有一条真会命中的规则（自己开着、勾了它、配了模型）才值得往下判 ——
     // 提示词判据要遍历消息结构，不便宜。
     let (index, rule) = title_routes::match_rule(&settings, client)?;
-    let matched_rule = |client| TitleMatch { client, model: rule.model.clone(), rule_id: format!("title-{}", index + 1) };
+    let matched_rule = |client| TitleMatch { client, model: rule.model.clone(), rule_id: format!("title-{}", index + 1), fallback: rule.fallback };
 
     // Codex 的判据是请求头，不需要看消息结构，先判它（省一次遍历）。
     if normalized == CLIENT_CODEX {

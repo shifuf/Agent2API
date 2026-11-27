@@ -84,7 +84,7 @@ pub(super) fn import(
         let exists: bool = temp.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)", [table], |row| row.get(0)).map_err(|_| "无法检查临时图像数据")?;
         if exists { temp.conn.execute(&format!("DELETE FROM {table}"), []).map_err(|_| "无法清除临时图像数据")?; }
     }
-    temp.conn.execute_batch("UPDATE task_plugins SET enabled=0, notify_allowed=0, network_grants_json='{}'; UPDATE task_jobs SET enabled=0, next_run_at=NULL;").map_err(|_| "无法清除备份中的任务授权")?;
+    temp.conn.execute_batch("UPDATE task_plugins SET enabled=0, notify_allowed=0; UPDATE task_jobs SET enabled=0, next_run_at=NULL;").map_err(|_| "无法清除备份中的任务授权")?;
     let interrupted = "从备份恢复，原执行已中断";
     temp.conn.execute(
         "UPDATE task_job_runs SET status='failed', finished_at=MAX(started_at, ?1), error=?2 WHERE status='running'",
@@ -96,8 +96,20 @@ pub(super) fn import(
     ).map_err(|_| "无法终结备份中未完成的实例状态")?;
     let tables = table_row_counts(&temp.conn, &[]);
     set_phase(RestorePhase::SafetyBackup);
+    enum RestoreOutcome {
+        Ready(std::path::PathBuf),
+        RolledBack(String),
+        Corrupted(String),
+    }
+
     let suppression = cloud_sync::auto_sync::SuppressionGuard::new();
-    let safety = db.with_mut(|main| {
+    if !config::model_key_source::pre_replace() {
+        return Err("模型Key原授权无法安全撤销，未替换主数据库".into());
+    }
+    // 原epoch先真实耐久轮换，随后暂存库另写新隔离epoch，最后才创建安全备份和覆盖。
+    // 因而安全备份本身已隔离；覆盖失败回滚、应用重启均不能恢复本次之前的旧发送资格。
+    // 槽payload不参与密钥重加密：原样保留但永远属于旧epoch，不按ID解密或建立Ready。
+    let attempt = db.with_account_change(|change| change.restore(&temp.conn, |main| {
         db.invalidate_accounts();
         db.invalidate_requests();
         let safety = safety::create(main, config_dir)?;
@@ -108,17 +120,31 @@ pub(super) fn import(
                 .map_err(|error| format!("打开安全备份失败: {error}"))
                 .and_then(|old| replace(&old, main));
             db.invalidate_accounts();
-            db.invalidate_requests();
-            return match rollback {
-                Ok(()) => Err(format!("{error}；已自动还原替换前的数据，本机密钥未更换")),
-                Err(rollback_error) => Err(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
-            };
+            return Ok(match rollback {
+                Ok(()) => RestoreOutcome::RolledBack(format!("{error}；已自动还原替换前的业务数据，本机密钥未更换；旧换证资格仍保持隔离")),
+                Err(rollback_error) => RestoreOutcome::Corrupted(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
+            });
         }
         crate::server::core::model_pricing::fx::database_replaced(main);
         db.invalidate_accounts();
-        db.invalidate_requests();
-        Ok(safety)
-    }).ok_or("数据库连接不可用，恢复未执行")??;
+        Ok(RestoreOutcome::Ready(safety))
+    }));
+    let safety = match attempt {
+        Some(Ok(RestoreOutcome::Ready(safety))) => safety,
+        Some(Ok(RestoreOutcome::RolledBack(error))) | Some(Err(error)) => {
+            db.invalidate_accounts();
+            config::try_reload_from_db();
+            return Err(error);
+        }
+        Some(Ok(RestoreOutcome::Corrupted(error))) => {
+            db.invalidate_accounts();
+            return Err(error);
+        }
+        None => {
+            config::try_reload_from_db();
+            return Err("数据库连接不可用，恢复未执行".into());
+        }
+    };
     db.invalidate_accounts();
     set_phase(RestorePhase::Reloading);
     // 内核进程仍使用恢复前的订阅与目录；先停旧进程，再用恢复后的配置重建。
@@ -164,10 +190,26 @@ pub(super) fn import(
     Ok(result)
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_REPLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_replace() {
+    FAIL_REPLACE.with(|flag| flag.set(true));
+}
+
 fn replace(source: &Connection, target: &mut Connection) -> Result<(), String> {
+    super::super::invalidate_query_caches();
     let backup =
         Backup::new(source, target).map_err(|error| format!("初始化数据库替换失败: {error}"))?;
-    complete_backup(&backup, "恢复主数据库")
+    complete_backup(&backup, "恢复主数据库")?;
+    #[cfg(test)]
+    if FAIL_REPLACE.with(|flag| flag.replace(false)) {
+        return Err("测试注入：数据库替换后中断".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

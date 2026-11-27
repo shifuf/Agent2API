@@ -107,7 +107,9 @@ pub(super) fn build(params: &Value, session: &Session, state: &mut State, option
             || captcha.region.len() > 32 {
             return Err(GatewayError::bad_request("阿里云登录验证必须声明完整真实的 V2 配置"));
         }
-        
+        if super::kiro::applies(&session.provider, session.method_index) {
+            return Err(GatewayError::with_status(403, "Kiro 固定网页登录不使用验证码发布步骤"));
+        }
         if super::trae::applies(&session.provider, session.method_index) {
             return Err(GatewayError::with_status(403, "Trae 固定网页登录只在官方页面完成验证，不使用插件验证码步骤"));
         }
@@ -128,7 +130,26 @@ pub(super) fn build(params: &Value, session: &Session, state: &mut State, option
         let profile = declaration.profile(&session.provider, session.method_index, lease.profile)
             .ok_or_else(|| GatewayError::with_status(403, "当前回调配置没有授权来源许可"))?;
         let official_state = match profile.callback {
-
+            crate::server::core::plugin_host::wasm::managed_policy::CallbackKind::GoogleCode => {
+                if !browser.manual_callback { return Err(GatewayError::bad_request("此授权步骤要求完整回调地址")); }
+                Some(super::loopback::authorization(&browser.url, &lease.uri, profile.origins)?)
+            }
+            crate::server::core::plugin_host::wasm::managed_policy::CallbackKind::AutoclawCode => {
+                if !browser.manual_callback || lease.authorization_url.as_deref() != Some(browser.url.as_str()) {
+                    return Err(GatewayError::with_status(403, "国际授权页面必须来自本轮官方接口，不能由插件自报"));
+                }
+                lease.official_state.clone().ok_or_else(unavailable).map(Some)?
+            }
+            crate::server::core::plugin_host::wasm::managed_policy::CallbackKind::KiroPortal
+            | crate::server::core::plugin_host::wasm::managed_policy::CallbackKind::KiroAws => {
+                if !browser.manual_callback { return Err(GatewayError::bad_request("Kiro 固定授权步骤需要完整回调地址")); }
+                let origin = url::Url::parse(&browser.url).map_err(|_| GatewayError::bad_request("Kiro 授权页面地址无效"))?
+                    .origin().ascii_serialization();
+                if !declaration.authorization_origins.contains(&origin) {
+                    return Err(GatewayError::with_status(403, "当前 Kiro 插件未声明此认证地区的授权来源"));
+                }
+                Some(super::kiro::authorization(lease, &browser.url)?)
+            }
             crate::server::core::plugin_host::wasm::managed_policy::CallbackKind::CatpawPassport => {
                 if browser.manual_callback { return Err(GatewayError::bad_request("CatPaw 官方登录只接受托管表单回调或原会话轮询")); }
                 Some(super::catpaw::authorization(lease, &browser.url)?)
@@ -141,7 +162,7 @@ pub(super) fn build(params: &Value, session: &Session, state: &mut State, option
                 None
             }
         };
-        // CatPaw保留官方state；Trae只认私有listener/PKCE上下文。
+        // Google/Kiro/CatPaw保留各自state；Trae不伪造state，只认私有listener/PKCE上下文。
         lease.step = Some(step.id.clone());
         lease.official_state = official_state;
         step.lease = Some(browser.lease_id.clone());

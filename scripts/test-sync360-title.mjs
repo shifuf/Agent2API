@@ -25,12 +25,14 @@ const upstream = http.createServer(async (req, res) => {
 const upstreamPort = await listen(upstream), reserved = http.createServer(), port = await listen(reserved)
 await new Promise(resolve => reserved.close(resolve))
 const url = `http://127.0.0.1:${port}`
-const child = spawn(executable, [], { cwd: home, windowsHide: true, stdio: 'ignore', env: { ...process.env,
+const child = spawn(executable, [], { cwd: home, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env,
   AGENT2API_UI_DIR: path.resolve(import.meta.dirname, '../desktop-tauri/ui'),
   AGENT2API_PROXY_HOME: home, AGENT2API_HOST: '127.0.0.1', AGENT2API_PROXY_PORT: String(port),
   AGENT2API_PROXY_API_KEY: admin, AGENT2API_ACCOUNT_KEY: '5'.repeat(64), AGENT2API_SELF_UPDATE: '0', AGENT2API_CAPTCHA_ENABLED: '0',
   AGENT2API_PANEL_PORT: '', AGENT2API_ADMIN_USER: '', AGENT2API_ADMIN_PASSWORD: '', AGENT2API_ADMIN_PASSWORD_HASH: '' } })
 const exited = once(child, 'exit')
+let serverOutput = ''
+for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { serverOutput = (serverOutput + chunk).slice(-12000) })
 let session
 async function call(route, body, method = body ? 'POST' : 'GET', credential = null, ua = 'test') {
   const auth = credential ? { authorization: `Bearer ${credential}` } : session ? { 'x-panel-token': session.accessToken } : {}
@@ -106,10 +108,10 @@ try {
     try { if ((await fetch(url + '/health')).ok) { ready = true; break } } catch {}
     await delay(150)
   }
-  assert(ready)
+  assert(ready, `Fixture server did not become ready (exit=${child.exitCode}): ${serverOutput}`)
   session = await createFixturePanelSession(url, { username: 'fixture', password: 'fixture-password-123' })
   const prompts = process.argv.includes('--prompt') ? '/api/prompt/rules' : null
-  if (prompts) assert(Array.isArray((await ok(prompts)).rules), 'conditional prompt management must expose ordered rules')
+  if (prompts) assert(Array.isArray((await ok(prompts)).config?.rules), 'conditional prompt management must expose ordered rules')
   let view = await ok(endpoint)
   assert(Array.isArray(view.config?.rules), 'management API must expose versioned title routing rules')
   const channels = []
@@ -133,10 +135,11 @@ try {
     const rules = [{ id: ruleId, name: 'fixture', enabled: true, mode: 'append', text: `${marker} ${privateWord}`, logic: 'all', conditions: [
       { id: 'source-model', field: 'model', op: 'is', values: [source] }, { id: 'source-client', field: 'client', op: 'is', values: ['codex'] },
     ] }]
-    const req = { revision: previous.revision, rules }
+    const promptConfig = { rules, fallback: { mode: 'append', file: '', text: legacy } }
+    const req = { revision: previous.revision, config: promptConfig }
     for (const credential of [admin, both]) assert.ok([401, 403].includes((await call(prompts, req, 'PUT', credential))[0]))
     await ok(prompts, req, 'PUT'); assert.equal((await call(prompts, req, 'PUT'))[0], 409)
-    const preview = sample => ok(prompts + '/preview', { rules, sample })
+    const preview = sample => ok(prompts + '/preview', { config: promptConfig, sample })
     assert.equal((await preview({ provider: channels[1], model: source, client: 'Codex' })).ruleId, ruleId)
     assert.equal((await preview({ provider: channels[1], model: 'wire-title', client: 'Codex' })).ruleId, null)
   }
@@ -152,7 +155,9 @@ try {
   ]
   for (const [route, ua, payload] of examples) {
     const body = { ...payload, model: source, stream: false }; const before = calls.length
-    for (const credential of [sourceOnly, targetOnly, missingProvider]) assert.equal((await call(route, body, 'POST', credential, ua))[0], 404)
+    for (const [label, credential] of [['sourceOnly', sourceOnly], ['targetOnly', targetOnly], ['missingProvider', missingProvider]]) {
+      assert.equal((await call(route, body, 'POST', credential, ua))[0], 404, `${route} ${ua} ${label}`)
+    }
     assert.equal(calls.length, before, 'neither denied source nor denied target may forward')
     await ok(route, body, 'POST', both, ua)
     assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).model, 'wire-title'); assert.ok(!('_wb_title_route' in calls.at(-1)))
@@ -186,7 +191,25 @@ try {
   await ok('/api/routing/groups', { id: row.group.id, revision: row.revision, group: { ...row.group, enabled: false } }, 'PUT')
   const beforeUnavailable = calls.length; assert.equal((await call(chat, { ...payload, model: source }, 'POST', both, ua))[0], 404)
   assert.equal(calls.length, beforeUnavailable, 'an unavailable target must not retry the source')
-  console.log('PASS title routing: three protocols, client recognition, public models, scope, no fallback, management and telemetry')
+  view = await ok(endpoint)
+  const { fallback, ...withoutFallback } = config.rules[0]
+  view = await ok(endpoint, { revision: view.revision, config: { enabled: true, rules: [withoutFallback] } }, 'PUT')
+  assert.equal(view.config.rules[0].fallback, 'error', 'an omitted fallback preserves the fork error default')
+  assert.equal((await call(chat, { ...payload, model: source }, 'POST', both, ua))[0], 404)
+  assert.equal(calls.length, beforeUnavailable)
+  view = await ok(endpoint, { revision: view.revision, config: { enabled: true, rules: [{ ...withoutFallback, fallback: 'original' }] } }, 'PUT')
+  assert.equal(view.config.rules[0].fallback, 'original', 'explicit upstream original fallback must round-trip')
+  const resumed = await ok(chat, { ...payload, model: source }, 'POST', sourceOnly, ua)
+  assert.equal(resumed.model, source)
+  assert.equal(calls.length, beforeUnavailable + 1)
+  assert.equal(calls.at(-1).model, 'wire-source')
+  assert.equal((await call(chat, { ...payload, model: source }, 'POST', targetOnly, ua))[0], 404)
+  assert.equal(calls.length, beforeUnavailable + 1, 'explicit fallback must still validate the original model scope')
+  console.log('PASS title routing: three protocols, client recognition, public models, scope, default error, explicit original fallback, management and telemetry')
 } finally {
-  child.kill(); await exited; await new Promise(resolve => upstream.close(resolve)); await rm(home, { recursive: true, maxRetries: 4, force: true })
+  child.kill(); await exited; await new Promise(resolve => upstream.close(resolve))
+  await rm(home, { recursive: true, maxRetries: 4, force: true }).catch(error => {
+    if (error.code !== 'EBUSY') throw error
+    console.warn(`Fixture directory remains locked: ${home}`)
+  })
 }

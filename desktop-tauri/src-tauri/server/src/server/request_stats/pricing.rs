@@ -21,6 +21,8 @@ struct Sample {
     test: bool,
     old_usd: Option<f64>,
     raw: Option<String>,
+    account_id: String,
+    account_name: String,
 }
 
 impl Sample {
@@ -29,13 +31,14 @@ impl Sample {
             row_id: row.get(0)?, id: row.get(1)?, ts: row.get(2)?, provider: row.get(3)?,
             model: row.get(4)?, upstream_model: row.get(5)?, output: row.get(6)?,
             read: row.get(7)?, test: row.get(8)?, old_usd: row.get(9)?, raw: row.get(10)?,
+            account_id: row.get(11)?, account_name: row.get(12)?,
         })
     }
 }
 
 impl RequestStats {
     pub fn reprice(&self, selection: Selection) -> Result<Value, (i32, &'static str)> {
-        const FIELDS: &str = "row_id,id,ts,provider,model,upstream_model,completion_tokens,cache_read_tokens,is_test,cost_usd,pricing_evidence";
+        const FIELDS: &str = "row_id,id,ts,provider,model,upstream_model,completion_tokens,cache_read_tokens,is_test,cost_usd,pricing_evidence,account_id,account_name";
         const MAX_ROWS: usize = 2000;
         let settings = model_pricing::settings();
         let guard = self.guard();
@@ -77,7 +80,22 @@ impl RequestStats {
                 let written = transaction.execute("UPDATE requests SET cost_usd=?1, pricing_evidence=?2 WHERE row_id=?3 AND id=?4 AND ts=?5 AND pricing_evidence IS ?6 AND cost_usd IS ?7", params![usd, serde_json::to_string(evidence).expect("JSON value"), sample.row_id, sample.id, sample.ts, sample.raw, sample.old_usd])?;
                 if written != 1 { return Ok(false); }
                 if !sample.test {
-                    transaction.execute("UPDATE request_daily SET cost_usd=MAX(0,cost_usd+?1), cost_cny=MAX(0,cost_cny+?2), priced_requests=priced_requests+?3 WHERE date=?4", params![usd - sample.old_usd.unwrap_or(0.0), cny_delta, i64::from(sample.old_usd.is_none()), date])?;
+                    if let Some(mut day) = super::daily::select_daily_row(&transaction, date)? {
+                        let usd_delta = usd - sample.old_usd.unwrap_or(0.0);
+                        let newly_priced = i64::from(sample.old_usd.is_none());
+                        day.cost_usd = (day.cost_usd + usd_delta).max(0.0);
+                        day.cost_cny = (day.cost_cny + cny_delta).max(0.0);
+                        day.priced_requests += newly_priced;
+                        day.unpriced_requests = (day.unpriced_requests - newly_priced).max(0);
+                        super::report::push_model_accum(&mut day.model_tokens,
+                            super::report::model_stat_key(&sample.model, &sample.upstream_model),
+                            0, 0, usd_delta, -newly_priced);
+                        super::report::push_provider_accum(&mut day.provider_stats, &sample.provider,
+                            0, 0, 0, usd_delta, -newly_priced);
+                        super::report::push_account_accum(&mut day.account_stats, &sample.account_id, &sample.account_name,
+                            0, 0, 0, usd_delta, -newly_priced);
+                        super::daily::upsert_daily(&transaction, &day)?;
+                    }
                 }
             }
             transaction.commit()?;

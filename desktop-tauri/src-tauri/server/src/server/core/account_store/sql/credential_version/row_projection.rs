@@ -35,9 +35,6 @@ const OPERATION_KEYS: &[&str] = &[
     "claimPlans",
     "pluginState",
     "usageQuery",
-    "needsRelogin",
-    "needsReloginReason",
-    "usageCredentialRevision",
     "pluginSecret",
     "pluginPublic",
 ];
@@ -125,7 +122,15 @@ impl Projection {
             Some(_) => return Err(Error::InvalidRecord),
             None => Value::Null,
         };
-        let identity = catpaw_identity(record, plugin.as_ref().unwrap_or(&native))?;
+        let identity = if catpaw {
+            catpaw_identity(record, plugin.as_ref().unwrap_or(&native))?
+        } else {
+            match record.get("pluginIdentity") {
+                Some(Value::String(value)) if text(value, 1024) => value.clone(),
+                Some(_) => return Err(Error::InvalidRecord),
+                None => record.id().to_string(),
+            }
+        };
         let user_agent = match record.get("userAgent") {
             None | Some(Value::Null) => None,
             Some(Value::String(value))
@@ -148,6 +153,62 @@ impl Projection {
             identity,
             user_agent,
         })
+    }
+
+    pub(super) fn matches_doubao_fields(
+        &self,
+        fields: &Map<String, Value>,
+        plugin: Option<&Value>,
+        public: Option<&Value>,
+    ) -> Result<bool, Error> {
+        if self.provider != RowProvider::DoubaoWork
+            || fields.get("provider").and_then(Value::as_str) != Some(self.provider.id())
+        {
+            return Err(Error::InvalidRecord);
+        }
+        let plugin = plugin.filter(|value| !value.is_null());
+        if plugin.is_some_and(|value| !value.is_object()) {
+            return Err(Error::InvalidRecord);
+        }
+        if plugin != self.plugin.as_ref() {
+            return Ok(false);
+        }
+        let native = self.native.as_object().ok_or(Error::InvalidRecord)?;
+        let included = |key: &str| {
+            !OPERATION_KEYS.contains(&key)
+                && !key.starts_with("pluginLedger.")
+                && !credential_version::private_field(key)
+        };
+        if fields.iter().filter(|(key, _)| included(key)).count() != native.len()
+            || native.iter().any(|(key, value)| fields.get(key) != Some(value))
+        {
+            return Ok(false);
+        }
+        match public.filter(|value| !value.is_null()) {
+            None if self.public_identity.is_null() => {}
+            Some(Value::Object(public)) => {
+                let expected = self.public_identity.as_object().ok_or(Error::InvalidRecord)?;
+                if PUBLIC_IDENTITY_KEYS.iter().filter(|name| public.contains_key(**name)).count()
+                    != expected.len()
+                    || expected.iter().any(|(key, value)| public.get(key) != Some(value))
+                {
+                    return Ok(false);
+                }
+            }
+            _ => return Err(Error::InvalidRecord),
+        }
+        let identity = match fields.get("pluginIdentity") {
+            Some(Value::String(value)) if text(value, 1024) => value.as_str(),
+            None => fields.get("id").and_then(Value::as_str).ok_or(Error::InvalidRecord)?,
+            _ => return Err(Error::InvalidRecord),
+        };
+        let user_agent = match fields.get("userAgent") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value))
+                if value.len() <= 1024 && !value.chars().any(char::is_control) => Some(value.as_str()),
+            _ => return Err(Error::InvalidRecord),
+        };
+        Ok(identity == self.identity && user_agent == self.user_agent.as_deref())
     }
 
     pub(super) fn secret(&self) -> &Value {

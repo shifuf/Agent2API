@@ -43,7 +43,7 @@ async fn scoped(host: &Arc<Host>, provider: &str, generation: u64) -> bool {
 
 pub(in crate::server::core::plugin_host) async fn call(host: &Arc<Host>, provider: &str, account: &str,
     complete: bool, payload: &Value) -> Result<Value, proto::WireError> {
-    if host.options.wasm.is_some() { return Err(failure(403, "forbidden", "当前执行体不是原生领取验证桥")); }
+    if host.options.script || host.options.wasm.is_some() { return Err(failure(403, "forbidden", "当前执行体不是原生领取验证桥")); }
     let _lease = host.activity.acquire().ok_or_else(unavailable)?;
     host.ensure().await.map_err(|_| unavailable())?;
     let generation = host.generation.load(Ordering::Acquire);

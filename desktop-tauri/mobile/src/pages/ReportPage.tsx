@@ -15,6 +15,7 @@ import { SourceUsageSection } from '../components/SourceUsageSection'
 import { MobileReportTrend } from '../components/MobileReportTrend'
 import { DateRangeFilter } from '../components/DateRangeFilter'
 import { readCustomRange, saveCustomRange, type CustomDates } from '../../../ui-shared/date-range'
+import { LocalDirectSection } from '../../../ui-islands/src/islands/agent-local-direct-card'
 
 /**
  * 报表。
@@ -95,6 +96,8 @@ export function ReportPage() {
             : t('统计区间加载中')
         }
       />
+
+      <LocalDirectSection />
 
       <DateRangeFilter range={range} dates={dates} onRangeChange={setRange} label={t('报表时间范围')}
         onDatesChange={next => { setDates(next); saveCustomRange(CUSTOM_RANGE_KEY, next) }} />

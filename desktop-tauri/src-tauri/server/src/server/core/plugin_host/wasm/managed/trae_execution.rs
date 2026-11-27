@@ -41,6 +41,7 @@ fn context_runtime(
         let runtime = slot.as_ref().ok_or_else(unavailable)?;
         let generation = host.generation.load(Ordering::Acquire);
         if !current(&host, "trae", generation)
+            || super::super::super::runtime::admission_closed()
             || !Arc::ptr_eq(&context.shared, &runtime.shared)
             || runtime.shared.cancel.is_cancelled()
             || !runtime.shared.options.allows("login.managed.v1")
@@ -88,6 +89,7 @@ impl TraeExecution {
                 .try_read()
                 .map_err(|_| unavailable())?;
             if !current(&host, "trae", generation)
+                || super::super::super::runtime::admission_closed()
                 || runtime.shared.cancel.is_cancelled()
                 || !slot
                     .as_ref()
@@ -123,6 +125,7 @@ impl TraeExecution {
             .try_read()
             .map_err(|_| unavailable())?;
         if !current(&self.host, "trae", self.generation)
+            || super::super::super::runtime::admission_closed()
             || self.runtime.shared.cancel.is_cancelled()
             || !slot
                 .as_ref()
@@ -147,6 +150,7 @@ impl TraeExecution {
             let _lifecycle = self.host.lifecycle.try_lock().map_err(|_| unavailable())?;
             let slot = self.host.embedded.runtime.try_read().map_err(|_| unavailable())?;
             if !current(&self.host, "trae", self.generation)
+                || super::super::super::runtime::admission_closed()
                 || self.runtime.shared.cancel.is_cancelled()
                 || !slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &self.runtime)) {
                 return Err(unavailable());

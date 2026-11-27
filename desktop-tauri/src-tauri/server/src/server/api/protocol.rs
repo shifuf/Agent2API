@@ -1,30 +1,6 @@
-//! 对话链路的另外两条协议入口（对照 `/v1/chat/completions` 实现）。
-//!
-//!   POST /v1/responses   Responses API（OpenAI 新协议；Codex 等客户端在用）
-//!   POST /v1/messages    Anthropic Messages API（Claude Code 等客户端在用）
-//!
-//! ── 这两个入口做什么 ────────────────────────────────────────
-//! 两者都是**薄壳**：把下游协议的请求翻译成 Chat Completions，交给与
-//! `/v1/chat/completions` **完全相同**的转发链路（模型解析、账号选路、轮换、
-//! 脱敏、记账都不重写），再把回程翻译回下游协议。翻译规则在
-//! `core::protocol` 里，公共管道在 `api::pipeline` 里 —— 本文件只负责
-//! 「HTTP 层」：取 body、调管道、按协议形态写响应。
-//!
-//! ── 为什么不做成「每家适配器各支持两套协议」──────────────────
-//! 见 `core::protocol` 模块头的完整论证。一句话：本项目所有上游经适配器层
-//! 已归一为 Chat，所以在出入口转换一次（2 套）远优于在 6 家适配器里各写
-//! （12 套），且新增上游时不必再补转换。
-//!
-//! ── 非流式请求为什么也让上游走流式 ──────────────────────────
-//! 各家上游的流式接口才是完整能力（非流式在部分上游上是「聚合后再返回」的
-//! 兼容层）。所以即使下游要非流式，我们也以 `stream:true` 请求上游，
-//! 收完后聚合成本协议的 JSON —— 与 `/v1/chat/completions` 的非流式路径同一做法。
-//! 为此，送给转发层的 body 里 `stream` 恒为 true，而「下游要不要流式」
-//! 由各 handler 自己记住（`ForwardRequest.stream` 传的仍是下游的意愿，
-//! 因为它还决定上游聚合/透传的分支，见 `provider_loop` 的 `ctx.stream`）。
-//!
-//! ── 硬约束 ──────────────────────────────────────────────────
-//! release 是 `panic=abort`：零 unwrap/expect/panic。
+//! Responses 与 Anthropic 入口共用选路、鉴权和记账。
+//! 原生请求与 Chat 路由投影分开保存：自定义上游协议相同时双向原生转发，
+//! 其余上游沿用 Chat 转换链。只有转换链统一请求流式并在本地聚合。
 
 use std::sync::Arc;
 
@@ -35,8 +11,11 @@ use axum::response::Response;
 use serde_json::{json, Value};
 
 use crate::server::core::compact_routing::{self, RequestFormat};
+use crate::server::core::title_routing;
 use crate::server::core::key_scope::KeyScope;
-use crate::server::core::protocol::{anthropic, responses};
+use crate::server::core::protocol::{anthropic, responses, native::{NativeRequest, WireProtocol}};
+
+pub(super) mod native_response;
 use crate::server::core::upstream::cancellation;
 use crate::server::core::upstream::continuation::{self, Continuation};
 use crate::server::core::upstream::usage::RequestTelemetry;
@@ -86,6 +65,7 @@ fn parse_object(
 async fn forward_chat(
     state: &ServerState,
     payload: Value,
+    native: NativeRequest,
     client_headers: &HeaderMap,
     stream: bool,
     dedupe_key: String,
@@ -106,7 +86,9 @@ async fn forward_chat(
         allowed_providers: scope.clone(),
         max_rounds,
     });
-    let outcome = super::stream_wait::forward(state.upstream().clone(), ForwardRequest {
+    let outcome = state
+        .upstream()
+        .forward_native(ForwardRequest {
             body: payload,
             stream,
             dedupe_key,
@@ -119,12 +101,16 @@ async fn forward_chat(
             // 是模型测试的直达跳，见 `ForwardRequest` 的说明）
             ignore_model_gate: false,
             proxy_override: None,
-        })
+        }, native)
         .await;
     // 续写包装：流式在下游状态机接手之前把整条流换掉（终止帧必须在
     // `ResponsesStream` / `AnthropicStream` 看到它之前就压住，否则机器会提前
     // 收尾、后续轮的内容整段被丢）；非流式则在这里把聚合体问完整。
     match (continuation, outcome) {
+        (Some(context), Ok(ForwardOutcome::Native(response))) => {
+            context.telemetry.note_attempt_notice("同协议原生转发不自动拼接续写，保留上游原始结束原因与签名");
+            Ok(ForwardOutcome::Native(response))
+        }
         (Some(context), Ok(ForwardOutcome::Stream { status, stream })) => {
             Ok(ForwardOutcome::Stream { status, stream: context.stream(stream) })
         }
@@ -139,6 +125,20 @@ async fn forward_chat(
 
 /// POST /v1/responses
 pub async fn responses_endpoint(
+    state: State<ServerState>,
+    headers: HeaderMap,
+    key_scope: Option<Extension<KeyScope>>,
+    key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
+    key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
+    body: Bytes,
+) -> Response {
+    let parsed = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let streaming = parsed.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let model = parsed.get("model").and_then(Value::as_str).unwrap_or("").to_owned();
+    super::stream_wait::response(responses_inner(state, headers, key_scope, key_identity, key_source, body), streaming, WireProtocol::Responses, model).await
+}
+
+async fn responses_inner(
     State(state): State<ServerState>,
     headers: HeaderMap,
     // R9：中间件放进请求扩展的「命中 Key 的限制」（`None` = 不限制，见
@@ -146,6 +146,7 @@ pub async fn responses_endpoint(
     // `Extension<_>` —— 后者在免鉴权模式下取不到会直接拒绝请求。
     key_scope: Option<Extension<KeyScope>>,
     key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
+    key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
     body: Bytes,
 ) -> Response {
     let scope = key_scope.map(|Extension(scope)| scope);
@@ -172,8 +173,8 @@ pub async fn responses_endpoint(
     let client_reasoning = pipeline::client_reasoning_of(&raw);
     let stream = raw.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
-    // 协议翻译（有状态字段在这里被拒）
-    let mut chat_body = match responses::chat_from_responses(&raw) {
+    // Chat 投影服务选路与跨协议出口，原生请求另行保留。
+    let (native, mut chat_body) = match NativeRequest::prepare(WireProtocol::Responses, raw.clone()) {
         Ok(body) => body,
         Err(message) => {
             let error = GatewayError::bad_request(message);
@@ -219,8 +220,9 @@ pub async fn responses_endpoint(
     // 模型那一半已在上面判过（分工见 forward_chat 的说明）。
     // telemetry 在这里创建（不再由 forward_chat 代建）：进行中行要在
     // 转发开始前插入，见下方 record_started。
-    let telemetry = Arc::new(RequestTelemetry::with_id());
+    let telemetry = Arc::new(RequestTelemetry::with_model_key(key_source.map(|Extension(source)| source)));
     let client_model = pipeline::model_field_text(&raw);
+    telemetry.capture_prompt_request(&source, &client_model);
     // 「进行中」行（与 /v1/chat/completions 同一处时点：模型解析成功、
     // 转发开始前；生命周期见 `RequestStats::record_started`）
     let telemetry_id = telemetry.snapshot().id;
@@ -247,10 +249,11 @@ pub async fn responses_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     let outcome = forward_chat(
         &state,
         chat_body,
+        native,
         &headers,
         stream,
         dedupe_key,
@@ -288,6 +291,7 @@ pub async fn responses_endpoint(
         }
     };
     match outcome {
+        Ok(ForwardOutcome::Native(response)) => native_response::respond(response, context, &mut guard),
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             let model = requested_model.clone();
@@ -347,10 +351,15 @@ pub async fn responses_endpoint(
             // （见 `api::chat` 同名分支的说明）。
             logging::console_line("[Model]", &format!("❌ {message}"));
             let response = error_response(context, &error, |status, error| {
+                if let Some(response) = native_response::error_response(WireProtocol::Responses, status, error) { return response; }
                 let code = anthropic::responses_error_code(status);
-                GatewayError::with_status(i32::from(status), error.message.clone())
+                let mut mapped = GatewayError::with_status(i32::from(status), error.message.clone())
                     .with_code(code)
-                    .payload_response()
+                    .with_optional_reason(error.reason.clone());
+                if let Some(seconds) = error.retry_after_secs {
+                    mapped = mapped.with_retry_after_seconds(seconds);
+                }
+                mapped.payload_response()
             });
             // 记账已完成（含手动终止的 408）：解除兜底并注销令牌
             guard.complete();
@@ -363,11 +372,24 @@ pub async fn responses_endpoint(
 
 /// POST /v1/messages
 pub async fn messages_endpoint(
+    state: State<ServerState>,
+    headers: HeaderMap,
+    key_scope: Option<Extension<KeyScope>>,
+    key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
+    key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
+    body: Bytes,
+) -> Response {
+    let streaming = serde_json::from_slice::<Value>(&body).ok().and_then(|body| body.get("stream").and_then(Value::as_bool)).unwrap_or(false);
+    super::stream_wait::response(messages_inner(state, headers, key_scope, key_identity, key_source, body), streaming, WireProtocol::Anthropic, String::new()).await
+}
+
+async fn messages_inner(
     State(state): State<ServerState>,
     headers: HeaderMap,
     // R9：同 responses_endpoint（`Option` + 取不到 = 不限制）
     key_scope: Option<Extension<KeyScope>>,
     key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
+    key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
     body: Bytes,
 ) -> Response {
     let scope = key_scope.map(|Extension(scope)| scope);
@@ -384,7 +406,7 @@ pub async fn messages_endpoint(
     let compact_client = compact_routing::client_for_request(&source.behavior_client, &raw, RequestFormat::Anthropic);
     let title = crate::server::core::title_routing::client_for_request(&source.behavior_client, &headers, &raw, false);
     // 协议翻译
-    let mut chat_body = match anthropic::chat_from_anthropic(&raw) {
+    let (native, mut chat_body) = match NativeRequest::prepare(WireProtocol::Anthropic, raw.clone()) {
         Ok(body) => body,
         Err(message) => {
             let error = GatewayError::bad_request(message);
@@ -421,8 +443,9 @@ pub async fn messages_endpoint(
     // 模型那一半已在上面判过（分工见 forward_chat 的说明）。
     // telemetry 在这里创建（与 responses_endpoint 同理：进行中行要在
     // 转发开始前插入）
-    let telemetry = Arc::new(RequestTelemetry::with_id());
+    let telemetry = Arc::new(RequestTelemetry::with_model_key(key_source.map(|Extension(source)| source)));
     let client_model = pipeline::model_field_text(&raw);
+    telemetry.capture_prompt_request(&source, &client_model);
     // 流式 `message_start` 的输入锚点：上游 usage 要等流末尾那帧才到，先按
     // 请求体估算一个（口径同 `/v1/messages/count_tokens`，见 issue #437）。
     // 必须在这里算 —— `chat_body` 下面会被 move 进 `forward_chat`。
@@ -453,10 +476,11 @@ pub async fn messages_endpoint(
     if let Some(token) = cancellation::register(&telemetry_id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     let outcome = forward_chat(
         &state,
         chat_body,
+        native,
         &headers,
         stream,
         dedupe_key,
@@ -494,6 +518,7 @@ pub async fn messages_endpoint(
         }
     };
     match outcome {
+        Ok(ForwardOutcome::Native(response)) => native_response::respond(response, context, &mut guard),
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             let model = requested_model.clone();
@@ -542,7 +567,8 @@ pub async fn messages_endpoint(
             // （见 `api::chat` 同名分支的说明）。
             logging::console_line("[Model]", &format!("❌ {message}"));
             let response = error_response(context, &error, |status, error| {
-                anthropic_error_response_with_status(status, &error.message)
+                if let Some(response) = native_response::error_response(WireProtocol::Anthropic, status, error) { return response; }
+                anthropic_error_response_with_status(status, error)
             });
             // 记账已完成（含手动终止的 408）：解除兜底并注销令牌
             guard.complete();
@@ -574,17 +600,32 @@ async fn collect_stream(
 
 /// Anthropic 形态的错误响应（`{type:"error", error:{type, message}}`）
 fn anthropic_error_response(error: &GatewayError) -> Response {
-    anthropic_error_response_with_status(error.http_status().as_u16(), &error.message)
+    anthropic_error_response_with_status(error.http_status().as_u16(), error)
 }
 
-fn anthropic_error_response_with_status(status: u16, message: &str) -> Response {
+fn anthropic_error_response_with_status(status: u16, error: &GatewayError) -> Response {
     let kind = anthropic::error_kind_for_status(status);
+    let mut detail = serde_json::Map::new();
+    detail.insert("type".to_string(), json!(kind));
+    detail.insert("message".to_string(), json!(error.message));
+    let retry_after = error.retry_after_secs.filter(|seconds| *seconds > 0);
+    if let Some(reason) = &error.reason {
+        detail.insert("reason".to_string(), json!(reason));
+        if let Some(seconds) = retry_after {
+            detail.insert("retry_after".to_string(), json!(seconds));
+        }
+    }
     let body = json!({
         "type": "error",
-        "error": { "type": kind, "message": message },
+        "error": Value::Object(detail),
     });
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut response = json_response(body);
     *response.status_mut() = code;
+    if let Some(seconds) = retry_after {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
+            response.headers_mut().insert(axum::http::header::RETRY_AFTER, value);
+        }
+    }
     response
 }

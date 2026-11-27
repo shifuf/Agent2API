@@ -51,6 +51,7 @@ use serde_json::{json, Value};
 
 use crate::server::config;
 use crate::server::core::compact_routing::{self, RequestFormat};
+use crate::server::core::title_routing;
 use crate::server::core::upstream::cancellation;
 use crate::server::core::upstream::continuation::{self, Continuation};
 use crate::server::core::upstream::usage::RequestTelemetry;
@@ -77,6 +78,7 @@ pub async fn chat_completions(
     // 裸 `Extension<T>` 那样直接拒绝请求（那会把整个免鉴权模式打回 500）。
     key_scope: Option<Extension<crate::server::core::key_scope::KeyScope>>,
     key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
+    key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
     body: Bytes,
 ) -> Response {
     let scope = key_scope.map(|Extension(scope)| scope);
@@ -156,7 +158,8 @@ pub async fn chat_completions(
     );
 
     // 原始请求的去重键已在模型改写前计算。
-    let telemetry = Arc::new(RequestTelemetry::with_id());
+    let telemetry = Arc::new(RequestTelemetry::with_model_key(key_source.map(|Extension(source)| source)));
+    telemetry.capture_prompt_request(&request_source, &client_model);
     // 「进行中」行：模型解析已成功、转发即将开始 —— 先插一条 status=0 的明细，
     // 让请求日志在响应还没跑完时就能看到这条请求（收尾时由 `record` 的 UPDATE
     // 补全终态字段，生命周期见 `RequestStats::record_started`）。早失败路径
@@ -184,7 +187,7 @@ pub async fn chat_completions(
     // 客户端在响应产生前断开时 axum 会直接取消 handler，收尾记账走不到 ——
     // 守卫的 Drop 补一条 408 终态（详见 `DisconnectGuard` 的说明）。
     // 正常路径必须显式调 `complete()` / `handoff()`，见下面的三个出口。
-    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry_id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     // 在途回写：选路一定就把「谁在承载」、发送体一定稿就把「上游真名」写进这条
     // 进行中行（连同尝试链、首响、脱敏命中）—— 列表页 1 秒轮询，于是这些读数在
     // 转发期间就能看到，不必等收尾。接线在这里、core 只持有闭包，理由见
@@ -226,6 +229,14 @@ pub async fn chat_completions(
     let stats = state.request_stats();
 
     match outcome {
+        Ok(ForwardOutcome::Native(response)) => {
+            let context = RecordContext {
+                stats, telemetry, started_at, model: requested_model.clone(), client_model,
+                client_reasoning, status: i64::from(response.status), raw_request, raw_response: None,
+                is_test: false, source: request_source,
+            };
+            super::protocol::native_response::respond(response, context, &mut guard)
+        }
         Ok(ForwardOutcome::Stream { status, stream: source }) => {
             // 流式：记账**不能**在这里做 —— 这里只是「响应头已就绪」，
             // 内容还在下发。包装一层，由流自己在跑完/被丢弃时记账
@@ -487,6 +498,10 @@ pub fn spawn_catalog_refresh(state: &ServerState) {
     let store = state.store().clone();
     let update = state.update().clone();
     crate::spawn_task(async move {
-        let _ = crate::server::core::scheduled_tasks::refresh_catalog_if_due(&store,&update).await;
+        let mut request = crate::server::core::maintenance::Request::full(crate::server::core::maintenance::MODEL, false);
+        request.source = "passive";
+        if let Err(error) = crate::server::core::maintenance::execute(&store, request).await {
+            crate::server::logging::verbose("[Maintenance]", &error);
+        }
     });
 }

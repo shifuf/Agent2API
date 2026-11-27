@@ -1,122 +1,201 @@
+//! 定时任务类插件管理接口：`/api/task-plugins*`。
+
+use std::collections::BTreeMap;
+
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Request};
-use axum::middleware::{self, Next};
+use axum::extract::Path;
 use axum::response::Response;
-use axum::routing::{get, post};
-use axum::Router;
+use base64::Engine;
 use serde_json::{json, Value};
 
-use super::task_jobs;
 use crate::server::core::task_plugins::{scheduler, store, store_remote, types};
-use crate::server::{access, errors::management_error, http::ok_json, ServerState};
+use crate::server::errors::management_error;
+use crate::server::http::{ok_json, parse_body};
 
-pub fn router() -> Router<ServerState> {
-    Router::new()
-        .route("/api/task-plugins", get(list).post(create))
-        .route("/api/task-plugins/import", post(create))
-        .route("/api/task-plugins/preview", post(preview))
-        .route("/api/task-plugins/store", get(store_snapshot))
-        .route("/api/task-plugins/store/refresh", post(refresh_store))
-        .route("/api/task-plugins/install-store", post(install_store))
-        .route("/api/task-plugins/{id}/script", get(export_script))
-        .route("/api/task-plugins/{id}", axum::routing::put(update).delete(remove))
-        .route("/api/task-plugins/{id}/permissions", post(permissions))
-        .route("/api/task-jobs", get(task_jobs::list).post(task_jobs::create))
-        .route("/api/task-jobs/cron-preview", post(task_jobs::cron_preview))
-        .route("/api/task-jobs/{id}", axum::routing::put(task_jobs::update).patch(task_jobs::patch).delete(task_jobs::remove))
-        .route("/api/task-jobs/{id}/run", post(task_jobs::run_now))
-        .route("/api/task-jobs/{id}/stop", post(task_jobs::stop_now))
-        .route("/api/task-jobs/{id}/duplicate", post(task_jobs::duplicate))
-        .route("/api/task-jobs/{id}/action", post(task_jobs::trigger_action))
-        .route("/api/task-jobs/{id}/runs", get(task_jobs::list_runs).delete(task_jobs::clear_runs))
-        .layer(DefaultBodyLimit::max(384 * 1024))
-        .route_layer(middleware::from_fn(admin_only))
+pub async fn list() -> Response {
+    match store::list_plugins() {
+        Ok(plugins) => {
+            let (store_items, updates) = store_remote::store_snapshot(&plugins);
+            ok_json(json!({
+                "plugins": plugins,
+                "store": store_items,
+                "updates": updates,
+            }))
+        }
+        Err(error) => management_error(500, error),
+    }
 }
 
-async fn admin_only(request: Request, next: Next) -> Response {
-    let mut response = if !access::session_valid(request.headers()) { management_error(403, "任务管理需要管理员会话") }
-    else if let Ok(_guard) = crate::server::core::task_plugins::running_guard() { next.run(request).await }
-    else { management_error(409, "整库恢复期间不能操作任务") };
-    response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
-    response
+pub async fn create(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(v) => v,
+        Err(error) => return management_error(400, error.message),
+    };
+    let plugin = match decode_plugin_payload(&payload, "local") {
+        Ok(p) => p,
+        Err(error) => return management_error(400, error),
+    };
+    match store::upsert_plugin(plugin, false) {
+        Ok(saved) => ok_json(json!({ "plugin": saved })),
+        Err(error) => management_error(400, error),
+    }
 }
 
-fn decode(value: Value) -> Result<types::TaskPlugin, String> {
-    let mut plugin = if let Some(raw) = value.get("rawScript").and_then(Value::as_str) {
-        types::parse_single_file(raw, "local")?
-    } else { serde_json::from_value(value).map_err(|_| "任务插件清单格式无效")? };
-    plugin.source = "local".into();
-    plugin.signed = false;
-    plugin.enabled = false;
-    plugin.notify_allowed = false;
+pub async fn update(Path(id): Path<String>, body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(v) => v,
+        Err(error) => return management_error(400, error.message),
+    };
+    let existing = match store::get_plugin(&id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return management_error(404, "定时任务插件不存在"),
+        Err(error) => return management_error(500, error),
+    };
+    let mut plugin = match decode_plugin_payload(&payload, &existing.source) {
+        Ok(p) => p,
+        Err(error) => return management_error(400, error),
+    };
+    plugin.id = existing.id;
+    plugin.signed = existing.signed && existing.script_body == plugin.script_body;
+    match store::upsert_plugin(plugin, false) {
+        Ok(saved) => ok_json(json!({ "plugin": saved })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn patch(Path(id): Path<String>, body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(v) => v,
+        Err(error) => return management_error(400, error.message),
+    };
+    let enabled = payload.get("enabled").and_then(Value::as_bool);
+    let notify_allowed = payload.get("notifyAllowed").and_then(Value::as_bool);
+    if enabled.is_none() && notify_allowed.is_none() {
+        return management_error(400, "没有需要更新的字段");
+    }
+    match store::patch_plugin(&id, enabled, notify_allowed) {
+        Ok(saved) => ok_json(json!({ "plugin": saved })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn remove(Path(id): Path<String>) -> Response {
+    match store::delete_plugin(&id) {
+        Ok(()) => ok_json(json!({ "deleted": id })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn export_single(Path(id): Path<String>) -> Response {
+    match store::get_plugin(&id) {
+        Ok(Some(plugin)) => ok_json(json!({
+            "filename": format!("{}-{}.task-plugin.js", plugin.id, plugin.version),
+            "content": types::serialize_single_file(&plugin),
+        })),
+        Ok(None) => management_error(404, "定时任务插件不存在"),
+        Err(error) => management_error(500, error),
+    }
+}
+
+pub async fn import_plugin(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(v) => v,
+        Err(error) => return management_error(400, error.message),
+    };
+    let parsed = if let Some(b64) = payload.get("zipBase64").and_then(Value::as_str) {
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+            Ok(b) => b,
+            Err(_) => return management_error(400, "ZIP 文件编码无效"),
+        };
+        store_remote::import_zip_bytes(&bytes, false)
+    } else if let Some(raw) = payload.get("rawScript").and_then(Value::as_str) {
+        types::parse_single_file(raw, "third-party")
+    } else {
+        return management_error(400, "请提供单文件脚本内容或 ZIP 插件包");
+    };
+    let plugin = match parsed {
+        Ok(p) => p,
+        Err(error) => return management_error(400, error),
+    };
+    match store::upsert_plugin(plugin, true) {
+        Ok(saved) => ok_json(json!({ "plugin": saved })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn install_store(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(v) => v,
+        Err(error) => return management_error(400, error.message),
+    };
+    let id = payload["id"].as_str().unwrap_or("").trim();
+    if id.is_empty() {
+        return management_error(400, "缺少插件标识");
+    }
+    match store_remote::install_from_store(id).await {
+        Ok(saved) => ok_json(json!({ "plugin": saved })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn parse_script(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(v) => v,
+        Err(error) => return management_error(400, error.message),
+    };
+    let raw = payload["rawScript"].as_str().unwrap_or("");
+    match types::parse_single_file(raw, "local") {
+        Ok(plugin) => ok_json(json!({
+            "plugin": plugin,
+            "rawScript": types::serialize_single_file(&plugin),
+        })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+pub async fn preview(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(v) => v,
+        Err(error) => return management_error(400, error.message),
+    };
+    let plugin_val = payload.get("plugin").cloned().unwrap_or(Value::Null);
+    let plugin = match decode_plugin_payload(&plugin_val, "local") {
+        Ok(p) => p,
+        Err(error) => return management_error(400, error),
+    };
+    let action_id = payload
+        .get("actionId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
+    let form_values: BTreeMap<String, Value> = payload
+        .get("values")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let proxy_id = payload["proxyId"].as_str().unwrap_or("").to_string();
+    let storage: BTreeMap<String, String> = payload
+        .get("storage")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let run = tokio::spawn(async move { scheduler::preview_plugin(plugin, action_id, form_values, proxy_id, storage).await });
+    match run.await.unwrap_or_else(|_| Err("任务试跑异常结束".into())) {
+        Ok(outcome) => ok_json(json!({
+            "outcome": outcome,
+            "storage": outcome.new_storage,
+        })),
+        Err(error) => management_error(400, error),
+    }
+}
+
+fn decode_plugin_payload(payload: &Value, fallback_source: &str) -> Result<types::TaskPlugin, String> {
+    if let Some(raw) = payload.get("rawScript").and_then(Value::as_str) {
+        return types::parse_single_file(raw, fallback_source);
+    }
+    let mut plugin: types::TaskPlugin = serde_json::from_value(payload.clone())
+        .map_err(|error| format!("定时任务插件数据格式无效：{error}"))?;
+    if plugin.source.is_empty() {
+        plugin.source = fallback_source.to_string();
+    }
     types::validate_and_normalize_plugin(plugin)
-}
-
-fn body(payload: Bytes) -> Result<Value, String> { serde_json::from_slice(&payload).map_err(|_| "任务参数无效".into()) }
-fn reply(result: Result<Value, String>) -> Response { match result { Ok(value) => ok_json(value), Err(error) => management_error(400, error) } }
-
-async fn list() -> Response { reply(store::list_plugins().map(|plugins| json!({"plugins":plugins,"networkAvailable":false,"fixedHttpsStatusAvailable":true,"storeAvailable":true}))) }
-
-async fn export_script(Path(id): Path<String>) -> Response {
-    reply(store::get_plugin(&id).and_then(|plugin| plugin.map(|item| json!({"rawScript":types::serialize_single_file(&item)})).ok_or_else(|| "任务插件不存在".into())))
-}
-
-async fn store_snapshot() -> Response { ok_json(store_remote::snapshot()) }
-async fn refresh_store() -> Response { reply(store_remote::refresh().await) }
-async fn install_store(payload: Bytes) -> Response {
-    let result = async {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Selection { id: String, sha256: String }
-        let selection: Selection = serde_json::from_slice(&payload).map_err(|_| "请选择目录中的任务插件版本")?;
-        store_remote::install(&selection.id, &selection.sha256).await.map(|plugin| json!({"plugin":plugin}))
-    }.await;
-    reply(result)
-}
-
-async fn create(payload: Bytes) -> Response {
-    reply(body(payload).and_then(decode).and_then(|plugin| {
-        store::create_plugin(plugin).map(|plugin| json!({"plugin":plugin}))
-    }))
-}
-
-async fn update(Path(id): Path<String>, payload: Bytes) -> Response {
-    reply(body(payload).and_then(decode).and_then(|plugin| {
-        if id != plugin.id || store::get_plugin(&id)?.is_none() { return Err("任务插件不存在".into()); }
-        store::upsert_plugin(plugin, false).map(|plugin| json!({"plugin":plugin}))
-    }))
-}
-
-async fn permissions(Path(id): Path<String>, payload: Bytes) -> Response {
-    reply(body(payload).and_then(|value| {
-        let plugin = store::get_plugin(&id)?.ok_or("任务插件不存在")?;
-        let enabled = value.get("enabled").and_then(Value::as_bool);
-        let allowed = value.get("notifyAllowed").and_then(Value::as_bool);
-        let revision = value.get("expectedUpdatedAt").and_then(Value::as_i64);
-        let grants = value.get("networkGrants").map(|value| {
-            let grants = serde_json::from_value::<std::collections::BTreeMap<String,String>>(value.clone()).map_err(|_| "固定状态探测授权格式无效")?;
-            if revision != Some(plugin.updated_at) || grants.len() > types::MAX_DOMAINS || enabled == Some(false) && !grants.is_empty() { return Err("请刷新并重新确认探测授权"); }
-            for (domain, endpoint) in &grants {
-                if !plugin.domains.contains(domain) || crate::server::core::task_plugins::probe::endpoint(domain, endpoint).is_none() { return Err("仅可授权声明域内固定的 HTTPS 公网地址，不带凭证、查询或片段"); }
-            }
-            Ok(grants)
-        }).transpose()?;
-        if allowed == Some(true) && !plugin.declares_notify { return Err("插件未声明通知能力".into()); }
-        if allowed.is_none() && enabled.is_none() && grants.is_none() { return Err("缺少授权开关".into()); }
-        store::patch_plugin(&id, enabled, allowed, grants.as_ref(), revision).map(|plugin| json!({"plugin":plugin}))
-    }))
-}
-
-async fn remove(Path(id): Path<String>) -> Response { reply(store::delete_plugin(&id).map(|_| json!({"deleted":true}))) }
-
-async fn preview(payload: Bytes) -> Response {
-    let result = async {
-        let value = body(payload)?;
-        let plugin = decode(value.get("plugin").cloned().unwrap_or(Value::Null))?;
-        let values = serde_json::from_value(value.get("values").cloned().unwrap_or_else(|| json!({}))).map_err(|_| "表单值无效")?;
-        let proxy = value.get("proxyId").and_then(Value::as_str).unwrap_or_default().into();
-        let outcome = scheduler::preview_plugin(plugin, None, values, proxy, Default::default()).await?;
-        Ok(json!({"outcome":outcome}))
-    }.await;
-    reply(result)
 }

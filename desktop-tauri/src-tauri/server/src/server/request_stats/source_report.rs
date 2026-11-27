@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params_from_iter, Connection};
 use serde_json::{json, Value};
 
 use super::record::{DailyEntry, ModelAccum, RequestEntry};
@@ -7,15 +9,19 @@ use super::source::{ApiKeyAccum, ApiKeyIdentity, ClientAccum, UsageAccum};
 use super::report::{model_breakdown_json, model_stat_key, push_model_accum, safe_rate};
 
 pub(super) fn request_usage(item: &RequestEntry) -> UsageAccum {
+    let cost_usd = item.cost_usd.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+    let unpriced_requests = i64::from(item.has_billable_tokens() && item.cost_usd.is_none());
     UsageAccum {
-        requests: i64::from(!item.is_auxiliary()),
-        successful: i64::from(item.is_success() && !item.is_auxiliary()),
+        requests: 1,
+        successful: i64::from(item.is_success()),
         tokens: item.total_tokens,
         prompt_tokens: item.prompt_tokens,
         completion_tokens: item.completion_tokens,
         cache_read_tokens: item.cache_read_tokens,
-        token_details_requests: i64::from(!item.is_auxiliary()),
+        token_details_requests: 1,
         last_used_at: Some(item.ts),
+        cost_usd,
+        unpriced_requests,
     }
 }
 
@@ -40,7 +46,14 @@ fn merge_key(list: &mut Vec<ApiKeyAccum>, incoming: &ApiKeyAccum) {
             merge_client(&mut item.clients, &client.client, &client.label, &client.usage);
         }
         for model in &incoming.models {
-            push_model_accum(&mut item.models, &model.model, model.tokens, model.requests);
+            push_model_accum(
+                &mut item.models,
+                &model.model,
+                model.tokens,
+                model.requests,
+                model.cost_usd,
+                model.unpriced_requests,
+            );
         }
     } else {
         list.push(incoming.clone());
@@ -49,6 +62,8 @@ fn merge_key(list: &mut Vec<ApiKeyAccum>, incoming: &ApiKeyAccum) {
 
 pub(super) fn fold_sources(day: &mut DailyEntry, item: &RequestEntry) {
     let usage = request_usage(item);
+    let item_cost = usage.cost_usd;
+    let item_unpriced = usage.unpriced_requests;
     let label = item.source.recorded_client_name();
     merge_client(&mut day.client_stats, &item.source.client, label, &usage);
     merge_key(&mut day.api_key_stats, &ApiKeyAccum {
@@ -57,7 +72,10 @@ pub(super) fn fold_sources(day: &mut DailyEntry, item: &RequestEntry) {
         clients: vec![ClientAccum { client: item.source.client.clone(), label: label.into(), usage }],
         models: vec![ModelAccum {
             model: model_stat_key(&item.model, &item.upstream_model).to_string(),
-            requests: 1, tokens: item.total_tokens,
+            requests: 1,
+            tokens: item.total_tokens,
+            cost_usd: item_cost,
+            unpriced_requests: item_unpriced,
         }],
     });
 }
@@ -71,6 +89,7 @@ pub(super) fn client_label(client: &str) -> &str {
         "assistant_images" => "助手图片工具",
         "assistant_title" => "助手标题总结",
         "checkin_keepalive" => "日活保活",
+        "image-generation" => "图片生成 MCP",
         _ => client,
     }
 }
@@ -79,13 +98,14 @@ pub(super) fn key_label(identity: &ApiKeyIdentity) -> String {
     match identity.source.as_str() {
         "none" => "免鉴权调用".to_string(),
         "env" => "环境变量 Key".to_string(),
+        "local_direct" => "本机直连".to_string(),
         "key" if !identity.name.is_empty() => identity.name.clone(),
         "key" => identity.id.clone(),
         _ => "历史未记录 Key".to_string(),
     }
 }
 
-fn usage_json(usage: &UsageAccum) -> Value {
+pub(super) fn usage_json(usage: &UsageAccum) -> Value {
     let details = usage.token_details_requests >= usage.requests
         && (usage.tokens == 0 || usage.token_details_requests > 0);
     json!({
@@ -100,6 +120,8 @@ fn usage_json(usage: &UsageAccum) -> Value {
         "cacheRate": if details && usage.prompt_tokens > 0 { Some(safe_rate(usage.cache_read_tokens, usage.prompt_tokens)) } else { None },
         "tokenDetailsComplete": details,
         "lastUsedAt": usage.last_used_at,
+        "costUsd": usage.cost_usd,
+        "unpricedRequests": usage.unpriced_requests,
     })
 }
 
@@ -143,6 +165,8 @@ fn remainder(day: &DailyEntry, usages: impl Iterator<Item = UsageAccum>) -> Usag
         requests: (day.requests - covered.requests).max(0),
         successful: (day.successful - covered.successful).max(0),
         tokens: (day.tokens - covered.tokens).max(0),
+        cost_usd: (day.cost_usd - covered.cost_usd).max(0.0),
+        unpriced_requests: (day.unpriced_requests - covered.unpriced_requests).max(0),
         ..Default::default()
     }
 }
@@ -170,8 +194,96 @@ pub(super) fn source_totals(
     (clients, keys)
 }
 
+pub(super) fn select_client_models(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    client: &str,
+    origin_filter: Option<&str>,
+) -> rusqlite::Result<Vec<ModelAccum>> {
+    let mut binds: Vec<SqlValue> = vec![
+        SqlValue::Integer(start_ms),
+        SqlValue::Integer(end_ms),
+        SqlValue::Text(client.to_string()),
+    ];
+    let origin_clause = if let Some(origin) = origin_filter {
+        binds.push(SqlValue::Text(origin.to_string()));
+        " AND origin = ?4"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT CASE WHEN upstream_model <> '' THEN upstream_model ELSE model END AS model_key, \
+         COUNT(*) AS reqs, COALESCE(SUM(total_tokens), 0) AS toks, \
+         COALESCE(SUM(CASE WHEN cost_usd >= 0 THEN cost_usd ELSE 0.0 END), 0.0) AS cost_usd, \
+         COALESCE(SUM(CASE WHEN total_tokens > 0 AND cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced \
+         FROM requests \
+         WHERE ts >= ?1 AND ts < ?2 AND status <> 0 AND is_test = 0 AND client = ?3{origin_clause} \
+         GROUP BY model_key ORDER BY toks DESC, reqs DESC, model_key ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params_from_iter(binds.iter()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(ModelAccum {
+            model: row.get(0)?,
+            requests: row.get(1)?,
+            tokens: row.get(2)?,
+            cost_usd: row.get(3)?,
+            unpriced_requests: row.get(4)?,
+        });
+    }
+    Ok(out)
+}
+
+fn build_client_api_keys(keys: &[ApiKeyAccum], client_id: &str) -> Vec<Value> {
+    struct KeySlice<'a> {
+        identity: &'a ApiKeyIdentity,
+        usage: UsageAccum,
+    }
+    let mut rows: Vec<KeySlice<'_>> = keys
+        .iter()
+        .filter_map(|key| {
+            let mut usage = UsageAccum::default();
+            for c in key.clients.iter().filter(|c| c.client == client_id) {
+                usage.merge(&c.usage);
+            }
+            if usage.requests > 0 || usage.tokens > 0 {
+                Some(KeySlice { identity: &key.identity, usage })
+            } else {
+                None
+            }
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .usage
+            .tokens
+            .cmp(&left.usage.tokens)
+            .then(right.usage.requests.cmp(&left.usage.requests))
+            .then(left.identity.filter_value().cmp(&right.identity.filter_value()))
+    });
+    rows.into_iter()
+        .map(|item| {
+            let mut row = usage_json(&item.usage);
+            if let Some(object) = row.as_object_mut() {
+                object.insert("id".to_string(), json!(item.identity.id));
+                object.insert("label".to_string(), json!(key_label(item.identity)));
+                object.insert("source".to_string(), json!(item.identity.source));
+                object.insert("filterValue".to_string(), json!(item.identity.filter_value()));
+            }
+            row
+        })
+        .collect()
+}
+
 pub(super) fn source_summary(
-    daily: &BTreeMap<String, DailyEntry>, start: &str, end: &str, key: Option<&str>,
+    daily: &BTreeMap<String, DailyEntry>,
+    start: &str,
+    end: &str,
+    key: Option<&str>,
+    client: Option<&str>,
+    client_models: Option<&[ModelAccum]>,
 ) -> Value {
     let (clients, keys) = source_totals(daily, start, end);
     let detail = key.and_then(|filter| keys.iter().find(|item| item.identity.filter_value() == filter))
@@ -180,12 +292,47 @@ pub(super) fn source_summary(
             "label": key_label(&item.identity),
             "requests": item.usage.requests,
             "totalTokens": item.usage.tokens,
+            "costUsd": item.usage.cost_usd,
+            "unpricedRequests": item.usage.unpriced_requests,
             "detailsComplete": item.clients.iter().map(|client| client.usage.requests).sum::<i64>() == item.usage.requests,
             "clients": build_clients(&item.clients),
             "models": model_rows(&item.models),
         }))
         .or_else(|| key.map(|filter| json!({ "filterValue": filter, "requests": 0, "totalTokens": 0, "detailsComplete": true, "clients": [], "models": [] })));
-    json!({ "clients": build_clients(&clients), "apiKeys": build_keys(&keys), "apiKeyDetail": detail })
+    let client_detail = client.map(|client_id| {
+        let matched = clients.iter().find(|item| item.client == client_id);
+        let label = matched
+            .map(|item| {
+                crate::server::core::client::display_name(
+                    &item.client,
+                    if item.label.is_empty() { client_label(&item.client) } else { &item.label },
+                )
+            })
+            .unwrap_or_else(|| crate::server::core::client::display_name(client_id, client_label(client_id)));
+        let total_reqs = matched.map(|item| item.usage.requests).unwrap_or(0);
+        let api_keys = build_client_api_keys(&keys, client_id);
+        let api_keys_reqs: i64 = api_keys.iter().filter_map(|row| row["requests"].as_i64()).sum();
+        let models_slice = client_models.unwrap_or(&[]);
+        let models_reqs: i64 = models_slice.iter().map(|row| row.requests).sum();
+        json!({
+            "id": client_id,
+            "label": label,
+            "requests": total_reqs,
+            "totalTokens": matched.map(|item| item.usage.tokens).unwrap_or(0),
+            "costUsd": matched.map(|item| item.usage.cost_usd).unwrap_or(0.0),
+            "unpricedRequests": matched.map(|item| item.usage.unpriced_requests).unwrap_or(0),
+            "apiKeysComplete": api_keys_reqs >= total_reqs,
+            "modelsComplete": models_reqs >= total_reqs,
+            "apiKeys": api_keys,
+            "models": model_rows(models_slice),
+        })
+    });
+    json!({
+        "clients": build_clients(&clients),
+        "apiKeys": build_keys(&keys),
+        "apiKeyDetail": detail,
+        "clientDetail": client_detail,
+    })
 }
 
 fn model_rows(models: &[ModelAccum]) -> Vec<Value> {
@@ -194,24 +341,47 @@ fn model_rows(models: &[ModelAccum]) -> Vec<Value> {
     rows.into_iter().map(|item| json!({
         "model": item.model, "label": if item.model.is_empty() { "未知模型" } else { &item.model },
         "requests": item.requests, "totalTokens": item.tokens,
+        "costUsd": item.cost_usd, "unpricedRequests": item.unpriced_requests,
     })).collect()
 }
 
 pub(super) fn source_breakdown(day: &DailyEntry) -> (Vec<Value>, Vec<Value>) {
     let (clients, keys) = day_sources(day);
-    let clients = build_clients(&clients).into_iter().map(|row| json!({
-        "id": row["id"], "label": row["label"], "tokens": row["totalTokens"], "requests": row["requests"],
-    })).collect();
-    let keys = build_keys(&keys).into_iter().map(|row| json!({
-        "id": row["filterValue"], "label": row["label"], "tokens": row["totalTokens"], "requests": row["requests"],
-    })).collect();
+    let clients = build_clients(&clients).into_iter().map(|mut row| {
+        row["tokens"] = row["totalTokens"].clone();
+        row
+    }).collect();
+    let keys = build_keys(&keys).into_iter().map(|mut row| {
+        row["id"] = row["filterValue"].clone();
+        row["tokens"] = row["totalTokens"].clone();
+        row
+    }).collect();
     (clients, keys)
+}
+
+pub(super) fn day_usage(day: &DailyEntry) -> UsageAccum {
+    let (clients, _) = day_sources(day);
+    let mut usage = UsageAccum::default();
+    for client in clients { usage.merge(&client.usage); }
+    usage.requests = day.requests;
+    usage.successful = day.successful;
+    usage.tokens = day.tokens;
+    usage.cost_usd = day.cost_usd;
+    usage.unpriced_requests = day.unpriced_requests;
+    usage
 }
 
 pub(super) fn all_model_rows(models: &[ModelAccum]) -> Vec<Value> {
     let mut rows = model_breakdown_json(models);
     for item in models.iter().filter(|item| item.requests > 0 && item.tokens == 0) {
-        rows.push(json!({ "model": item.model, "label": if item.model.is_empty() { "未知模型" } else { &item.model }, "tokens": 0, "requests": item.requests }));
+        rows.push(json!({
+            "model": item.model,
+            "label": if item.model.is_empty() { "未知模型" } else { &item.model },
+            "tokens": 0,
+            "requests": item.requests,
+            "costUsd": item.cost_usd,
+            "unpricedRequests": item.unpriced_requests,
+        }));
     }
     rows
 }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Button, Card } from '@ui'
 import { apiCall } from '../api/client'
 import { t } from '../i18n'
+import { serverIdentity } from '../core/servers'
 
 type PhaseSetting = { thirdPartyReasoningCollapse: boolean }
 const endpoint = '/api/reasoning-collapse'
@@ -11,12 +12,14 @@ export function ResponsesPhaseSetting() {
   const [working, setWorking] = useState(true)
   const [error, setError] = useState('')
   const generation = useRef(0)
+  const identity = useRef(serverIdentity()).current
   async function load(next?: boolean) {
+    if (serverIdentity() !== identity) return
     const current = ++generation.current
     setWorking(true)
     setError('')
     try {
-      const result = await apiCall<PhaseSetting>(endpoint, next === undefined ? {} : { method: 'PUT', body: { thirdPartyReasoningCollapse: next } })
+      const result = await apiCall<PhaseSetting>(endpoint, next === undefined ? {} : { method: 'PUT', body: { thirdPartyReasoningCollapse: next }, noAuthReplay: true })
       if (generation.current === current) setValue(result.thirdPartyReasoningCollapse)
     } catch (failure) {
       if (generation.current === current) { setValue(null); setError(failure instanceof Error ? failure.message : t('不可用')) }

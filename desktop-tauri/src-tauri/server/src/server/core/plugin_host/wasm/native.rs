@@ -1,3 +1,7 @@
+pub(super) mod chatglm;
+pub(crate) use chatglm::{prepare as desktop_import_prepare, confirm as desktop_import_confirm,
+    cancel as desktop_import_cancel, status as desktop_import_status, ImportError};
+
 use std::collections::HashSet;
 use std::time::Duration;
 use agent2api_provider_protocol as proto;
@@ -6,8 +10,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use super::context::Context;
 use crate::server::config;
-
-pub(crate) mod chatglm;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -36,9 +38,7 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
         if let Some(options) = options {
             let provider = &options.provider;
             if owners.get(provider).map(String::as_str) == Some(pack.id.as_str()) {
-                let available = super::super::provider_pack(provider).as_deref() == Some(pack.id.as_str())
-                    && super::super::host_for_provider(provider).is_some_and(|host| host.ready()
-                        && host.options.wasm.as_ref().is_some_and(|actual| actual.provider == *provider))
+                let available = super::super::host_for_provider(provider).is_some_and(|host| host.ready())
                     && super::super::serves_provider(provider);
                 for id in &options.manifest.helpers {
                     if super::desktop_credentials::candidate(provider, id).is_some() { continue; }
@@ -68,7 +68,7 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
     if !wanted.is_empty() {
         for pack in super::super::list_packs().into_iter().filter(|pack| pack.enabled) {
             let Some(host) = super::super::host_for_pack(&pack.id).filter(|host| host.ready()) else { continue };
-            if host.options.wasm.is_some() { continue; }
+            if host.options.wasm.is_some() || host.options.script { continue; }
             let digest = registry.packs.iter().find(|item| item.id == pack.id).map(|item| item.sha256.clone()).unwrap_or_default();
             for provider in pack.providers.iter().filter(|provider| provider.loaded) {
                 sources.push((pack.id.clone(), pack.version.clone(), digest.clone(), provider.id.clone(), host.clone()));
@@ -76,6 +76,11 @@ pub(crate) async fn snapshot(pack_id: Option<&str>) -> Value {
         }
     }
     let mut candidates = Vec::new();
+    for item in &requested {
+        if let (Some(provider),Some(id)) = (item["provider"].as_str(),item["id"].as_str()) {
+            if let Some(candidate) = super::desktop_credentials::candidate(provider,id) { candidates.push(candidate); }
+        }
+    }
     let mut results = stream::iter(sources).map(|(pack, version, digest, provider, host)| async move {
         let result = host.call_coded("native.helpers", json!({ "provider": provider }), Duration::from_secs(5)).await;
         (pack, version, digest, provider, result)
@@ -136,21 +141,68 @@ pub(crate) async fn grant(provider: &str, helper: &str, selected: &Value, pack_i
     Ok(config::update_raw_field("pluginNativeHelpers", all))
 }
 
+/// 内置辅助能力仅执行主程序固定的受控操作；只要当前提供该商家的插件已就绪并申报对应能力即可直接使用。
+pub(super) fn authorized_builtin(provider: &str, helper: &str) -> Result<(), proto::WireError> {
+    if super::desktop_credentials::candidate(provider, helper).is_none() {
+        return Err(proto::WireError::with_code("当前插件未声明可用的本机辅助能力", "forbidden"));
+    }
+    if !super::super::serves_provider(provider) || super::super::registry::is_switching(provider) {
+        return Err(proto::WireError::with_code("当前插件尚未就绪或已停用", "native_helper_unavailable"));
+    }
+    let host = super::super::host_for_provider(provider)
+        .filter(|host| host.ready())
+        .ok_or_else(|| proto::WireError::with_code("当前插件尚未就绪或已停用", "native_helper_unavailable"))?;
+    let Some(options) = host.options.wasm.as_ref() else {
+        return Err(proto::WireError::with_code("只有 Wasm 插件支持该本机辅助能力", "forbidden"));
+    };
+    if options.provider != provider
+        || !options.allows("native.helpers.v1")
+        || !options.manifest.helpers.iter().any(|id| id == helper)
+    {
+        return Err(proto::WireError::with_code("当前插件未声明所需本机辅助能力", "forbidden"));
+    }
+    let needs_credentials = helper == super::desktop_credentials::HELPER_RACCOON_REFRESH
+        || super::desktop_credentials::refresh::helper(provider) == Some(helper)
+        || super::desktop_credentials::helper(provider) == Some(helper);
+    if needs_credentials && !options.allows("desktop.credentials.v1") {
+        return Err(proto::WireError::with_code("当前插件未声明本机凭据读取能力", "forbidden"));
+    }
+    Ok(())
+}
+
 impl Context {
     pub(super) async fn native(&mut self, params: &Value) -> Result<Value, proto::WireError> {
         self.permission("native.helpers.v1")?;
-        if self.shared.options.provider == "raccoon" && params["helper"] == super::desktop_credentials::HELPER_RACCOON_REFRESH {
+        if self.shared.options.provider == "raccoon"
+            && params["helper"] == super::desktop_credentials::HELPER_RACCOON_REFRESH {
             return super::desktop_credentials::raccoon_refresh(self, params).await;
         }
-        if params["helper"] == super::qoder_umid::HELPER { return super::qoder_umid::invoke(self, params).await; }
+        if params["helper"] == super::qoder_umid::HELPER {
+            return super::qoder_umid::invoke(self, params).await;
+        }
         if super::client_device::helper(&self.shared.options.provider).is_some_and(|helper| params["helper"] == helper) {
             return super::client_device::invoke(self, params).await;
+        }
+        if params["helper"] == super::quwork_device::HELPER {
+            return super::quwork_device::invoke(self, params).await;
+        }
+        if super::desktop_credentials::refresh::helper(&self.shared.options.provider).is_some_and(|helper| params["helper"] == helper) {
+            return super::desktop_credentials::refresh::invoke(self, params).await;
         }
         if params["helper"].as_str() == super::desktop_credentials::helper(&self.shared.options.provider) {
             if params["operation"] == "read" && params["payload"].as_object().is_some_and(|fields| fields.is_empty()) {
                 return super::desktop_credentials::invoke(self, &json!({})).await;
             }
-            return Err(proto::WireError::with_code("固定本机读取不支持该操作", "forbidden"));
+            if matches!(self.shared.options.provider.as_str(), "autoclaw" | "autoclaw-intl") && params["operation"] == "decrypt" {
+                super::desktop_credentials::authorize_decrypt(self, &params["payload"])?;
+                let provider = self.shared.options.provider.clone();
+                let payload = params["payload"].clone();
+                let result = crate::server::core::blocking::run(move || super::desktop_credentials::decrypt(&provider, &payload)).await
+                    .map_err(|_| super::desktop_credentials::invalid())?;
+                super::desktop_credentials::authorize_decrypt(self, &params["payload"])?;
+                return result;
+            }
+            return Err(proto::WireError::with_code("固定本机导入不支持该操作", "forbidden"));
         }
         let _mutation = super::super::operations::mutation_guard().await;
         let helper = params["helper"].as_str().unwrap_or("");
@@ -178,7 +230,7 @@ impl Context {
         let host = super::super::host_for_pack(pack_id).ok_or_else(|| super::error("原生辅助执行体不可用"))?;
         let lease = host.activity.acquire().ok_or_else(|| super::error("原生辅助程序正在更新"))?;
         if !host.ready() { return Err(super::error("原生辅助程序尚未就绪")); }
-        if host.options.wasm.is_some()
+        if host.options.wasm.is_some() || host.options.script
             || super::super::provider_pack(provider).as_deref() != Some(pack.id.as_str()) {
             return Err(proto::WireError::with_code("原生辅助授权目标已变化", "forbidden"));
         }
@@ -194,25 +246,4 @@ impl Context {
         if result.to_string().len() > 256 * 1024 { return Err(super::error("原生辅助结果过大")); }
         Ok(result)
     }
-}
-
-pub(super) fn authorized_builtin(provider: &str, helper: &str) -> Result<(), proto::WireError> {
-    if super::desktop_credentials::candidate(provider, helper).is_none() {
-        return Err(proto::WireError::with_code("当前插件未声明可用的本机辅助能力", "forbidden"));
-    }
-    let host = super::super::host_for_provider(provider).filter(|host| host.ready()
-        && !host.activity.retired() && host.callbacks.provider_allowed(provider))
-        .ok_or_else(|| proto::WireError::with_code("当前插件尚未就绪或已停用", "native_helper_unavailable"))?;
-    if !super::super::serves_provider(provider) || super::super::registry::is_switching(provider) {
-        return Err(proto::WireError::with_code("当前插件尚未就绪或已停用", "native_helper_unavailable"));
-    }
-    let options = host.options.wasm.as_ref().ok_or_else(|| proto::WireError::with_code(
-        "只有 Wasm 插件支持该本机辅助能力", "forbidden"))?;
-    if options.provider != provider || !options.allows("native.helpers.v1")
-        || !options.manifest.helpers.iter().any(|id| id == helper)
-        || (super::desktop_credentials::helper(provider) == Some(helper)
-            || helper == super::desktop_credentials::HELPER_RACCOON_REFRESH) && !options.allows("desktop.credentials.v1") {
-        return Err(proto::WireError::with_code("当前插件未声明所需本机辅助能力", "forbidden"));
-    }
-    Ok(())
 }

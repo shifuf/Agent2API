@@ -41,9 +41,35 @@ pub(super) fn parameter_supported(field: &str) -> bool {
     )
 }
 
+fn codar_parameters(payload: &Value) -> bool {
+    ["resolution", "image_urls", "mask_url"].iter().any(|key| payload.get(*key).is_some())
+        || payload["size"].as_str().is_some_and(|size| size.contains(':'))
+}
+
+fn validate_codar_url(value: &Value) -> Result<(), GatewayError> {
+    let raw = value.as_str().filter(|raw| raw.len() <= 8192 && !raw.chars().any(char::is_control))
+        .ok_or_else(|| GatewayError::bad_request("科搭参考图必须是有效的 HTTPS 链接"))?;
+    let url = url::Url::parse(raw).map_err(|_| GatewayError::bad_request("科搭参考图链接无效"))?;
+    if url.scheme() != "https" || url.host_str().is_none() || !url.username().is_empty()
+        || url.password().is_some() || url.fragment().is_some()
+    {
+        return Err(GatewayError::bad_request("科搭参考图链接不能带用户凭据或片段"));
+    }
+    // DNS、公网地址和真实图片内容由插件内既有 resource.fetch_public 再核，不在此处直连下载。
+    Ok(())
+}
+
 pub(super) fn validate(
     payload: &mut Value,
     operation: image_models::ImageOperation,
+) -> Result<(), GatewayError> {
+    validate_parameters(payload, operation, false)
+}
+
+fn validate_parameters(
+    payload: &mut Value,
+    operation: image_models::ImageOperation,
+    codar: bool,
 ) -> Result<(), GatewayError> {
     if !payload.is_object() {
         return Err(GatewayError::bad_request("请求体必须是 JSON 对象"));
@@ -103,11 +129,35 @@ pub(super) fn validate(
                     .is_some_and(|(width, height)| {
                         (1..=8192).contains(&width) && (1..=8192).contains(&height)
                     })
+                || codar && size.len() <= 32 && size.split_once(':')
+                    .and_then(|(width, height)| Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?)))
+                    .is_some_and(|(width, height)| (1..=8192).contains(&width) && (1..=8192).contains(&height))
         });
         if !valid {
             return Err(GatewayError::bad_request(
                 "size 必须是 auto 或 WIDTHxHEIGHT，边长不得超过 8192",
             ));
+        }
+    }
+    if codar {
+        if operation != image_models::ImageOperation::Generate {
+            return Err(GatewayError::bad_request("科搭专属图片参数只用于图片生成"));
+        }
+        if let Some(resolution) = payload.get("resolution") {
+            if !resolution.as_str().is_some_and(|value| matches!(value.to_ascii_uppercase().as_str(), "1K" | "2K" | "4K")) {
+                return Err(GatewayError::bad_request("科搭 resolution 必须是 1K、2K 或 4K"));
+            }
+        }
+        if let Some(references) = payload.get("image_urls") {
+            let references = references.as_array().filter(|references| references.len() <= 16)
+                .ok_or_else(|| GatewayError::bad_request("科搭 image_urls 必须是最多 16 项的链接数组"))?;
+            for reference in references { validate_codar_url(reference)?; }
+        }
+        if let Some(mask) = payload.get("mask_url").filter(|mask| !mask.is_null()) {
+            if payload["image_urls"].as_array().is_none_or(Vec::is_empty) {
+                return Err(GatewayError::bad_request("科搭遮罩需要同时提供参考图"));
+            }
+            validate_codar_url(mask)?;
         }
     }
     if let Some(compression) = payload
@@ -169,6 +219,7 @@ pub(super) fn validate(
     if let Some(field) = payload.as_object().and_then(|object| {
         object.keys().find(|key| {
             !parameter_supported(key)
+                && !(codar && matches!(key.as_str(), "resolution" | "image_urls" | "mask_url"))
                 && !(editing && matches!(key.as_str(), "images" | "mask" | "input_fidelity"))
         })
     }) {
@@ -246,6 +297,7 @@ pub async fn generations(
     headers: HeaderMap,
     scope: Option<Extension<KeyScope>>,
     key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
+    key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
     body: Bytes,
 ) -> Response {
     let started_at = logging::now_ms();
@@ -266,11 +318,11 @@ pub async fn generations(
                 operation: image_models::ImageOperation::Generate,
                 headers,
                 scope: scope.map(|Extension(scope)| scope),
+                key_source: key_source.map(|Extension(source)| source),
                 source,
                 started_at,
                 is_assistant: false,
-                key_source: None,
-            },
+                },
         )
         .await,
     )
@@ -281,6 +333,7 @@ pub async fn edits(
     headers: HeaderMap,
     scope: Option<Extension<KeyScope>>,
     key_identity: Option<Extension<crate::server::request_stats::ApiKeyIdentity>>,
+    key_source: Option<Extension<Arc<crate::server::config::model_key_source::Source>>>,
     request: axum::extract::Request,
 ) -> Response {
     let started_at = logging::now_ms();
@@ -300,11 +353,11 @@ pub async fn edits(
                 operation: image_models::ImageOperation::Edit,
                 headers,
                 scope: scope.map(|Extension(scope)| scope),
+                key_source: key_source.map(|Extension(source)| source),
                 source,
                 started_at,
                 is_assistant: false,
-                key_source: None,
-            },
+                },
         )
         .await,
     )
@@ -321,10 +374,10 @@ pub(super) struct ImageExecution {
     pub operation: image_models::ImageOperation,
     pub headers: HeaderMap,
     pub scope: Option<KeyScope>,
+    pub key_source: Option<Arc<crate::server::config::model_key_source::Source>>,
     pub source: crate::server::request_stats::RequestSource,
     pub started_at: i64,
     pub is_assistant: bool,
-    pub key_source: Option<Result<Arc<crate::server::config::model_key_source::Source>, GatewayError>>,
 }
 
 pub(super) async fn execute(
@@ -332,7 +385,8 @@ pub(super) async fn execute(
     payload: Value,
     input: ImageExecution,
 ) -> Result<Value, GatewayError> {
-    execute_with_telemetry(state, payload, input, Arc::new(RequestTelemetry::with_id())).await
+    let telemetry = Arc::new(RequestTelemetry::with_model_key(input.key_source.clone()));
+    execute_with_telemetry(state, payload, input, telemetry, None).await
 }
 
 pub(super) async fn execute_with_telemetry(
@@ -340,22 +394,40 @@ pub(super) async fn execute_with_telemetry(
     mut payload: Value,
     input: ImageExecution,
     telemetry: Arc<RequestTelemetry>,
+    timeout: Option<std::time::Duration>,
 ) -> Result<Value, GatewayError> {
+    let deadline = timeout.map(|budget| tokio::time::Instant::now() + budget);
     let ImageExecution {
         operation,
         headers,
-        scope,
+        mut scope,
+        key_source: _,
         source,
         started_at,
         is_assistant,
-        key_source,
     } = input;
     let client_model = pipeline::model_field_text(&payload);
     let state_copy = state.clone();
     let scope_copy = scope.clone();
+    let codar = codar_parameters(&payload);
     let (prepared, resolved) = crate::server::core::blocking::run(move || {
-        let resolved = validate(&mut payload, operation)
-            .and_then(|()| resolve_model(&state_copy, &mut payload, scope_copy.as_ref(), operation));
+        let resolved = if codar {
+            // 非标准参数只能交给当前实际安装、模型已绑定且原Key获准的科搭通道。
+            resolve_model(&state_copy, &mut payload, scope_copy.as_ref(), operation).and_then(|model| {
+                if !crate::server::core::plugin_host::wasm::owns("codar")
+                    || !crate::server::core::plugin_host::wasm::has_capability("codar", "images.v1")
+                    || !key_scope::allows_provider(scope_copy.as_ref(), "codar")
+                    || !image_models::operation_providers(&model, operation).iter().any(|provider| provider == "codar")
+                {
+                    return Err(GatewayError::bad_request("这些图片参数需要当前模型获准的科搭 WASM 图片生成通道"));
+                }
+                validate_parameters(&mut payload, operation, true)?;
+                Ok(model)
+            })
+        } else {
+            validate(&mut payload, operation)
+                .and_then(|()| resolve_model(&state_copy, &mut payload, scope_copy.as_ref(), operation))
+        };
         (payload, resolved)
     }).await?;
     payload = prepared;
@@ -366,6 +438,12 @@ pub(super) async fn execute_with_telemetry(
             return Err(error);
         }
     };
+    if codar {
+        let original_scope = scope.unwrap_or_default();
+        let original_account = original_scope.account_id().unwrap_or("").to_string();
+        scope = Some(original_scope.restrict_image_target("codar", &original_account)
+            .ok_or_else(|| GatewayError::with_status(403, "原网关 Key 未授权科搭图片通道"))?);
+    }
     if operation == image_models::ImageOperation::Edit {
         if let Err(error) = super::image_input::prepare(&mut payload).await {
             pipeline::record_early_failure(state, started_at, &client_model, "", &source, &error);
@@ -380,9 +458,6 @@ pub(super) async fn execute_with_telemetry(
         operation.path(),
         &pipeline::user_agent_of(&headers),
     ); }
-    if let Some(key_source) = key_source {
-        telemetry.install_model_key_source(key_source);
-    }
     let id = telemetry.id();
     super::request_prepare::record_started(
         state.request_stats(),
@@ -397,7 +472,7 @@ pub(super) async fn execute_with_telemetry(
     if let Some(token) = cancellation::register(&id) {
         telemetry.set_cancel_token(token);
     }
-    let mut guard = DisconnectGuard::new(state.request_stats(), id.clone());
+    let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started_at);
     telemetry.set_live_sink(pipeline::live_row_sink(
         state.request_stats(),
         id,
@@ -419,20 +494,31 @@ pub(super) async fn execute_with_telemetry(
         ignore_model_gate: false,
         proxy_override: None,
     };
-    let result = match operation {
-        image_models::ImageOperation::Generate => state.upstream().generate_images(request).await,
-        image_models::ImageOperation::Edit => state.upstream().edit_images(request).await,
-    };
-    let outcome = match result {
-        Ok(ForwardOutcome::Completion { body }) => {
-            super::image_output::normalize(state, &payload, body, &headers, &telemetry).await
+    let work = async {
+        let result = match operation {
+            image_models::ImageOperation::Generate => state.upstream().generate_images(request).await,
+            image_models::ImageOperation::Edit => state.upstream().edit_images(request).await,
+        };
+        match result {
+            Ok(ForwardOutcome::Completion { body }) => {
+                super::image_output::normalize(state, &payload, body, &headers, &telemetry).await
+            }
+            Ok(ForwardOutcome::Stream { .. } | ForwardOutcome::Native(_)) => Err(GatewayError::with_status(
+                502, "插件错误地把图片响应当作对话流",
+            )),
+            Err(error) => Err(error),
         }
-        Ok(ForwardOutcome::Stream { .. }) => Err(GatewayError::with_status(
-            502,
-            "插件错误地把图片响应当作对话流",
-        )),
-        Err(error) => Err(error),
     };
+    let outcome = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline, work).await {
+            Ok(result) => result,
+            Err(_) => {
+                if let Some(token) = telemetry.cancel_token() { token.cancel(); }
+                Err(GatewayError::with_status(504, "图片任务超时，上游可能已消耗额度，未重新提交")
+                    .with_code("image_result_uncertain"))
+            }
+        }
+    } else { work.await };
     let (status, raw_response, error) = match &outcome {
         Ok(body) => (200, if telemetry.ephemeral_image { None } else { pipeline::capture_raw_json(body) }, None),
         Err(error) => (

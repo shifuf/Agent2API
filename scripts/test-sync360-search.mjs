@@ -155,5 +155,5 @@ try {
   console.log('PASS search key migration, ordering, masking, validation, permissions, persistence and removal')
 } finally {
   await stop()
-  await rm(home, { recursive: true, force: true, maxRetries: 5 })
+  await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 }

@@ -18,6 +18,35 @@ use crate::server::logging;
 const MAX_RUNS_PER_JOB: i64 = 50;
 const MAX_OUTPUT_CHARS: usize = 100_000;
 
+#[cfg(test)]
+mod secret_migration_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_task_maps_reseal_without_overwriting_newer_values_or_empty_fields() {
+        crate::test_support::isolated(concat!(module_path!(), "::legacy_task_maps_reseal_without_overwriting_newer_values_or_empty_fields"), || {
+            let database = rusqlite::Connection::open_in_memory().unwrap();
+            database.execute_batch("CREATE TABLE task_jobs(id TEXT PRIMARY KEY,secrets_enc TEXT,storage_enc TEXT); INSERT INTO task_jobs VALUES('empty','','');").unwrap();
+            let plaintext = br#"{"token":"fixture"}"#;
+            let old = crypto::seal(plaintext, SecretScope::Accounts).unwrap();
+            database.execute("INSERT INTO task_jobs VALUES('job',?1,?1)", [&old]).unwrap();
+            for column in ["secrets_enc", "storage_enc"] {
+                let opened = super::super::secret_compat::open_with(&old, crypto::open).unwrap().unwrap();
+                let new = crypto::seal(&opened.plaintext, SecretScope::TaskPlugins).unwrap();
+                reseal_field(&database, "job", column, &old, &new).unwrap();
+                let stale = crypto::seal(br#"{"token":"stale"}"#, SecretScope::TaskPlugins).unwrap();
+                reseal_field(&database, "job", column, &old, &stale).unwrap();
+                let saved: String = database.query_row(&format!("SELECT {column} FROM task_jobs WHERE id='job'"), [], |row| row.get(0)).unwrap();
+                assert_eq!(saved, new);
+                assert_eq!(crypto::open(&saved, SecretScope::TaskPlugins).unwrap(), plaintext);
+                assert!(crypto::open(&saved, SecretScope::Accounts).is_err());
+            }
+            let empty: bool = database.query_row("SELECT secrets_enc='' AND storage_enc='' FROM task_jobs WHERE id='empty'", [], |row| row.get(0)).unwrap();
+            assert!(empty);
+        });
+    }
+}
+
 static DB: OnceLock<Option<Db>> = OnceLock::new();
 
 pub fn install(db: Option<Db>) {
@@ -35,15 +64,18 @@ fn encrypt_map<T: serde::Serialize>(map: &T) -> Result<String, String> {
     if json == b"{}" {
         return Ok(String::new());
     }
-    crypto::seal(&json, SecretScope::Accounts)
+    crypto::seal(&json, SecretScope::TaskPlugins)
 }
 
 fn decrypt_map<T: serde::de::DeserializeOwned + Default>(raw: &str) -> Result<T, String> {
     if raw.trim().is_empty() {
         return Ok(T::default());
     }
-    let plain = zeroize::Zeroizing::new(crypto::open(raw, SecretScope::Accounts)?);
-    serde_json::from_slice(&plain).map_err(|error| format!("解析加密数据失败：{error}"))
+    let opened = super::secret_compat::open_with(raw, crypto::open)?;
+    match opened {
+        Some(opened) => serde_json::from_slice(&opened.plaintext).map_err(|error| format!("解析加密数据失败：{error}")),
+        None => Ok(T::default()),
+    }
 }
 
 fn plugin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskPlugin> {
@@ -64,7 +96,6 @@ fn plugin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskPlugin> {
         default_timezone: row.get(9)?,
         default_timeout: row.get(10)?,
         domains: serde_json::from_str(&domains_json).unwrap_or_default(),
-        network_grants: serde_json::from_str(&row.get::<_, String>(20)?).unwrap_or_default(),
         declares_notify: row.get::<_, i64>(12)? != 0,
         notify_allowed: row.get::<_, i64>(13)? != 0,
         fields: serde_json::from_str::<Vec<TaskFieldDef>>(&fields_json).unwrap_or_default(),
@@ -85,7 +116,7 @@ pub fn list_plugins() -> Result<Vec<TaskPlugin>, String> {
                 "SELECT id, name, description, version, source, signed, enabled, icon,
                         default_cron, default_timezone, default_timeout, domains_json,
                         declares_notify, notify_allowed, fields_json, actions_json,
-                        status_fields_json, script_body, created_at, updated_at, network_grants_json
+                        status_fields_json, script_body, created_at, updated_at
                  FROM task_plugins
                  ORDER BY updated_at DESC, id ASC",
             )
@@ -109,7 +140,7 @@ pub fn get_plugin(id: &str) -> Result<Option<TaskPlugin>, String> {
             "SELECT id, name, description, version, source, signed, enabled, icon,
                     default_cron, default_timezone, default_timeout, domains_json,
                     declares_notify, notify_allowed, fields_json, actions_json,
-                    status_fields_json, script_body, created_at, updated_at, network_grants_json
+                    status_fields_json, script_body, created_at, updated_at
              FROM task_plugins WHERE id = ?1",
             [id],
             plugin_from_row,
@@ -121,14 +152,6 @@ pub fn get_plugin(id: &str) -> Result<Option<TaskPlugin>, String> {
 }
 
 pub fn upsert_plugin(plugin: TaskPlugin, preserve_permissions: bool) -> Result<TaskPlugin, String> {
-    write_plugin(plugin, preserve_permissions, false)
-}
-
-pub fn create_plugin(plugin: TaskPlugin) -> Result<TaskPlugin, String> {
-    write_plugin(plugin, false, true)
-}
-
-fn write_plugin(plugin: TaskPlugin, preserve_permissions: bool, create_only: bool) -> Result<TaskPlugin, String> {
     let mut plugin = validate_and_normalize_plugin(plugin)?;
     let now = logging::now_ms();
     let existing = get_plugin(&plugin.id)?;
@@ -142,7 +165,6 @@ fn write_plugin(plugin: TaskPlugin, preserve_permissions: bool, create_only: boo
         plugin.created_at = now;
     }
     plugin.updated_at = now;
-    plugin.network_grants.clear();
 
     let domains_json = serde_json::to_string(&plugin.domains).unwrap_or_else(|_| "[]".into());
     let fields_json = serde_json::to_string(&plugin.fields).unwrap_or_else(|_| "[]".into());
@@ -150,7 +172,7 @@ fn write_plugin(plugin: TaskPlugin, preserve_permissions: bool, create_only: boo
     let status_json = serde_json::to_string(&plugin.status_fields).unwrap_or_else(|_| "[]".into());
 
     let db = database()?;
-    let changed = db.with(|conn| {
+    db.with(|conn| {
         conn.execute(
             "INSERT INTO task_plugins (
                 id, name, description, version, source, signed, enabled, icon,
@@ -166,7 +188,7 @@ fn write_plugin(plugin: TaskPlugin, preserve_permissions: bool, create_only: boo
                 domains_json=excluded.domains_json, declares_notify=excluded.declares_notify,
                 notify_allowed=excluded.notify_allowed, fields_json=excluded.fields_json,
                 actions_json=excluded.actions_json, status_fields_json=excluded.status_fields_json,
-                script_body=excluded.script_body, updated_at=MAX(task_plugins.updated_at+1,excluded.updated_at), network_grants_json='{}' WHERE NOT ?21",
+                script_body=excluded.script_body, updated_at=excluded.updated_at",
             params![
                 plugin.id,
                 plugin.name,
@@ -188,40 +210,28 @@ fn write_plugin(plugin: TaskPlugin, preserve_permissions: bool, create_only: boo
                 plugin.script_body,
                 plugin.created_at,
                 plugin.updated_at,
-                create_only,
             ],
         )
         .map_err(|error| format!("保存定时任务插件失败：{error}"))
     })
     .ok_or_else(|| "定时任务数据库不可用".to_string())??;
 
-    if changed == 0 { return Err("任务插件已存在，未覆盖".into()); }
-    get_plugin(&plugin.id)?.ok_or_else(|| "任务插件不存在".into())
+    Ok(plugin)
 }
 
 pub fn patch_plugin(
     id: &str,
     enabled: Option<bool>,
     notify_allowed: Option<bool>,
-    network_grants: Option<&BTreeMap<String,String>>,
-    expected_updated_at: Option<i64>,
 ) -> Result<TaskPlugin, String> {
-    let grants = network_grants.map(serde_json::to_string).transpose().map_err(|_| "探测授权无效")?;
-    let changed = database()?.with(|conn| conn.execute(
-        "UPDATE task_plugins SET enabled=COALESCE(?1, enabled), notify_allowed=COALESCE(?2, notify_allowed), updated_at=MAX(updated_at+1,?3),
-         network_grants_json=CASE WHEN ?1=0 THEN '{}' ELSE COALESCE(?5,network_grants_json) END
-          WHERE id=?4 AND (COALESCE(?2, 0)=0 OR declares_notify=1) AND (?5 IS NULL OR updated_at=?6)",
-        params![enabled, notify_allowed, logging::now_ms(), id, grants, expected_updated_at],
-    )).ok_or("定时任务数据库不可用")?.map_err(|_| "更新任务插件授权失败")?;
-    if changed != 1 { return Err("插件或授权已变更，请刷新后重试".into()); }
-    get_plugin(id)?.ok_or_else(|| "任务插件不存在".into())
-}
-
-pub(super) fn probe_current(plugin: &TaskPlugin, job_id: &str, schedule: bool) -> bool {
-    database().ok().and_then(|db| db.with(|conn| conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM task_plugins p JOIN task_jobs j ON j.plugin_id=p.id WHERE p.id=?1 AND p.enabled=1 AND p.created_at=?2 AND p.updated_at=?3 AND j.id=?4 AND j.proxy_id='' AND (?5=0 OR j.enabled=1) AND p.script_body=?6)",
-        params![plugin.id, plugin.created_at, plugin.updated_at, job_id, schedule, plugin.script_body], |row| row.get::<_,bool>(0),
-    ).unwrap_or(false))).unwrap_or(false)
+    let mut plugin = get_plugin(id)?.ok_or_else(|| "定时任务插件不存在".to_string())?;
+    if let Some(value) = enabled {
+        plugin.enabled = value;
+    }
+    if let Some(value) = notify_allowed {
+        plugin.notify_allowed = value;
+    }
+    upsert_plugin(plugin, false)
 }
 
 pub fn delete_plugin(id: &str) -> Result<(), String> {
@@ -257,7 +267,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRecord> {
                 .map(|(k, _)| (k, true))
                 .collect()
         })
-        .map_err(|_| rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, "任务凭据无法读取".into()))?;
+        .unwrap_or_default();
     Ok(JobRecord {
         view: TaskJobView {
             id: row.get(0)?,
@@ -327,11 +337,33 @@ pub fn get_job_record(id: &str) -> Result<Option<JobRecord>, String> {
 }
 
 pub fn decrypt_job_secrets(record: &JobRecord) -> Result<BTreeMap<String, String>, String> {
-    decrypt_map(&record.secrets_enc)
+    decrypt_job_field(record, "secrets_enc", &record.secrets_enc)
 }
 
 pub fn decrypt_job_storage(record: &JobRecord) -> Result<BTreeMap<String, String>, String> {
-    decrypt_map(&record.storage_enc)
+    decrypt_job_field(record, "storage_enc", &record.storage_enc)
+}
+
+fn decrypt_job_field(record: &JobRecord, column: &str, raw: &str) -> Result<BTreeMap<String, String>, String> {
+    let Some(opened) = super::secret_compat::open_with(raw, crypto::open)? else {
+        return Ok(BTreeMap::new());
+    };
+    let value = serde_json::from_slice(&opened.plaintext).map_err(|error| format!("解析加密数据失败：{error}"))?;
+    if matches!(opened.scope, SecretScope::Accounts) {
+        let encrypted = crypto::seal(&opened.plaintext, SecretScope::TaskPlugins)?;
+        database()?.with(|conn| reseal_field(conn, &record.view.id, column, raw, &encrypted))
+            .ok_or_else(|| "定时任务数据库不可用".to_owned())??;
+    }
+    Ok(value)
+}
+
+fn reseal_field(conn: &rusqlite::Connection, id: &str, column: &str, old: &str, encrypted: &str) -> Result<(), String> {
+    if !matches!(column, "secrets_enc" | "storage_enc") {
+        return Err("任务加密字段无效".into());
+    }
+    conn.execute(&format!("UPDATE task_jobs SET {column}=?1 WHERE id=?2 AND {column}=?3"), params![encrypted, id, old])
+        .map_err(|error| format!("迁移任务加密数据失败：{error}"))?;
+    Ok(())
 }
 
 pub struct JobUpsertInput {
@@ -370,9 +402,6 @@ pub fn save_job(input: JobUpsertInput) -> Result<TaskJobView, String> {
         Some(id) if !id.trim().is_empty() => get_job_record(id)?,
         _ => None,
     };
-    if input.id.is_some() && existing.as_ref().is_none_or(|record| record.view.plugin_id != input.plugin_id) {
-        return Err("不能更改实例所属插件".into());
-    }
     let job_id = existing
         .as_ref()
         .map(|rec| rec.view.id.clone())
@@ -397,9 +426,6 @@ pub fn save_job(input: JobUpsertInput) -> Result<TaskJobView, String> {
     }
 
     for (key, value) in input.values {
-        if !plugin.fields.iter().any(|field| field.key == key) {
-            return Err("未知任务表单字段".into());
-        }
         if secret_keys.contains(key.as_str()) {
             if let Some(text) = value.as_str() {
                 if !text.is_empty() {
@@ -415,7 +441,8 @@ pub fn save_job(input: JobUpsertInput) -> Result<TaskJobView, String> {
     let secrets_enc = encrypt_map(&secrets)?;
     let storage_enc = existing
         .as_ref()
-        .map(|rec| rec.storage_enc.clone())
+        .map(|record| decrypt_job_storage(record).and_then(|storage| encrypt_map(&storage)))
+        .transpose()?
         .unwrap_or_default();
     let status_summary_json = existing
         .as_ref()
@@ -719,7 +746,7 @@ pub fn list_runs(job_id: &str, limit: i64) -> Result<Vec<TaskJobRun>, String> {
     .ok_or_else(|| "定时任务数据库不可用".to_string())?
 }
 
-pub fn list_due_jobs(now_ms: i64) -> Result<Vec<(TaskJobView, i64)>, String> {
+pub fn list_due_jobs(now_ms: i64) -> Result<Vec<TaskJobView>, String> {
     let db = database()?;
     db.with(|conn| {
         let mut stmt = conn
@@ -727,7 +754,7 @@ pub fn list_due_jobs(now_ms: i64) -> Result<Vec<(TaskJobView, i64)>, String> {
                 "SELECT j.id, j.plugin_id, j.name, j.cron_expression, j.timezone, j.timeout_seconds,
                         j.proxy_id, j.enabled, j.values_json, j.secrets_enc, j.storage_enc,
                         j.status_summary_json, j.next_run_at, j.last_run_at, j.last_status,
-                        j.last_duration_ms, j.last_error, j.created_at, j.updated_at, p.updated_at
+                        j.last_duration_ms, j.last_error, j.created_at, j.updated_at
                  FROM task_jobs j
                  INNER JOIN task_plugins p ON p.id = j.plugin_id
                  WHERE j.enabled = 1 AND p.enabled = 1
@@ -736,22 +763,15 @@ pub fn list_due_jobs(now_ms: i64) -> Result<Vec<(TaskJobView, i64)>, String> {
             )
             .map_err(|error| format!("查询到期定时任务失败：{error}"))?;
         let rows = stmt
-            .query_map([now_ms], |row| Ok((job_from_row(row)?.view, row.get(19)?)))
+            .query_map([now_ms], job_from_row)
             .map_err(|error| format!("查询到期定时任务失败：{error}"))?;
         let mut out = Vec::new();
         for item in rows {
-            out.push(item.map_err(|error| format!("解析到期定时任务失败：{error}"))?);
+            out.push(item.map_err(|error| format!("解析到期定时任务失败：{error}"))?.view);
         }
         Ok(out)
     })
     .ok_or_else(|| "定时任务数据库不可用".to_string())?
-}
-
-pub(super) fn advance_due(job: &TaskJobView, plugin_revision: i64, next: Option<i64>) -> bool {
-    database().ok().and_then(|db| db.with(|conn| conn.execute(
-        "UPDATE task_jobs SET next_run_at=?1 WHERE id=?2 AND enabled=1 AND next_run_at=?3 AND updated_at=?4 AND EXISTS(SELECT 1 FROM task_plugins p WHERE p.id=task_jobs.plugin_id AND p.enabled=1 AND p.updated_at=?5)",
-        params![next,job.id,job.next_run_at,job.updated_at,plugin_revision],
-    ).ok() == Some(1))).unwrap_or(false)
 }
 
 pub fn update_next_run(job_id: &str, next_run: Option<i64>) -> Result<(), String> {
@@ -767,33 +787,34 @@ pub fn update_next_run(job_id: &str, next_run: Option<i64>) -> Result<(), String
     Ok(())
 }
 
-pub fn recover_on_startup() -> Result<(), String> {
-    let db = database()?;
+pub fn recover_on_startup() {
+    let Ok(db) = database() else { return };
     let now = logging::now_ms();
-    db.with(|conn| -> rusqlite::Result<()> {
-        conn.execute(
+    let _ = db.with(|conn| {
+        let _ = conn.execute(
             "UPDATE task_job_runs
              SET status='failed', finished_at=?1,
                  error=COALESCE(error, '服务重启，执行已中断')
              WHERE status='running'",
             [now],
-        )?;
-        conn.execute(
+        );
+        let _ = conn.execute(
             "UPDATE task_jobs
              SET last_status='failed',
                  last_error=COALESCE(last_error, '服务重启，执行已中断')
              WHERE last_status='running'",
             [],
-        )?;
-        Ok(())
-    }).ok_or("定时任务数据库不可用")?.map_err(|_| "无法恢复任务状态")?;
-    for job in list_jobs()? {
-        if job.enabled {
-            let next = next_run_ms(&job.cron_expression, &job.timezone, now)?;
-            update_next_run(&job.id, Some(next))?;
+        );
+    });
+    if let Ok(jobs) = list_jobs() {
+        for job in jobs {
+            if job.enabled {
+                if let Ok(next) = next_run_ms(&job.cron_expression, &job.timezone, now) {
+                    let _ = update_next_run(&job.id, Some(next));
+                }
+            }
         }
     }
-    Ok(())
 }
 
 fn rand_suffix() -> String {

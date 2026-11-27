@@ -34,6 +34,7 @@ impl super::RequestTelemetry {
                 slot.project_completion(&body, requested).map_err(map_error)?;
                 Ok(ForwardOutcome::Completion { body })
             }
+            ForwardOutcome::Native(_) => Err(map_error(unconfirmed())),
         }
     }
 

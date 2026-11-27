@@ -10,7 +10,9 @@ pub(super) fn job_result(job: &ImageJob, base: &str, management: bool) -> Value 
     let mut result = job.result.clone().unwrap_or_else(|| json!({}));
     if !management {
         if let Some(object) = result.as_object_mut() {
-            for key in ["actual_account_id", "actual_account_name", "actual_provider", "actual_model"] { object.remove(key); }
+            for field in ["actual_account_id", "actual_account_name", "actual_provider", "actual_model"] {
+                object.remove(field);
+            }
         }
     }
     result["job_id"] = json!(job.id);
@@ -94,4 +96,37 @@ pub(super) fn file_response(file: ImageFile) -> Response {
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_image_result_hides_execution_identity_but_preserves_owned_downloads() {
+        let job = ImageJob {
+            id: "fixture-job".into(), owner: "fixture-owner".into(), request_id: "fixture-request".into(),
+            request_hash: "fixture-hash".into(), operation: "generate".into(), provider: "routing-group".into(),
+            model: "Public/Image".into(), account_id: "selected-account".into(), state: "succeeded".into(),
+            created_at: 1, updated_at: 2, expires_at: 3, error: None,
+            result: Some(json!({
+                "actual_account_id":"private-account", "actual_account_name":"private-name",
+                "actual_provider":"private-provider", "actual_model":"private-model",
+                "credit":2, "images":[{"id":"fixture-image","width":1,"height":1}]
+            })),
+        };
+        let public = job_result(&job, "http://localhost", false);
+        for field in ["actual_account_id", "actual_account_name", "actual_provider", "actual_model", "account_id"] {
+            assert!(public.get(field).is_none(), "public image results must not expose {field}");
+        }
+        assert_eq!(public["model"], "Public/Image");
+        assert_eq!(public["images"][0]["url"], "http://localhost/mcp/image-generation/files/fixture-image");
+        assert_eq!(public["images"][0]["ref"], "image:fixture-image");
+        assert_eq!(public["images"][0]["requires_auth"], true);
+        let management = job_result(&job, "http://localhost", true);
+        assert_eq!(management["actual_account_id"], "private-account");
+        assert_eq!(management["actual_provider"], "private-provider");
+        assert_eq!(management["actual_model"], "private-model");
+        assert_eq!(management["account_id"], "selected-account");
+    }
 }

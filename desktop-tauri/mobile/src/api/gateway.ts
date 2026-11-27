@@ -272,6 +272,7 @@ export function fetchCheckinCenter(signal?: AbortSignal): Promise<CheckinCenter>
 /* ─── 模型管理 ─────────────────────────────────── */
 
 export type ManageModel = {
+  credits?: string | number | null
   id?: string
   name?: string
   provider?: string

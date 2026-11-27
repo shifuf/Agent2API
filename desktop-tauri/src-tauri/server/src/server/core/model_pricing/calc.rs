@@ -239,7 +239,7 @@ pub fn calc_request_cost_detail(
     } else {
         prompt
     };
-    let fx = super::fx::current_rate();
+    let fx = super::fx::current_rate_soon();
     let fx_rate = fx.rate;
     let usd = price.cost_usd(
         uncached_input,
@@ -249,11 +249,17 @@ pub fn calc_request_cost_detail(
         cache_write_1h,
         fx_rate,
     );
-    if !usd.is_finite() || usd < 0.0 { return Some(None); }
-    let cost_usd = usd;
+    let cost_usd = if usd.is_finite() && usd >= 0.0 { usd } else { 0.0 };
     Some(Some(RequestCostDetail {
         cost_usd,
-        evidence: json!({ "rateSource": tariff.source, "priceModel": price_model, "provider": provider, "sameAs": tariff.same_as, "currency": price.currency_code(), "fx": fx.to_json(ts_ms), "costNative": price.cost_split(uncached_input, completion, cache_read, cache_write, cache_write_1h) }),
+        evidence: json!({
+            "rateSource": tariff.source, "priceModel": price_model, "provider": provider,
+            "sameAs": tariff.same_as, "priceRate": tariff.price_rate,
+            "activeWindowRate": rate_window_at(&tariff.provider_rule.rate_windows, ts_ms),
+            "currency": price.currency_code(), "fx": fx.to_json(ts_ms),
+            "effective": price,
+            "costNative": price.cost_split(uncached_input, completion, cache_read, cache_write, cache_write_1h),
+        }),
         source: tariff.source,
         same_as: tariff.same_as,
     }))
@@ -292,11 +298,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn distinct_cache_write_durations_and_public_fallback_are_recorded() {
+    fn distinct_cache_creation_durations_and_public_fallback_are_recorded() {
         let settings: ModelPricingSettings = serde_json::from_value(json!({"modelPrices":{"*/public":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"cacheWrite1h":5}}})).unwrap();
         let result = calc_request_cost_detail(&settings, "custom", "public", "unknown-fixture", 1, 100, 5, 20, 30, 10).flatten().unwrap();
         assert!((result.cost_usd - (50.0 + 10.0 + 60.0 + 80.0 + 50.0) / 1_000_000.0).abs() < 1e-12);
         assert_eq!(result.evidence["priceModel"], "public");
+        assert!(result.evidence["fx"]["rate"].as_f64().is_some_and(|rate| rate > 0.0));
+        assert_eq!(result.evidence["effective"]["input"], 1.0);
     }
 
     #[test]

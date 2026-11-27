@@ -60,6 +60,12 @@ impl Rule {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct Request {
+    pub client: String,
+    pub model: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct CompiledRule {
     pub rule: Rule,
@@ -117,9 +123,7 @@ impl Matcher {
         // 空条件不能扩大范围；未指定模型也不参与「不是 / 不包含」。
         if actual.is_empty() || self.condition.values.is_empty() { return false; }
         if self.condition.field != Field::Model {
-            let hit = self.condition.values.iter().any(|value| if self.condition.field == Field::Client {
-                crate::server::config::title_routes::canonical_client(actual) == crate::server::config::title_routes::canonical_client(value)
-            } else { actual.eq_ignore_ascii_case(value) });
+            let hit = self.condition.values.iter().any(|value| actual.eq_ignore_ascii_case(value));
             return if self.condition.op == Operator::IsNot { !hit } else { hit };
         }
         let value = &self.condition.values[0];

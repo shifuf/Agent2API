@@ -12,7 +12,7 @@ use super::{cleanup::Outcome, error, input::{Correlation, PreparedInput, StartIn
 use super::super::catpaw_account::Account as RowSource;
 use crate::server::core::plugin_host::{wasm::conversation::SourceRef, Host};
 
-const MAX_RECORDS: usize = 128;
+const MAX_RECORDS: usize = crate::server::config::runtime_capacity::POOL_EXECUTIONS;
 const PREPARED: u8 = 0;
 const RESERVED: u8 = 1;
 const SUBMITTED: u8 = 2;
@@ -51,7 +51,7 @@ pub(super) struct Record {
     ownership_transferred: AtomicBool,
     watching: AtomicBool,
     watch_done: CancellationToken,
-    _memory: super::budget::Allocation,
+    _memory: crate::server::core::runtime_capacity::Allocation,
 }
 
 struct State {
@@ -94,10 +94,10 @@ struct SettlementState {
 
 pub(super) fn prepare(registry: &Arc<Registry>, source: SourceRef, account: RowSource, params: Value) -> Result<Value, proto::WireError> {
     source::check(&source, &account)?;
-    let bytes = super::budget::value_bytes(&params)?.checked_mul(2)
+    let retained_bytes = super::budget::value_bytes(&params)?.checked_mul(2)
         .and_then(|bytes| bytes.checked_add(super::budget::value_bytes(account.secret()).ok()?))
         .and_then(|bytes| bytes.checked_add(4 * 1024 * 1024)).ok_or_else(error::budget)?;
-    let memory = super::budget::Allocation::new(bytes)?;
+    let memory = crate::server::core::runtime_capacity::Allocation::new(retained_bytes)?;
     let mut prepared = PreparedInput::parse(&params, source.client_stream())?;
     // 不再用固定条数上限拦截长对话，但关联 ID 数量不能超过已受体积/节点保护的原始消息数，避免按外部数字预分配内存。
     if prepared.message_count > source.material().messages().len() {

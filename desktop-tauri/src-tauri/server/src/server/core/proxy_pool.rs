@@ -1,4 +1,4 @@
-//! 出网代理池：集中管理一组**命名代理**（手动填的 / 引用 Clash Verge 的 /
+//! 出网代理池：集中管理一组**命名代理**（手动填的 / 引用 EasyClash 的 /
 //! 订阅节点镜像），账号的 proxy 字段可以按 id 引用它们（`{source:'pool', proxyId}`）。
 //!
 //! ── 为什么要有它（对照 OmniProxy 的 proxies 表）──────────────
@@ -17,12 +17,12 @@
 //!
 //! ── 三种来源（对标 OmniProxy 的 proxies 表）────────────────────
 //!   manual  手填 `{protocol, host, port, username, password}`；
-//!   clash   **从 Clash Verge 同步进来**的镜像记录 `{listenerUid}`：名称 / 端口 /
+//!   clash   **从 EasyClash 同步进来**的镜像记录 `{listenerUid}`：名称 / 端口 /
 //!           启用状态全部跟随 Clash（端口实时读取，见 `core::clash` 的「严格镜像」
-//!           说明），因此名称与端口**本地不可改不可删** —— 想改去 Clash Verge 改，
-//!           想删去 Clash Verge 删（下一次同步会把它从池里摘掉）。这条只读语义照
+//!           说明），因此名称与端口**本地不可改不可删** —— 想改去 EasyClash 改，
+//!           想删去 EasyClash 删（下一次同步会把它从池里摘掉）。这条只读语义照
 //!           OmniProxy 的 `imported_clash_listeners` 分支实现（它的 PUT/DELETE
-//!           对同步来的记录一律 400「请在 Clash Verge 中修改」）；
+//!           对同步来的记录一律 400「请在 EasyClash 中修改」）；
 //!   subscription  **订阅节点镜像**（内核拉到订阅后同步进来，见 `core::sub_kernel`）：
 //!           条目存 `{providerId, node, port}`，地址是内核起的本地监听器
 //!           （http://127.0.0.1:端口），端口注册表持久在内核目录里、重启不漂移。
@@ -32,7 +32,7 @@
 //! ── `localDisabled`：镜像条目的本地开关（启用列不再只读）────────
 //! 名称与端口必须跟随来源侧，但**「这条本端用不用」是用户自己的事**：某条节点
 //! 常年不通、或只是暂时不想用它，用户要能在「网络代理」页把它关掉 —— 不必去
-//! Clash Verge 关监听器、也不必改订阅里的节点。所以镜像条目多一个可选字段：
+//! EasyClash 关监听器、也不必改订阅里的节点。所以镜像条目多一个可选字段：
 //!   · `localDisabled: true` = 本页禁用。它**只在本端生效**：有效启用为
 //!     「来源侧启用 ∧ 非本地禁用」（`is_enabled`），引用解析、监听器分配、
 //!     展示都按它算；
@@ -42,7 +42,7 @@
 //!     `api::proxies::pool_enable` 与 `reconcile_listeners`）：内核不再为被
 //!     禁用的节点开监听器 —— 禁用的语义就是「这个端口不再听着」，只留一个
 //!     标记会让端口继续开着、地址看着能用而实际没人用它。
-//!     manual / clash 没有本机端口（clash 的端口在 Clash Verge 手里），
+//!     manual / clash 没有本机端口（clash 的端口在 EasyClash 手里），
 //!     禁用只影响本端的取用。
 //!
 //! ── 端口跟随引用（双向对账，`api::proxies::reconcile_listeners`）────
@@ -64,7 +64,7 @@
 //! （名称 / 启用）、Clash 侧已消失的摘掉。手动条目不受影响。触发点两处：
 //! `GET /api/proxies/pool` 进来时自动同步一次（OmniProxy 的 `router.get('/proxies')`
 //! 也是这么做的 —— 「Clash 里加了出口，打开页面就能看到」不必再点一次按钮），
-//! 以及页面上的「同步 Clash Verge」按钮（手动强制一次）。
+//! 以及页面上的「同步 EasyClash」按钮（手动强制一次）。
 //! **镜像是全量的**：用户在池里看到的就是 Clash 当前的出口集合，不存在
 //! 「半套」状态；这也意味着在 Clash 侧删掉一个出口，引用它的账号会解析失败并
 //! 回退直连（与「账号直接引用 Clash 监听器」时的行为完全一致）。
@@ -89,27 +89,31 @@
 //! 不参与选路 —— 转发不会因为上次测试失败就跳过某个出口（判断出口可用性
 //! 的唯一权威是实际请求的结果，测试结果只回答「上次手测时通不通」）。
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::server::core::proxies::{resolve_account_proxy, ProxyResolution};
 use crate::server::db::Db;
 use crate::server::logging;
 
 pub mod usage;
+mod import;
 
 /// `kv` 表里的键名（保留键，见 `db::schema::RESERVED_KV_KEYS`）
 pub const KV_KEY: &str = "proxyPool";
 
 /// 名称 / 主机的长度上限（与账号代理的 MAX_* 同量级；名称要出现在下拉与表格里）
 const MAX_NAME_LENGTH: usize = 60;
-const MAX_HOST_LENGTH: usize = 255;
-const MAX_USER_LENGTH: usize = 200;
 const MAX_LABEL_LENGTH: usize = 100;
 
 /// 进程级库句柄（照 `core::task_state` 的形态：bootstrap 时 install 一次）
 static DB: OnceLock<Option<Db>> = OnceLock::new();
+static MUTATIONS: Mutex<()> = Mutex::new(());
+
+fn mutation_lock() -> MutexGuard<'static, ()> {
+    MUTATIONS.lock().unwrap_or_else(|error| error.into_inner())
+}
 
 /// 接线（`ServerState::bootstrap` 调用）。重复调用无副作用。
 pub fn install(db: Option<Db>) {
@@ -156,6 +160,7 @@ pub(crate) fn raw_items() -> Vec<Value> {
 
 /// 整份写回（增删改都走它；条目数量小，整份重写的开销可忽略）
 fn write_items(items: &[Value]) -> Result<(), String> {
+    let _usage_guard = crate::server::core::usage_query::config::lock();
     let db = database()?;
     let text = serde_json::to_string(&json!({ "items": items }))
         .map_err(|error| format!("编码代理池失败: {error}"))?;
@@ -171,6 +176,7 @@ fn write_items(items: &[Value]) -> Result<(), String> {
         })
         .ok_or_else(|| "代理池数据库不可用".to_string())?;
     written?;
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Proxies);
     // 保留键不走 `config::update`，显式通知自动同步（见 cloud_sync::auto_sync）
     crate::server::core::cloud_sync::auto_sync::notify_change();
     Ok(())
@@ -220,27 +226,28 @@ fn normalize_item(input: &Value, existing: Option<&Value>) -> Result<Value, Stri
     let Some(object) = input.as_object() else {
         return Err("代理条目必须是对象".to_string());
     };
-    if object
-        .get("source")
-        .is_some_and(|source| !source.is_null() && !source.is_string())
-    {
-        return Err("代理来源必须是字符串".to_string());
+    if is_clash_item(input) {
+        return Err("EasyClash 出口由「同步 EasyClash」自动导入，不能手工新建".to_string());
     }
-    let source_input = clean_string(object.get("source"), 20);
-    if source_input == "clash" {
-        return Err("Clash Verge 出口由「同步 Clash Verge」自动导入，不能手工新建".to_string());
-    }
-    if source_input == "subscription" {
-        return Err("订阅节点由「订阅」功能自动导入，不能手工新建".to_string());
-    }
-    if !matches!(source_input.as_str(), "" | "manual" | "custom") {
-        return Err("不支持的代理来源".to_string());
+    if !is_manual_item(input) {
+        return Err("订阅节点由订阅功能自动导入，不能手工新建".to_string());
     }
     let name = clean_string(object.get("name"), MAX_NAME_LENGTH);
     if name.is_empty() {
         return Err("请填写代理名称".to_string());
     }
-
+    let protocol = clean_string(object.get("protocol"), 10).to_lowercase();
+    let protocol = if protocol.is_empty() { "http".to_string() } else { protocol };
+    if protocol != "http" && protocol != "socks5" {
+        return Err("代理协议只支持 http 或 socks5".to_string());
+    }
+    let host = crate::server::core::proxies::normalize_host(object.get("host").and_then(Value::as_str).unwrap_or(""))?;
+    let non_direct = crate::server::core::proxies::normalize_non_direct(
+        object.get("nonDirect").or_else(|| existing.and_then(|item| item.get("nonDirect"))),
+    )?;
+    let Some(port) = valid_port(object.get("port")) else {
+        return Err("代理端口必须是 1-65535 的整数".to_string());
+    };
     let now = logging::now_ms();
     let id = existing.map(|item| text_of(item, "id")).unwrap_or_default();
     let id = if id.is_empty() { new_id() } else { id };
@@ -248,57 +255,26 @@ fn normalize_item(input: &Value, existing: Option<&Value>) -> Result<Value, Stri
         .and_then(|item| item.get("createdAt"))
         .and_then(Value::as_i64)
         .unwrap_or(now);
-    // 测试结果是「历史事实」：编辑配置后旧结果已经不对应新出口了，但**不删** ——
-    // 前端在结果旁标注它测于何时，用户自己能判断要不要重测（悄悄删掉会让
-    // 「上次测过、当时是通的」这条信息无端消失）。改地址时保留、改协议时保留，
-    // 一律保留，唯一的重置是删除条目本身。
+    // 测试结果保留为历史事实，时刻由界面显示，不参与实际选路。
     let last_test = existing
         .and_then(|item| item.get("lastTest"))
         .cloned()
         .unwrap_or(Value::Null);
-
-    let protocol = {
-        let cleaned = clean_string(object.get("protocol"), 10).to_lowercase();
-        if cleaned.is_empty() {
-            "http".to_string()
-        } else {
-            cleaned
-        }
-    };
-    if protocol != "http" && protocol != "socks5" {
-        return Err("代理协议只支持 http 或 socks5".to_string());
-    }
-    let host = clean_string(object.get("host"), MAX_HOST_LENGTH);
-    if host.is_empty() {
-        return Err("请填写代理主机地址".to_string());
-    }
-    let Some(port) = valid_port(object.get("port")) else {
-        return Err("代理端口必须是 1-65535 的整数".to_string());
-    };
-
-    let mut normalized = Map::new();
-    normalized.insert("id".to_string(), Value::String(id));
-    normalized.insert("name".to_string(), Value::String(name));
-    normalized.insert("source".to_string(), Value::String("manual".to_string()));
-    normalized.insert(
-        "enabled".to_string(),
-        Value::Bool(!matches!(object.get("enabled"), Some(Value::Bool(false)))),
-    );
-    normalized.insert("protocol".to_string(), Value::String(protocol));
-    normalized.insert("host".to_string(), Value::String(host));
-    normalized.insert("port".to_string(), Value::from(port));
-    normalized.insert(
-        "username".to_string(),
-        Value::String(clean_string(object.get("username"), MAX_USER_LENGTH)),
-    );
-    normalized.insert(
-        "password".to_string(),
-        Value::String(clean_string(object.get("password"), MAX_USER_LENGTH)),
-    );
-    normalized.insert("createdAt".to_string(), Value::from(created_at));
-    normalized.insert("updatedAt".to_string(), Value::from(now));
-    normalized.insert("lastTest".to_string(), last_test);
-    Ok(Value::Object(normalized))
+    Ok(json!({
+        "id": id,
+        "name": name,
+        "source": "manual",
+        "enabled": !matches!(object.get("enabled"), Some(Value::Bool(false))),
+        "protocol": protocol,
+        "host": host,
+        "port": port,
+        "username": crate::server::core::proxies::normalize_credential(object.get("username"))?,
+        "password": crate::server::core::proxies::normalize_credential(object.get("password"))?,
+        "nonDirect": non_direct,
+        "createdAt": created_at,
+        "updatedAt": now,
+        "lastTest": last_test,
+    }))
 }
 
 /// 新条目的 id：`px_<毫秒>_<8 位随机>`。随机段与 `upstream::request` 的
@@ -376,6 +352,7 @@ pub fn resolve_item(item: &Value) -> Option<ProxyResolution> {
                 username: String::new(),
                 password: String::new(),
                 label: String::new(),
+                non_direct: false,
             },
         ));
     } else {
@@ -386,6 +363,7 @@ pub fn resolve_item(item: &Value) -> Option<ProxyResolution> {
             "port": item.get("port").cloned().unwrap_or(Value::Null),
             "username": text_of(item, "username"),
             "password": text_of(item, "password"),
+            "nonDirect": item.get("nonDirect").cloned().unwrap_or(Value::Bool(false)),
         })
     };
     resolve_account_proxy(Some(&config))
@@ -457,7 +435,11 @@ fn resolve_entry(
 
 // ─── 公开形态 ───────────────────────────────────────────────
 
-fn describe_item(item: &Value) -> Value {
+fn is_deletable_with(item: &Value, snapshot: &crate::server::core::clash::ClashSnapshot) -> bool {
+    !is_subscription_item(item) && (!is_clash_item(item) || !snapshot.contains_listener(&text_of(item, "listenerUid")))
+}
+
+fn describe_item_with(item: &Value, snapshot: &crate::server::core::clash::ClashSnapshot) -> Value {
     let source = text_of(item, "source");
     let (resolved, resolve_error) = match resolve_item(item) {
         Some(ProxyResolution::Resolved(proxy)) => (
@@ -476,11 +458,13 @@ fn describe_item(item: &Value) -> Value {
         "id": text_of(item, "id"),
         "name": text_of(item, "name"),
         "source": source,
+        "deletable": is_deletable_with(item, snapshot),
+        "nonDirect": item.get("nonDirect").and_then(Value::as_bool).unwrap_or(false),
         // 有效启用（来源侧启用 ∧ 非本地禁用）：前端拿它当开关的值
         "enabled": is_enabled(item),
         "sourceEnabled": !matches!(item.get("enabled"), Some(Value::Bool(false))),
         // 本地禁用位（只对镜像条目有意义）：前端据此区分「来源侧关着」与
-        // 「本页关着」两种 off —— 前者点不动（改它要去 Clash Verge），后者
+        // 「本页关着」两种 off —— 前者点不动（改它要去 EasyClash），后者
         // 是本页的开关，点一下就恢复
         "localDisabled": is_locally_disabled(item),
         // manual 的字段原样带出（编辑弹窗要回显，含密码 —— 与账号代理表单同一口径：
@@ -490,7 +474,7 @@ fn describe_item(item: &Value) -> Value {
         "port": item.get("port").cloned().unwrap_or(Value::Null),
         "username": text_of(item, "username"),
         "password": text_of(item, "password"),
-        // clash 的引用 uid（编辑弹窗选中它 + 前端标注「来自 Clash Verge」）
+        // clash 的引用 uid（编辑弹窗选中它 + 前端标注「来自 EasyClash」）
         "listenerUid": text_of(item, "listenerUid"),
         // subscription 的引用信息（前端标注节点属于哪条订阅 + 同步时定位条目）
         "providerId": text_of(item, "providerId"),
@@ -506,11 +490,8 @@ fn describe_item(item: &Value) -> Value {
 /// 最新全量列表（公开形态）。写操作也返回它 —— 与模型管理页的写接口同约定：
 /// 前端就地替换，不必再拉一次。
 pub fn list() -> Vec<Value> {
-    read_items()
-        .iter()
-        .filter(|item| is_supported(item))
-        .map(describe_item)
-        .collect()
+    let snapshot = crate::server::core::clash::clash_snapshot();
+    raw_items().iter().map(|item| describe_item_with(item, &snapshot)).collect()
 }
 
 fn find_raw(id: &str) -> Option<Value> {
@@ -524,7 +505,12 @@ fn find_raw(id: &str) -> Option<Value> {
 
 // ─── 写操作 ─────────────────────────────────────────────────
 
+pub fn create_batch(input: &Value) -> Result<Value, String> {
+    import::create(input)
+}
+
 pub fn create(input: &Value) -> Result<Vec<Value>, String> {
+    let _guard = mutation_lock();
     let item = normalize_item(input, None)?;
     let mut items = read_items();
     // 新条目排在最前（与账号页「新加的看得见」一致；代理数量少，没有再排序的价值）
@@ -566,7 +552,7 @@ fn is_readonly(item: &Value) -> bool {
 
 /// 只读条目被写操作命中时的统一提示（照 OmniProxy 的文案）
 const CLASH_READONLY_HINT: &str =
-    "该代理来自 Clash Verge 同步（名称 / 端口 / 启用都跟随 Clash），请到 Clash Verge 中修改";
+    "该代理来自 EasyClash 同步（名称 / 端口 / 启用都跟随 Clash），请到 EasyClash 中修改";
 
 /// 订阅节点的只读提示（与 Clash 那条同一形态；改去「订阅管理」）
 const SUBSCRIPTION_READONLY_HINT: &str =
@@ -581,6 +567,7 @@ fn readonly_hint(item: &Value) -> String {
 }
 
 pub fn update(input: &Value) -> Result<Vec<Value>, String> {
+    let _guard = mutation_lock();
     let id = clean_string(input.get("id"), MAX_LABEL_LENGTH);
     if id.is_empty() {
         return Err("缺少代理 id".to_string());
@@ -628,6 +615,7 @@ pub struct EnabledChange {
 /// 返回值带上「改动前端口是否开着」与来源：订阅节点禁用时调用方要接着走关闭
 /// 流程（内核不给它开监听器，端口要真的收掉），启用时走补建流程。
 pub fn set_enabled(id: &str, enabled: bool) -> Result<(Vec<Value>, EnabledChange), String> {
+    let _guard = mutation_lock();
     let mut items = read_items();
     let Some(index) = items
         .iter()
@@ -638,6 +626,9 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(Vec<Value>, EnabledChange
     // 先读完需要的信息再拿可变借用（同一元素不能同时借两次）
     if !is_supported(&items[index]) {
         return Err("不支持的代理来源".to_string());
+    }
+    if is_clash_item(&items[index]) && enabled && matches!(items[index].get("enabled"), Some(Value::Bool(false))) {
+        return Err("这条在 EasyClash 里是停用的，请到 EasyClash 里打开它".to_string());
     }
     let source = text_of(&items[index], "source");
     let manual = is_manual_item(&items[index]);
@@ -685,6 +676,8 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(Vec<Value>, EnabledChange
 /// 删除条目；返回（最新列表, 被删条目的名称 —— 调用方拼日志/提示用）。
 /// Clash 同步来的条目不可删（照 OmniProxy）：去 Clash 里删出口，下次同步自然摘掉。
 pub fn remove(id: &str) -> Result<(Vec<Value>, String), String> {
+    let snapshot = crate::server::core::clash::clash_snapshot_with(true);
+    let _guard = mutation_lock();
     let mut items = read_items();
     let Some(index) = items
         .iter()
@@ -692,8 +685,11 @@ pub fn remove(id: &str) -> Result<(Vec<Value>, String), String> {
     else {
         return Err(format!("代理「{id}」不存在"));
     };
-    if is_readonly(&items[index]) {
+    if is_subscription_item(&items[index]) {
         return Err(readonly_hint(&items[index]));
+    }
+    if !is_deletable_with(&items[index], &snapshot) {
+        return Err("该代理正在与 EasyClash 同步，不能删除（请到 EasyClash 里删；也可在本页关闭启用）".to_string());
     }
     let removed = items.remove(index);
     write_items(&items)?;
@@ -702,7 +698,7 @@ pub fn remove(id: &str) -> Result<(Vec<Value>, String), String> {
     Ok((list(), name))
 }
 
-// ─── Clash Verge 同步（全量镜像）─────────────────────────────
+// ─── EasyClash 同步（全量镜像）─────────────────────────────
 
 /// 同步结果：变更条数 + 失败原因（「Clash 没装」不是错误路径，见 `sync_clash`）
 pub struct ClashSyncReport {
@@ -729,8 +725,9 @@ struct SyncTarget {
 /// 手动条目从不被碰；镜像集合的判据是 `listenerUid`（条目里存的 Clash 出口 uid）。
 /// 手工改库造出的重复 uid（同一条 Clash 出口两条池条目）在收尾的 retain 里去重，
 /// 只留第一行 —— 结果自然收敛到一 uid 一条。
-pub fn sync_clash() -> ClashSyncReport {
-    let snapshot = crate::server::core::clash::clash_snapshot();
+pub fn sync_clash(force: bool) -> ClashSyncReport {
+    let snapshot = crate::server::core::clash::clash_snapshot_with(force);
+    let _guard = mutation_lock();
     if !snapshot.available {
         return ClashSyncReport {
             changes: 0,
@@ -747,7 +744,7 @@ pub fn sync_clash() -> ClashSyncReport {
     if snapshot.mixed_port.is_some() {
         targets.push(SyncTarget {
             uid: crate::server::core::clash::CLASH_MIXED_UID.to_string(),
-            name: "Clash 混合端口（按规则分流）".to_string(),
+            name: crate::server::core::clash::CLASH_MIXED_NAME.to_string(),
             enabled: true,
         });
     }
@@ -835,7 +832,7 @@ pub fn sync_clash() -> ClashSyncReport {
         }
         logging::log(
             "[Proxies]",
-            &format!("🔄 已同步 Clash Verge 出口（{changes} 项变更）"),
+            &format!("🔄 已同步 EasyClash 出口（{changes} 项变更）"),
         );
     }
     ClashSyncReport {
@@ -858,6 +855,7 @@ pub struct TestOutcome {
 
 /// 记下一次连通性测试的结果（前端行内「测试」与弹窗里的测试都走它）。
 pub fn record_test(id: &str, result: &TestOutcome) -> Result<Vec<Value>, String> {
+    let _guard = mutation_lock();
     let mut items = read_items();
     let Some(index) = items
         .iter()
@@ -897,6 +895,7 @@ pub fn record_test(id: &str, result: &TestOutcome) -> Result<Vec<Value>, String>
 pub fn prune_orphan_subscription_items(
     live_provider_ids: &std::collections::HashSet<String>,
 ) -> Result<usize, String> {
+    let _guard = mutation_lock();
     let mut items = read_items();
     let before = items.len();
     items.retain(|item| {
@@ -928,6 +927,7 @@ pub fn prune_orphan_subscription_items(
 /// 是 subscriptions/sub_kernel → proxy_pool），只认「source == subscription」
 /// 这一个形状约束。
 pub fn remove_subscription_orphan(id: &str) -> Result<(Vec<Value>, String), String> {
+    let _guard = mutation_lock();
     let mut items = read_items();
     let Some(index) = items
         .iter()
@@ -987,6 +987,7 @@ pub fn sync_subscription_nodes(
     targets: &[SubscriptionNodeTarget],
     referenced_ids: &std::collections::HashSet<String>,
 ) -> Result<usize, String> {
+    let _guard = mutation_lock();
     let mut items = read_items();
     // 读取失败时不把全部订阅当成删除：保留池并向上报告错误。
     let stored_providers = crate::server::core::subscriptions::live_ids()?;
@@ -1135,6 +1136,7 @@ fn merge_subscription_nodes(
 ///
 /// 保留 `lastTest`（历史读数，重启换端口后同样会留存）。返回变更条数。
 pub fn unprovision_subscription_nodes() -> Result<usize, String> {
+    let _guard = mutation_lock();
     let now = logging::now_ms();
     let mut items = read_items();
     let mut changes = 0usize;
@@ -1295,6 +1297,32 @@ pub fn subscription_entries_with_ports() -> Vec<(String, String, Option<u16>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_proxy_preserves_chain_flag_and_exact_credentials() {
+        let normalized = normalize_item(&json!({"name":"Chain", "host":"[::1]", "port":8080,
+            "username":" user ", "password":" pass ", "nonDirect":true}), None).unwrap();
+        assert_eq!(normalized["host"], "::1");
+        assert_eq!(normalized["username"], " user ");
+        assert_eq!(normalized["password"], " pass ");
+        let resolved = resolve_item(&normalized).unwrap();
+        let resolved = resolved.resolved().unwrap();
+        assert!(resolved.non_direct);
+        let input = json!({"name":"Edited", "host":"127.0.0.1", "port":8081});
+        assert_eq!(normalize_item(&input, Some(&normalized)).unwrap()["nonDirect"], true);
+        assert!(normalize_item(&json!({"name":"Invalid", "host":"https://example.com", "port":8080}), None).is_err());
+    }
+
+    #[test]
+    fn detached_clash_is_deletable_and_subscription_remains_managed() {
+        let snapshot = crate::server::core::clash::ClashSnapshot {
+            available: false, dir: None, mixed_port: None, socks_port: None, http_port: None,
+            listeners: Vec::new(), current_profile_uid: None, error: None,
+        };
+        assert!(is_deletable_with(&json!({"source":"manual"}), &snapshot));
+        assert!(is_deletable_with(&json!({"source":"clash", "listenerUid":"gone"}), &snapshot));
+        assert!(!is_deletable_with(&json!({"source":"subscription"}), &snapshot));
+    }
 
     #[test]
     fn supported_sources_keep_subscription_and_legacy_manual() {

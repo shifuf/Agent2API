@@ -1,10 +1,12 @@
 //! 固定只读行来源的出生版本；普通CRUD只维护/失效版本，不从JSON签发来源。
-//! 本仓库仅接CatPaw读取来源，外层另绑定原Db进程来源。
+//! MonkeyCode/豆包只有读取来源，外层另绑定Db进程来源。
 //! 不使用任务层只读ROLLBACK入口。COMMIT错误独立报告，不能推断已/未保存。
 
 mod bounded;
+pub(in crate::server::core::account_store) mod doubao_state;
 pub(super) mod ordinary;
 mod row_projection;
+pub(in crate::server::core::account_store) mod row_egress;
 mod row_source;
 mod storage;
 

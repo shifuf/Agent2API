@@ -114,6 +114,7 @@ export type RoutingWorkspace = {
   updatedAt: number
 }
 export type RouteAttempt = {
+  errorPolicy?: import('../../../ui-shared/routing-errors-types').ErrorPolicyRecord
   candidateId?: string
   memberId?: string
   provider?: string

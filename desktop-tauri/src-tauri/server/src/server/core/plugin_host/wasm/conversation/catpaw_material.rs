@@ -32,7 +32,6 @@ pub(in crate::server::core::plugin_host::wasm) struct CatPawMaterial {
     model: Value,
     // 除model/messages外全部原键，含未知扩展；省略/null/空数组不折成同一状态。
     parameters: Map<String, Value>,
-    _memory: Arc<super::super::catpaw_turn::budget::Allocation>,
 }
 
 impl CatPawMaterial {
@@ -48,7 +47,6 @@ impl CatPawMaterial {
             signal: Arc::downgrade(&call.signal), host: call.host.clone(), shared: call.shared.clone(),
             generation: call.generation, rpc: call.rpc, account: call.account.clone(),
             messages: messages.clone(), model: model.clone(),
-            _memory: call.memory.clone().ok_or_else(unavailable)?,
             parameters: object.iter().filter(|(key, _)| !matches!(key.as_str(), "model" | "messages"))
                 .map(|(key, value)| (key.clone(), value.clone())).collect(),
         };
@@ -97,7 +95,7 @@ fn check_call(call: &ConversationCall) -> Result<(), proto::WireError> {
         || call.signal.ended.is_cancelled() { return Err(unavailable()); }
     let state = call.signal.state.try_lock().map_err(|_| unavailable())?;
     if !state.guard_issued || state.consumer || state.execution.is_some() || state.source_issued
-        || state.http_submission { return Err(unavailable()); }
+        || state.task_issued || state.http_submission || state.record.is_some() { return Err(unavailable()); }
     call.with_current(|| Ok(())).map_err(|_| unavailable())
 }
 

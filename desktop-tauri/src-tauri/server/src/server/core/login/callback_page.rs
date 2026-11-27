@@ -10,10 +10,10 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::LoginCallbackSubmission;
+use crate::server::core::branding::DEFAULT_NAME;
 use crate::server::core::providers;
 use crate::server::errors::GatewayError;
 
-const DEFAULT_NAME: &str = "Agent2API";
 const CSP_HEADER: &str = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'";
 
 #[derive(Clone, Copy)]
@@ -114,6 +114,19 @@ pub(crate) fn submission_response(
     match result {
         Ok(LoginCallbackSubmission::Completed(_)) => success_response(provider),
         Ok(LoginCallbackSubmission::Accepted) => axum_response(200, &accepted_page(provider)),
+        Ok(LoginCallbackSubmission::Retry(message)) => {
+            let hint = format_reason_hint(&message);
+            axum_response(
+                400,
+                &CallbackPage {
+                    kind: CallbackKind::Error,
+                    provider,
+                    title: "登录未完成",
+                    desc: "本次授权未能完成，请返回 Agent2API 面板查看提示后重试。",
+                    hint: &hint,
+                },
+            )
+        }
         Ok(LoginCallbackSubmission::ContinueTo(_)) => axum_response(
             400,
             &CallbackPage {

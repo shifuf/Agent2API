@@ -31,6 +31,7 @@
  */
 
 import * as React from 'react'
+import { accountImportNotice } from '../../../ui-shared/account-import-result'
 import {
   CATEGORIES,
   CAPTCHA_POOL_FIELDS,
@@ -56,7 +57,6 @@ import {
   shared,
   toast,
   type AppSettings,
-  type CaptchaSetting,
   type ClineHeadersData,
   type GatewayBlocks,
   type ModelsDevState,
@@ -64,9 +64,14 @@ import {
   type PromptPatch,
 } from './settings-model'
 import {
+  INITIAL_PRIVACY, privacyStateFrom, type PrivacyPatch, type PrivacyPreviewResult,
+  type PrivacyState,
+} from './settings-privacy-model'
+import {
   INITIAL_SANITIZE, sanitizeStateFrom, type SanitizePatch, type SanitizeState,
 } from './settings-sanitize-model'
 import { t } from '../i18n'
+import { loadPricingSettings } from './model-pricing'
 import { retentionSavedMessage, retentionShrinkHead, type RetentionField } from './settings-retention-model'
 
 /* ─── 快照类型 ─────────────────────────────── */
@@ -91,13 +96,12 @@ export type BusyScope =
   | 'routing'
   | 'debug'
   | 'sanitize'
+  | 'privacy'
   | 'developerRoleCompat'
   | 'reasoningCollapse'
   | 'clineHeaders'
-  | 'zcodeVersion'
   | 'cors'
   | 'prompt'
-  | 'captcha'
   | 'modelsDev'
   | 'modelsDevRefresh'
   | 'export'
@@ -124,6 +128,7 @@ export type AppState = {
   lanPanel: boolean
   /** 轻量模式：关窗销毁界面进程（释放 WebView2 内存），托盘按需重建 */
   lightweightMode: boolean
+  hardwareAcceleration: boolean
   /** 本机在局域网里的 IP（查不到为 null，地址展示退化为占位符） */
   lanIp: string | null
   /** 网关端口（0 = 还没查到），拼局域网地址用 */
@@ -186,20 +191,6 @@ export type ClineHeadersState = {
 
 /** 网关面（/v1/*）跨域访问开关 */
 export type CorsState = { status: LoadStatus; on: boolean }
-
-/**
- * ZCode 客户端版本号（`/api/zcode/version`）。
- *
- * `version` 是**设置里存的值**，空串 = 用插件内置默认值。
- * `envOverride` 非空时说明环境变量 `ZCODE_APP_VERSION` 正压着它 ——
- * 界面要如实说出「这里填的值此刻不生效」，否则用户会对着一个改了没反应的
- * 输入框反复重试。
- */
-export type ZcodeVersionState = {
-  status: LoadStatus
-  version: string
-  envOverride: string
-}
 
 /**
  * models.dev 模型元数据：开关 + 「这份数据是什么时候的、有多少条」。
@@ -309,21 +300,13 @@ export type SettingsSnapshot = {
   routing: RoutingState
   debug: DebugState
   sanitize: SanitizeState
+  privacy: PrivacyState
   developerRoleCompat: DeveloperRoleCompatState
   reasoningCollapse: ReasoningCollapseState
   clineHeaders: ClineHeadersState
-  zcodeVersion: ZcodeVersionState
   cors: CorsState
   prompt: PromptState
   storage: StorageState
-  /**
-   * 机器人校验（ALTCHA）：两端各一个开关，`localPanel` 标出本进程是哪一端
-   * （桌面壳 true / 网页端 false），界面据此把「正在用的这一端」标出来。
-   *
-   * `available = false` 表示读不到后端状态（端点不可用），两张开关都置灰 ——
-   * 与 retention / cors 的降级口径一致。
-   */
-  captcha: { available: boolean; desktop: boolean; web: boolean; localPanel: boolean }
   /**
    * 面板账户（设置页「账户」分类）。
    *
@@ -433,6 +416,7 @@ const INITIAL: SettingsSnapshot = {
     lanAccess: false,
     lanPanel: false,
     lightweightMode: false,
+    hardwareAcceleration: true,
     lanIp: null,
     port: 0,
     adminRegistered: null,
@@ -448,10 +432,10 @@ const INITIAL: SettingsSnapshot = {
   routing: { status: 'loading', strategy: 'order', sticky: 'auto', failoverBackoff: true, sink: true, breakerEnabled: false },
   debug: { status: 'loading', on: false, count: null, limit: null },
   sanitize: INITIAL_SANITIZE,
+  privacy: INITIAL_PRIVACY,
   developerRoleCompat: { status: 'loading', on: false },
   reasoningCollapse: { status: 'loading', on: false },
   clineHeaders: { status: 'loading', defaults: {}, overrides: {}, effective: {} },
-  zcodeVersion: { status: 'loading', version: '', envOverride: '' },
   cors: { status: 'loading', on: false },
   prompt: {
     status: 'loading',
@@ -480,7 +464,6 @@ const INITIAL: SettingsSnapshot = {
     downstreamRaw: null,
     upstreamRaw: null,
   },
-  captcha: { available: true, desktop: false, web: false, localPanel: false },
   account: { status: 'loading', registered: false, username: '', password: null },
   modelsDev: { status: 'loading', enabled: true, source: '', updatedAt: 0, count: 0 },
   ioFailure: null,
@@ -578,6 +561,12 @@ function endBusy(): void {
  * 那不该改用户手点的默认分类（写偏好的是 selectCategory）。
  */
 export function showCategory(category?: string | null): void {
+  if (category === 'retry') {
+    const app = (window as unknown as { wbApp?: { showPage(page: string): void } }).wbApp
+    app?.showPage('routing')
+    window.dispatchEvent(new Event('wb:routing-errors-open'))
+    return
+  }
   const target = CATEGORIES.some(item => item.id === category)
     ? String(category)
     : CATEGORIES[0].id
@@ -595,7 +584,7 @@ export function selectCategory(category: string): void {
 export function restoreCategory(): void {
   let saved: string | null = null
   try { saved = localStorage.getItem(SETTINGS_CAT_KEY) } catch { saved = null }
-  showCategory(saved)
+  showCategory(saved === 'retry' ? 'general' : saved)
 }
 
 /**
@@ -627,7 +616,7 @@ export function renderSettings(data?: unknown): void {
     return
   }
   const record = data as Record<string, unknown>
-  // 主进程返回的字段一律按「严格 true」判定，缺字段时按关闭处理（与后端默认值一致）。
+  // 硬件加速缺字段默认开启；其余字段保持原有解析口径。
   // lanIp / port / adminRegistered 是旁路读数，不在启动设置的响应里 —— 保留当前值。
   publishApp({
     status: 'ready',
@@ -636,6 +625,7 @@ export function renderSettings(data?: unknown): void {
     lanAccess: record.lanAccess === true,
     lanPanel: record.lanPanel === true,
     lightweightMode: record.lightweightMode === true,
+    hardwareAcceleration: record.hardwareAcceleration !== false,
   })
 }
 
@@ -682,11 +672,12 @@ export async function saveToggle(kind: 'tray' | 'autostart' | 'lightweight', nex
   const patch: AppSettings = {
     closeToTray: kind === 'tray' ? next : previous.closeToTray,
     autostart: kind === 'autostart' ? next : previous.autostart,
-    // 局域网访问归「局域网访问」面板管（它有自己的确认与重启流程），
+    // 网络访问归「网关 → 网络访问」面板管（它有自己的确认与重启流程），
     // 全量覆盖的 patch 里原样带上磁盘现值，避免把它悄悄抹掉
     lanAccess: previous.lanAccess,
     lanPanel: previous.lanPanel,
     lightweightMode: kind === 'lightweight' ? next : previous.lightweightMode,
+    hardwareAcceleration: previous.hardwareAcceleration,
   }
   beginBusy('app')
   publishApp(patch)
@@ -747,7 +738,7 @@ export function resolveLanConfirm(accepted: boolean): void {
  */
 async function proceedEnable(): Promise<void> {
   const api = shared().workbuddyDesktop
-  if (!api?.panelAdminStatus) { toast(t('当前环境不支持局域网访问设置'), 'err'); return }
+  if (!api?.panelAdminStatus) { toast(t('当前环境不支持网络访问设置'), 'err'); return }
   beginBusy('lan')
   let registered: boolean
   try {
@@ -811,7 +802,7 @@ export function cancelLanRegister(): void {
 async function applyLan(enabled: boolean, panel: boolean): Promise<void> {
   if (busyScope) return
   const api = shared().workbuddyDesktop
-  if (!api?.changeLanAccess) { toast(t('当前环境不支持局域网访问设置'), 'err'); return }
+  if (!api?.changeLanAccess) { toast(t('当前环境不支持网络访问设置'), 'err'); return }
   beginBusy('lan')
   publishApp({ lanAccess: enabled, lanPanel: panel })
   try {
@@ -882,11 +873,16 @@ export async function importAccounts(): Promise<void> {
       added, updated, suffix, note: providerNote,
     })
 
+    const notice = accountImportNotice(result)
+    const message = failed || notice?.warning
+      ? t('导入完成：{summary}', { summary })
+      : t('✅ 导入完成：{summary}', { summary })
+    toast(notice ? `${message}\n${t(notice.text)}` : message, failed ? 'err' : notice?.warning ? 'warn' : 'ok')
     if (failed) {
-      toast(t('导入完成：{summary}', { summary }), 'err')
       // 失败明细只列前 3 条，与账号页批量操作的展示密度保持一致；
-      // 定义警告（customProvider 标记）没有账号语义，展示时注明归属
-      const detail = errors.slice(0, 3)
+      // 跳过项带 skipped 标记，不混入失败明细；定义警告注明归属
+      const failureItems = errors.filter(item => !item?.skipped)
+      const detail = failureItems.slice(0, 3)
         .map(item => {
           const label = item?.customProvider
             ? t('自定义提供商 {id}', { id: item?.id || t('(无 id)') })
@@ -895,9 +891,7 @@ export async function importAccounts(): Promise<void> {
           return t('{label}（{message}）', { label, message })
         })
         .join(t('；'))
-      publish({ ioFailure: { failed, detail, more: errors.length > 3 } })
-    } else {
-      toast(t('✅ 导入完成：{summary}', { summary }))
+      publish({ ioFailure: { failed, detail, more: failureItems.length > 3 } })
     }
 
     // 账号被改动（新增/更新）后让主界面立刻反映：账号列表、导航计数等；
@@ -1747,46 +1741,64 @@ export async function saveTimeoutField(field: NumberField, raw: string): Promise
 
 /* ─── 调试模式 / 指纹脱敏 ── */
 
+let debugRevision = 0
+
 export function renderDebug(data?: unknown): void {
   if (data === undefined) return
-  if (!data || typeof data !== 'object') {
-    publish({ debug: { status: 'unavailable', on: false, count: null, limit: null } })
+  const record = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown> : null
+  if (!record || typeof record.debugMode !== 'boolean') {
+    publish({ debug: { ...snapshot.debug, status: 'unavailable' } })
     return
   }
-  const record = data as Record<string, unknown>
   const count = Number(record.count)
   const limit = Number(record.limit)
   publish({
     debug: {
       status: 'ready',
-      on: record.debugMode === true,
+      on: record.debugMode,
       count: Number.isInteger(count) ? count : null,
       limit: Number.isInteger(limit) ? limit : null,
     },
   })
 }
 
-async function loadDebug(): Promise<void> {
+async function readDebug(): Promise<void> {
+  const revision = ++debugRevision
   try {
-    renderDebug(await shared().workbuddyDesktop?.getDebug())
+    const data = await shared().workbuddyDesktop?.getDebug()
+    if (revision === debugRevision) renderDebug(data ?? null)
   } catch (error) {
+    if (revision !== debugRevision) return
     console.warn('读取调试模式设置失败:', errorMessage(error))
     renderDebug(null)
   }
 }
 
+export async function loadDebug(): Promise<void> {
+  if (busyScope !== 'debug') await readDebug()
+}
+
 export async function saveDebug(next: boolean): Promise<void> {
-  // 忙碌中早退：受控开关的 checked 来自快照，不写快照即等于「还原这一下拨动」
-  if (busyScope) { repaint(); return }
+  if (busyScope || snapshot.debug.status !== 'ready') { repaint(); return }
+  // 保存开始后，先前的读取结果不能覆盖新状态。
+  const previous = snapshot.debug
+  debugRevision += 1
   beginBusy('debug')
-  publish({ debug: { ...snapshot.debug, on: next } })
+  publish({ debug: { ...previous, on: next } })
   try {
-    const saved = await shared().workbuddyDesktop?.saveDebug(next)
-    renderDebug(saved)
+    const bridge = shared().workbuddyDesktop
+    if (!bridge?.saveDebug) throw new Error(t('主进程桥不可用'))
+    const saved = await bridge.saveDebug(next)
+    renderDebug(saved ?? null)
+    if (snapshot.debug.status !== 'ready' || snapshot.debug.on !== next) {
+      throw new Error(t('未能读取调试模式设置，请稍后重试'))
+    }
     toast(next ? t('✅ 调试模式已开启') : t('✅ 调试模式已关闭'))
   } catch (error) {
     toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
-    await loadDebug() // 回滚到后端的真实值
+    publish({ debug: previous })
+    await readDebug()
   } finally {
     endBusy()
   }
@@ -1801,14 +1813,14 @@ async function loadSanitize(): Promise<void> {
   try {
     renderSanitize(await shared().workbuddyDesktop?.getSanitize())
   } catch (error) {
-    console.warn('读取出站指纹脱敏设置失败:', errorMessage(error))
+    console.warn('读取关键词替换设置失败:', errorMessage(error))
     renderSanitize(null)
   }
 }
 
 export async function saveSanitize(next: boolean): Promise<void> {
   await saveSanitizeConfig({ sanitizeBlacklistFingerprints: next }, next
-    ? t('✅ 出站指纹脱敏已开启') : t('已关闭出站指纹脱敏'))
+    ? t('✅ 关键词替换已开启') : t('已关闭关键词替换'))
 }
 
 export async function saveSanitizeConfig(patch: SanitizePatch, message?: string): Promise<boolean> {
@@ -1821,12 +1833,12 @@ export async function saveSanitizeConfig(patch: SanitizePatch, message?: string)
       ? patch.sanitizeBlacklistFingerprints : patch
     const data = await api.saveSanitize(request)
     const state = sanitizeStateFrom(data, snapshot.sanitize)
-    if (state.status !== 'ready') throw new Error(t('未能读取保存后的指纹脱敏设置'))
+    if (state.status !== 'ready') throw new Error(t('未能读取保存后的关键词替换设置'))
     publish({ sanitize: state })
     toast(
       state.saved
-        ? message ?? t('✅ 指纹脱敏设置已保存')
-        : t('指纹脱敏设置仅本次运行生效，写入数据库失败，请检查配置目录'),
+        ? message ?? t('✅ 关键词替换设置已保存')
+        : t('关键词替换设置仅本次运行生效，写入数据库失败，请检查配置目录'),
       state.saved ? 'ok' : 'err',
     )
     return true
@@ -1836,6 +1848,68 @@ export async function saveSanitizeConfig(patch: SanitizePatch, message?: string)
   } finally {
     endBusy()
   }
+}
+
+/* ─── 隐私脱敏 ── */
+
+export function renderPrivacy(data?: unknown): void {
+  if (data === undefined) return
+  publish({ privacy: privacyStateFrom(data, snapshot.privacy) })
+}
+
+async function loadPrivacy(): Promise<void> {
+  try {
+    renderPrivacy(await shared().workbuddyDesktop?.getPrivacy?.())
+  } catch (error) {
+    console.warn('读取隐私脱敏设置失败:', errorMessage(error))
+    renderPrivacy(null)
+  }
+}
+
+export async function refreshPrivacy(): Promise<void> {
+  await loadPrivacy()
+  toast(t('隐私脱敏设置已刷新'))
+}
+
+export async function savePrivacyConfig(patch: PrivacyPatch, message?: string): Promise<boolean> {
+  if (busyScope) { repaint(); return false }
+  beginBusy('privacy')
+  try {
+    const api = shared().workbuddyDesktop
+    if (!api?.savePrivacy) throw new Error(t('主进程桥不可用'))
+    const data = await api.savePrivacy(patch as Record<string, unknown>)
+    const state = privacyStateFrom(data, snapshot.privacy)
+    if (state.status !== 'ready') throw new Error(t('未能读取保存后的隐私脱敏设置'))
+    publish({ privacy: state })
+    toast(
+      state.saved
+        ? message ?? t('✅ 隐私脱敏设置已保存')
+        : t('隐私脱敏设置仅本次运行生效，写入数据库失败，请检查配置目录'),
+      state.saved ? 'ok' : 'err',
+    )
+    return true
+  } catch (error) {
+    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
+    return false
+  } finally {
+    endBusy()
+  }
+}
+
+export async function testPrivacyPreview(
+  text: string,
+  draftConfig: PrivacyPatch,
+): Promise<PrivacyPreviewResult> {
+  const api = shared().workbuddyDesktop
+  if (!api?.testPrivacy) throw new Error(t('主进程桥不可用'))
+  const res = await api.testPrivacy({
+    text,
+    config: draftConfig as Record<string, unknown>,
+  })
+  if (!res || typeof res !== 'object') {
+    throw new Error(t('模拟测试返回无效结果'))
+  }
+  return res as PrivacyPreviewResult
 }
 
 /* ─── 开发者角色兼容（developer 角色消息归一为 system）── */
@@ -1975,61 +2049,6 @@ export async function saveClineHeaders(overrides: Record<string, string>): Promi
   }
 }
 
-/* ─── ZCode 客户端版本号（上游按它决定活动套餐下不下发）── */
-
-export function renderZcodeVersion(data?: unknown): void {
-  if (data === undefined) return
-  if (!data || typeof data !== 'object') {
-    publish({ zcodeVersion: { status: 'unavailable', version: '', envOverride: '' } })
-    return
-  }
-  const source = data as { version?: unknown; envOverride?: unknown }
-  publish({
-    zcodeVersion: {
-      status: 'ready',
-      version: typeof source.version === 'string' ? source.version : '',
-      // null / 缺失统一成空串：视图层只需判「非空 = 环境变量压着」
-      envOverride: typeof source.envOverride === 'string' ? source.envOverride : '',
-    },
-  })
-}
-
-async function loadZcodeVersion(): Promise<void> {
-  try {
-    renderZcodeVersion(await shared().workbuddyDesktop?.getZcodeVersion())
-  } catch (error) {
-    console.warn('读取 ZCode 客户端版本号失败:', errorMessage(error))
-    renderZcodeVersion(null)
-  }
-}
-
-export async function refreshZcodeVersion(): Promise<void> {
-  await loadZcodeVersion()
-  toast(t('ZCode 版本号已刷新'))
-}
-
-/**
- * 保存版本号（空串 = 清空覆盖、回落插件内置默认值）。
- *
- * 后端只校验长度与字符集，**不校验「这个版本存在」** —— 上游的版本号对我们
- * 是黑盒。填错的表现是「还是探不到套餐」，所以保存后如实回读后端值，
- * 让用户看到落库的到底是什么。
- */
-export async function saveZcodeVersion(version: string): Promise<void> {
-  if (busyScope) { repaint(); return }
-  beginBusy('zcodeVersion')
-  try {
-    const saved = await shared().workbuddyDesktop?.saveZcodeVersion(version)
-    renderZcodeVersion(saved)
-    toast(version.trim() ? t('✅ ZCode 版本号已保存') : t('已清空，回落插件内置默认值'))
-  } catch (error) {
-    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
-    await loadZcodeVersion() // 回滚到后端的真实值
-  } finally {
-    endBusy()
-  }
-}
-
 /* ─── 网关面跨域访问（/v1/* 的 CORS，默认关）── */
 
 export function renderCors(data?: unknown): void {
@@ -2062,53 +2081,6 @@ export async function saveCors(next: boolean): Promise<void> {
   } catch (error) {
     toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
     await loadCors() // 回滚到后端的真实值
-  } finally {
-    endBusy()
-  }
-}
-
-/* ─── 机器人校验（面板登录 / 注册的 ALTCHA 开关，分两端）── */
-
-/** 把 `/api/captcha` 的响应折成快照（读与写后的回读共用一份解析） */
-function captchaState(state: CaptchaSetting | null | undefined): SettingsSnapshot['captcha'] {
-  if (!state || typeof state !== 'object') {
-    return { available: false, desktop: false, web: false, localPanel: false }
-  }
-  return {
-    available: true,
-    desktop: state.captchaDesktop === true,
-    web: state.captchaWeb === true,
-    localPanel: state.localPanel === true,
-  }
-}
-
-async function loadCaptcha(): Promise<void> {
-  try {
-    const state = await shared().workbuddyDesktop?.getCaptchaSetting()
-    publish({ captcha: captchaState(state) })
-  } catch (error) {
-    // 读失败降级禁用开关（照 retention 的模式）
-    publish({ captcha: captchaState(null) })
-    console.warn('读取机器人校验设置失败:', errorMessage(error))
-  }
-}
-
-/** 拨动某一端的开关（`side` 决定写哪个字段，另一端原样不动） */
-export async function saveCaptcha(side: 'desktop' | 'web', next: boolean): Promise<void> {
-  if (busyScope) { repaint(); return }
-  beginBusy('captcha')
-  // 乐观更新：只改拨动的那一端
-  publish({ captcha: { ...snapshot.captcha, [side]: next } })
-  const label = side === 'desktop' ? t('桌面端') : t('网页端')
-  try {
-    const state = await shared().workbuddyDesktop?.saveCaptchaSetting(
-      side === 'desktop' ? { captchaDesktop: next } : { captchaWeb: next },
-    )
-    publish({ captcha: captchaState(state) })
-    toast(next ? t('✅ 已开启「{label}」的机器人校验', { label }) : t('⚠️ 已关闭「{label}」的机器人校验', { label }))
-  } catch (error) {
-    toast(t('保存失败：{message}', { message: errorMessage(error) }), 'err')
-    await loadCaptcha()
   } finally {
     endBusy()
   }
@@ -2754,22 +2726,20 @@ let settingsOpened = false
 const categoryLoads = new Map<string, Promise<void>>()
 const loadedCategories = new Set<string>()
 
-function loadCategory(category: string): Promise<void> {
+function loadCategory(category: string, checkUpdate = false): Promise<void> {
   const pending = categoryLoads.get(category)
   if (pending) return pending
   if (loadedCategories.has(category) && category !== 'system' && category !== 'about') return Promise.resolve()
   const tasks: Record<string, (() => unknown)[]> = {
-    account: [loadAccount, loadCaptcha],
-    general: [loadSettings, loadLanExtras],
-    display: [],
-    gateway: [loadQueue, loadImageCompress, loadCaptchaPool, loadDeveloperRoleCompat, loadReasoningCollapse,
-      loadClineHeaders, loadZcodeVersion, loadPrompt, loadModelsDev, loadSanitize, loadDebug],
-    retry: [loadRetry],
+    account: [loadAccount],
+    general: [loadSettings, () => loadPricingSettings().catch(() => null)],
+    gateway: [loadSettings, loadLanExtras, loadQueue, loadImageCompress, loadCaptchaPool,
+      loadDeveloperRoleCompat, loadReasoningCollapse, loadClineHeaders, loadModelsDev, loadSanitize, loadDebug],
     timeout: [loadTimeouts],
-    security: [loadCors],
+    security: [loadCors, loadPrivacy],
     data: [loadRetention, loadStorage, reconnectDbRestore],
     system: [() => shared().wbSystemInfoPane?.load?.()],
-    about: [() => shared().wbUpdatePanel?.load?.()],
+    about: [() => checkUpdate ? shared().wbUpdatePanel?.check?.() : shared().wbUpdatePanel?.load?.()],
   }
   const task = Promise.resolve().then(async () => {
     await Promise.all((tasks[category] || []).map(run => run()))
@@ -2779,14 +2749,16 @@ function loadCategory(category: string): Promise<void> {
   return task
 }
 
-export async function load(): Promise<void> {
+export async function load({ checkUpdate = false }: { checkUpdate?: boolean } = {}): Promise<void> {
+  settingsOpened = false
   loadedCategories.clear()
-  restoreCategory()
+  if (checkUpdate) showCategory('about')
+  else restoreCategory()
   settingsOpened = true
   renderUnits()
   publish({ panelLogin: readPanelLogin() })
   window.dispatchEvent(new Event('wb:settings-load'))
-  await loadCategory(snapshot.category)
+  await loadCategory(snapshot.category, checkUpdate)
 }
 
 /* ─── 刷新按钮（各自的 toast 文案照旧） ─────── */
@@ -2833,7 +2805,7 @@ export async function refreshDebug(): Promise<void> {
 
 export async function refreshSanitize(): Promise<void> {
   await loadSanitize()
-  toast(t('指纹脱敏设置已刷新'))
+  toast(t('关键词替换设置已刷新'))
 }
 
 export async function refreshDeveloperRoleCompat(): Promise<void> {

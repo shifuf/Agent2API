@@ -9,13 +9,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::{bounded, unavailable, CatPawMaterial, ConversationEgress, EndState, Signal};
 use crate::server::core::plugin_host::wasm::context::{Context, Shared};
-use crate::server::core::plugin_host::{self as host, Host};
-use crate::server::core::proxies::ResolvedProxy;
+use crate::server::core::plugin_host::{self as host, account_egress::EgressError, Host};
+use crate::server::core::proxies::chain::SelectedPath;
 use crate::server::core::upstream::replay_guard::PreparationRef;
-use crate::server::core::upstream::cancellation::CancelToken;
 
 struct Source {
     signal: Arc<Signal>,
+    dispatch: crate::server::core::upstream::usage::DispatchTracker,
     host: Weak<Host>,
     shared: Weak<Shared>,
     generation: u64,
@@ -25,15 +25,13 @@ struct Source {
     session: String,
     client_stream: bool,
     deadline: Instant,
-    call_cancel: Option<Arc<CancelToken>>,
-    sink_cancel: CancellationToken,
+    call_cancel: CancellationToken,
     preparation: PreparationRef,
-    egress: Weak<ConversationEgress>,
+    egress: Result<Weak<ConversationEgress>, EgressError>,
     material: Arc<CatPawMaterial>,
     key_source: Option<Arc<crate::server::config::model_key_source::Source>>,
     output: Weak<super::super::catpaw_turn::output::OutputSlot>,
     capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
-    dispatch: crate::server::core::upstream::usage::DispatchTracker,
 }
 
 #[derive(Clone)]
@@ -64,28 +62,27 @@ impl Context {
             return Err(unavailable());
         }
         let key_source = call.key_source.clone();
-        if key_source.as_ref().is_none_or(|source| source.with_current(|| ()).is_none()
-            || !source.allows_provider("catpaw")) { return Err(unavailable()); }
+        if key_source.as_ref().is_some_and(|source| source.with_current(|| ()).is_none()) { return Err(unavailable()); }
         let client_stream = self.client_stream.ok_or_else(unavailable)?;
         let material = self.catpaw_material.as_ref()
             .filter(|material| material.matches_call(call)).cloned().ok_or_else(unavailable)?;
         let mut state = call.signal.state.try_lock().map_err(|_| unavailable())?;
         if state.consumer || state.execution.is_some() || !state.guard_issued
-            || state.source_issued || state.http_submission {
+            || state.task_issued || state.source_issued || state.http_submission || state.record.is_some() {
             return Err(unavailable());
         }
         call.with_current(|| Ok(())).map_err(|_| unavailable())?;
         let source = Arc::new(Source {
+            dispatch: call.dispatch.clone(),
             signal: call.signal.clone(), host: call.host.clone(), shared: call.shared.clone(),
             generation: call.generation, rpc: call.rpc, provider: call.provider.clone(), account: call.account.clone(),
-            session: call.session.clone(), client_stream, deadline: call.deadline,
-            call_cancel: call.call_cancel.clone(),
-            sink_cancel: self.sink.as_ref().ok_or_else(unavailable)?.cancel.clone(),
+            session: self.session.clone(), client_stream, deadline: self.call_deadline,
+            call_cancel: self.sink.as_ref().ok_or_else(unavailable)?.cancel.clone(),
             preparation: call.preparation.clone(),
-            egress: Arc::downgrade(&call.egress),
+            egress: call.egress.as_ref().map(Arc::downgrade).map_err(|error| *error),
             material, key_source,
             output: call.output.as_ref().map(Arc::downgrade).ok_or_else(unavailable)?,
-            capture: call.capture.clone(), dispatch: call.dispatch.clone(),
+            capture: self.trace.as_str().and_then(host::script::capture_for_trace),
         });
         state.source_issued = true;
         Ok(SourceRef { source })
@@ -93,7 +90,8 @@ impl Context {
 }
 
 impl SourceRef {
-    pub(in crate::server::core::plugin_host::wasm) fn dispatch_tracker(&self) -> &crate::server::core::upstream::usage::DispatchTracker { &self.source.dispatch }
+    pub(in crate::server::core::plugin_host::wasm) fn dispatch_tracker(&self)
+        -> crate::server::core::upstream::usage::DispatchTracker { self.source.dispatch.clone() }
     pub(in crate::server::core::plugin_host::wasm) fn provider(&self) -> &str { &self.source.provider }
     pub(in crate::server::core::plugin_host::wasm) fn material(&self) -> &CatPawMaterial { self.source.material.as_ref() }
     pub(in crate::server::core::plugin_host::wasm) fn account(&self) -> &str { &self.source.account }
@@ -143,8 +141,15 @@ impl SourceRef {
         self.with_submission_gate(|_| Ok(()))
     }
 
-    pub(in crate::server::core::plugin_host::wasm) fn take_egress(&self) -> Result<Option<ResolvedProxy>, proto::WireError> {
-        self.with_submission_gate(|_| self.source.egress.upgrade().ok_or_else(unavailable)?.take())
+    pub(in crate::server::core::plugin_host::wasm) fn take_egress(&self) -> Result<SelectedPath, proto::WireError> {
+        self.with_submission_gate(|_| {
+            let egress = self.source.egress.as_ref().map_err(|_| unavailable())?
+                .upgrade().ok_or_else(unavailable)?;
+            if !egress.matches(&Arc::downgrade(&self.source.signal), self.provider(), self.account()) {
+                return Err(unavailable());
+            }
+            egress.take_path().map_err(|_| unavailable())
+        })
     }
 
     /// 回调只持原调用门同步核对账号并转换状态；不可等待、联网或反向进入调用门。
@@ -154,7 +159,7 @@ impl SourceRef {
     ) -> Result<R, proto::WireError> {
         match &self.source.key_source {
             Some(source) => source.with_current(|| self.with_submission_gate_inner(action)).ok_or_else(unavailable)?,
-            None => Err(unavailable()),
+            None => self.with_submission_gate_inner(action),
         }
     }
 
@@ -164,13 +169,14 @@ impl SourceRef {
     ) -> Result<R, proto::WireError> {
         let state = self.source.signal.state.lock().map_err(|_| unavailable())?;
         if !state.guard_issued || !state.source_issued || state.consumer || state.execution.is_some()
-            || self.source.deadline <= Instant::now()
-            || (self.source.call_cancel.as_ref().is_some_and(|token| token.is_cancelled()) || self.source.sink_cancel.is_cancelled()) {
+            || state.task_issued || state.record.is_some() || self.source.deadline <= Instant::now()
+            || self.source.call_cancel.is_cancelled() {
             return Err(unavailable());
         }
         let host = self.source.host.upgrade().ok_or_else(unavailable)?;
         let shared = self.source.shared.upgrade().ok_or_else(unavailable)?;
         if self.source.rpc <= 0 || self.source.generation == 0
+            || host::runtime::admission_closed()
             || host::registry::is_switching(self.provider())
             || !host::serves_provider(self.provider())
             || !host::host_for_provider(self.provider()).is_some_and(|current| Arc::ptr_eq(&current, &host)) {
@@ -188,6 +194,10 @@ impl SourceRef {
 }
 
 impl SourceRef {
+    pub(in crate::server::core::plugin_host::wasm) fn confirm_unsubmitted_rejection(&self) {
+        self.source.preparation.confirm_unsubmitted_http_rejection();
+    }
+
     pub(in crate::server::core::plugin_host::wasm) fn lock_permanent_replay(&self) {
         self.source.preparation.lock_permanent_replay_block();
     }
@@ -196,7 +206,7 @@ impl SourceRef {
 impl SourceGate<'_> {
     pub(in crate::server::core::plugin_host::wasm) fn freeze_replay(&self) -> Result<(), proto::WireError> {
         if self.state.consumer || self.state.execution.is_some() || self.source.deadline <= Instant::now()
-            || (self.source.call_cancel.as_ref().is_some_and(|token| token.is_cancelled()) || self.source.sink_cancel.is_cancelled()) {
+            || self.source.call_cancel.is_cancelled() {
             return Err(unavailable());
         }
         self.source.preparation.freeze().map_err(|_| unavailable())

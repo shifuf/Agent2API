@@ -69,7 +69,7 @@ async fn identity(context: &mut Context, params: &Value) -> Result<Value, proto:
     let url = "https://openapi.qoder.sh/sash/api/v1/me/campaigns?forceRefresh=true";
     context.shared.options.check_url(url, false)?;
     let selected = crate::server::core::proxies::ResolvedProxy::from_json(&context.proxy).map_err(|_| invalid())?;
-    let client = super::fixed_http::FrozenHttpClient::from_selected(selected).await.map_err(|_| invalid())?;
+    let client = crate::server::core::egress::managed::FrozenHttpClient::from_selected(selected).await.map_err(|_| invalid())?;
     let work = async {
         let mut response = client.client().map_err(|_| invalid())?.get(url)
             .header("Authorization", format!("Bearer {access}"))
@@ -80,7 +80,7 @@ async fn identity(context: &mut Context, params: &Value) -> Result<Value, proto:
             if bytes.len().saturating_add(chunk.len()) > 4 * 1024 * 1024 { return Err(invalid()); }
             bytes.extend_from_slice(&chunk);
         }
-        let value: Value = super::strict_json::parse_object(&bytes, 4 * 1024 * 1024).map_err(|_| invalid())?;
+        let value: Value = super::managed_task::declaration::parse_object(&bytes, 4 * 1024 * 1024).map_err(|_| invalid())?;
         let uid = value["data"]["uid"].as_str().or_else(|| value["uid"].as_str()).ok_or_else(invalid)?;
         if uid != expected_uid { return Err(invalid()); }
         Ok(uid.to_string())

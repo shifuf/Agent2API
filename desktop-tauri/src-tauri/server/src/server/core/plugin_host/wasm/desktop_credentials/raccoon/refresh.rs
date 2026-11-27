@@ -183,7 +183,7 @@ impl Job {
         if self.shared.cancel.is_cancelled() { return Err(changed()); }
         native::authorized_builtin("raccoon", HELPER_RACCOON_REFRESH)?;
         let store = crate::server::core::account_store::plugin_accounts::shared().ok_or_else(invalid)?;
-        let record = store.plugin_host_account(&self.account).ok_or_else(invalid)?;
+        let record = store.plugin_account(&self.account).ok_or_else(invalid)?;
         if super::super::account_projection(&record) != self.reference { return Err(changed()); }
         Ok(())
     }

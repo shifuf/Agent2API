@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::server::db::Db;
 
 pub const KEY: &str = "panelBranding";
-const DEFAULT_NAME: &str = "Agent2API";
+pub const DEFAULT_NAME: &str = "Agent2API";
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default, Deserialize, Serialize)]

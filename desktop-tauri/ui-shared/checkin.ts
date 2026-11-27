@@ -1,3 +1,6 @@
+import type { CampaignEntry } from './checkin-campaign-types'
+import type { PluginTaskRow } from './plugin-task-types'
+
 export type DailyCheckinStatus = 'claimed' | 'done' | 'confirming' | 'inactive' | 'ineligible' | 'captcha' | 'failed'
 
 export type DailyCheckinState = {
@@ -6,7 +9,8 @@ export type DailyCheckinState = {
   completedCount: number
   totalCount: number
   sourcesComplete: boolean
-  kind?: 'plans'
+  kind?: 'plans' | 'rolling'
+  until?: number | null
   status?: DailyCheckinStatus
   message?: string
   retryAt?: number | null
@@ -38,14 +42,14 @@ export type ProviderGroup = {
 
 export type OutOfScope = { label: string; reason: string; count: number }
 
-export type CheckinSection = 'daily' | 'onboarding' | 'plans' | 'growth'
+export type CheckinSection = 'daily' | 'benefits'
 
 export const CHECKIN_SECTION_OPTIONS = [
   { value: 'daily', label: '每日签到' },
-  { value: 'onboarding', label: '新手福利' },
-  { value: 'plans', label: '活动福利' },
-  { value: 'growth', label: '成长任务' },
+  { value: 'benefits', label: '福利与任务' },
 ] as const
+
+export type BenefitKind = 'all' | 'onboarding' | 'activity' | 'growth'
 
 export type OnboardingSettlement = {
   at: number
@@ -155,6 +159,53 @@ export type ScheduleEntry = {
   lastResult: CheckinResult | null
 }
 
+export type ActivityStepFailure = {
+  model?: string
+  status?: number
+  message?: string
+  msg?: string
+}
+
+export type ActivityStepResult = {
+  succeeded?: boolean
+  uncertain?: boolean
+  model?: string | null
+  conversationId?: string | null
+  msg?: string | null
+  failures?: ActivityStepFailure[]
+}
+
+export type ActivityStepSnapshot = {
+  day?: string | null
+  done?: boolean
+  pending?: boolean
+  model?: string | null
+  at?: number | null
+  reason?: string | null
+  status?: number | null
+  resetAt?: number | null
+}
+
+export type ActivityRunStatus = {
+  job?: {
+    running?: boolean
+    cancelled?: boolean
+    startedAt?: number | null
+    finishedAt?: number | null
+    until?: number | null
+  } | null
+  last?: {
+    at?: number | null
+    claim?: CheckinResultRow['claim']
+    activity?: CheckinResultRow['activity']
+  } | null
+  steps?: {
+    model?: ActivityStepSnapshot | null
+    web?: ActivityStepSnapshot | null
+    report?: ActivityStepSnapshot | null
+  } | null
+} | null
+
 export type CheckinResultRow = {
   id?: string
   name?: string
@@ -170,10 +221,15 @@ export type CheckinResultRow = {
     points?: number
   } | null
   activity?: {
-    error?: string
+    mode?: string | null
+    error?: string | null
+    summary?: string | null
+    modelCallsSkipped?: boolean
     pokeSucceeded?: boolean
-    report?: { succeeded?: boolean }
-    webConversation?: { succeeded?: boolean }
+    pokeModel?: string | null
+    poke?: ActivityStepResult | null
+    report?: { succeeded?: boolean; uncertain?: boolean; streakDays?: number | null; msg?: string | null } | null
+    webConversation?: ActivityStepResult | null
   } | null
 }
 
@@ -223,6 +279,7 @@ export type KeepaliveState = {
 }
 
 export type TravelState = {
+  engine?: 'wasm_tasks'
   enabled: boolean
   available?: boolean
   pausedReason?: string | null
@@ -280,12 +337,15 @@ export type CheckinCenter = {
   extras: {
     onboarding: OnboardingEntry[]
     plans: PlanEntry[]
+    campaigns?: CampaignEntry[]
     growth: GrowthEntry[]
   }
   auto: AutoState
   keepalive: KeepaliveState
   travel: TravelState
+  pluginTasks?: PluginTaskRow[]
   history: HistoryRow[]
+  recordsTotal?: number
   adminPanels: string[]
   checkinFeatures: Record<string, {
     description?: string | null

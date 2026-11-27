@@ -1,12 +1,9 @@
-use serde_json::{json, Value};
-use super::{sql, AccountStore};
 mod strict;
 
+use serde_json::{json, Value};
+use super::{sql, AccountStore};
+
 impl AccountStore {
-    pub(crate) fn plugin_verification_snapshot(&self, provider: &str, id: &str) -> Option<Value> {
-        let record = self.plugin_account(id)?;
-        (record["id"].as_str() == Some(id) && record["provider"].as_str() == Some(provider)).then_some(record)
-    }
     pub(crate) fn plugin_state_revision(&self) -> u64 {
         self.database().map(|db| db.account_revision()).unwrap_or(0)
     }

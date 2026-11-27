@@ -14,7 +14,7 @@ export type PluginTaskRun = {
 export type PluginTaskRow = {
   provider: string
   providerLabel?: string
-  category?: PluginTaskCategory
+  category: PluginTaskCategory
   task: {
     id: string
     label: string
@@ -26,7 +26,7 @@ export type PluginTaskRow = {
   }
   runs: PluginTaskRun[]
   unavailable?: string | null
-  operation?: { running: boolean; startedAt?: number; finishedAt?: number; error?: string | null; message?: string | null }
+  operation?: { active: boolean; at?: number; manual?: boolean; skipped?: boolean; interrupted?: boolean; error?: string | null }
 }
 
 export type PluginTaskRequest = <T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown) => Promise<T>
@@ -36,5 +36,5 @@ export function isCheckinTask(row: PluginTaskRow): boolean {
 }
 
 export function pluginTaskRunning(row: PluginTaskRow): boolean {
-  return row.operation?.running === true || row.runs.some(run => run.running)
+  return row.operation?.active === true || row.runs.some(run => run.running)
 }

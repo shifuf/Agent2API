@@ -8,14 +8,14 @@ pub fn raw_body_text(bytes: &[u8]) -> Option<String> {
 }
 
 pub fn capture_raw_body(bytes: &[u8]) -> Option<String> {
-    if !crate::server::core::debug_traffic::enabled() {
+    if crate::server::core::privacy::private_log() || !crate::server::core::debug_traffic::enabled() {
         return None;
     }
     raw_body_text(bytes)
 }
 
 pub fn capture_raw_json<T: serde::Serialize>(value: &T) -> Option<String> {
-    if crate::server::core::privacy::ACTIVE.try_with(|_| ()).is_ok() || !crate::server::core::debug_traffic::enabled() {
+    if crate::server::core::privacy::private_log() || !crate::server::core::debug_traffic::enabled() {
         return None;
     }
     serde_json::to_string(value).ok()
@@ -28,7 +28,7 @@ pub(super) struct RawCapture {
 
 impl RawCapture {
     pub(super) fn new(enabled: bool) -> Self {
-        Self { enabled, buf: Vec::new() }
+        Self { enabled: enabled && !crate::server::core::privacy::private_log(), buf: Vec::new() }
     }
 
     pub(super) fn push(&mut self, chunk: &[u8]) {

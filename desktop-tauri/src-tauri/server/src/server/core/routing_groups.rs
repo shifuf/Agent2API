@@ -135,18 +135,37 @@ fn member_account_unavailable(account: &Value, upstream_model: &str) -> Option<&
 }
 
 pub fn project(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>) -> GroupProjection {
-    let profiles = super::routing_discovery::effective_profiles(&config::routing_profiles(), accounts);
-    project_with_groups(group, &profiles.groups, accounts, needs, scope)
+    project_with_vision(group, accounts, needs, scope, None)
 }
 
 pub fn project_with_groups(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>) -> GroupProjection {
+    project_with_groups_and_vision(group, groups, accounts, needs, scope, None)
+}
+
+pub fn project_with_vision(group: &RoutingGroup, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>,
+    vision: Option<&config::vision_compat::VisionSettings>) -> GroupProjection {
+    let profiles = super::routing_discovery::effective_profiles(&config::routing_profiles(), accounts);
+    project_with_groups_and_vision(group, &profiles.groups, accounts, needs, scope, vision)
+}
+
+pub fn project_with_groups_and_vision(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>, accounts: &[Value],
+    needs: &RequestNeeds, scope: Option<&KeyScope>, vision: Option<&config::vision_compat::VisionSettings>) -> GroupProjection {
     let mut providers: HashSet<String> = accounts.iter().map(|account| routing::provider_of(account).to_string()).collect();
     for group in std::iter::once(group).chain(groups.values()) {
         providers.extend(group.members.iter().filter(|member| member.group.is_empty()).map(|member| member.provider.clone()));
     }
     let active: HashSet<_> = providers.iter().filter(|id| provider_active(id)).cloned().collect();
-    let catalog = providers.into_iter().map(|id| { let models = manifest(&id); (id, models) }).collect();
-    project_catalog(group, groups, accounts, needs, scope, &catalog, &active)
+    let catalog: BTreeMap<_, _> = providers.into_iter().map(|id| { let models = manifest(&id); (id, models) }).collect();
+    let mut projection = project_catalog_with_vision(group, groups, accounts, needs, scope, &catalog, &active, vision);
+    if needs.images && vision.is_some() {
+        let native = |account: &Value| {
+            let provider = routing::provider_of(account);
+            candidate_model(account).and_then(|model| catalog.get(provider)?.iter().find(|item| model_id(item).eq_ignore_ascii_case(model)))
+                .and_then(|item| capability::images_for_channel(provider, item)) == Some(true)
+        };
+        if projection.accounts.iter().any(native) { projection.accounts.retain(native); }
+    }
+    projection
 }
 
 pub fn dynamic_member_id(provider: &str, model: &str) -> String {
@@ -241,6 +260,10 @@ fn resolve_members(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>
 }
 
 fn project_catalog(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>, manifests: &BTreeMap<String, Vec<Value>>, active: &HashSet<String>) -> GroupProjection {
+    project_catalog_with_vision(group, groups, accounts, needs, scope, manifests, active, None)
+}
+
+fn project_catalog_with_vision(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>, accounts: &[Value], needs: &RequestNeeds, scope: Option<&KeyScope>, manifests: &BTreeMap<String, Vec<Value>>, active: &HashSet<String>, vision: Option<&config::vision_compat::VisionSettings>) -> GroupProjection {
     let mut result = GroupProjection::default();
     if !key_scope::allows_model(scope, &group.model) {
         result.blocked.push(json!({"id":group.id,"state":"unavailable","reason":"网关 Key 不允许此路由组模型"}));
@@ -258,7 +281,13 @@ fn project_catalog(group: &RoutingGroup, groups: &BTreeMap<String, RoutingGroup>
             else if let Some(item) = &item {
                 if item.get("enabled") == Some(&Value::Bool(false)) { Some("上游模型已停用".to_string()) }
                 else if providers::images::model_is_image(item) != group.kind.is_image() { Some("成员模型与路由组的类型不匹配".to_string()) }
-                else if group.kind.is_image() { None } else { needs.reason(item) }
+                else if group.kind.is_image() { None } else {
+                    let mut requirements = needs.clone();
+                    if vision.is_some_and(|settings| settings.rule_for_group(&member.provider, &member.model, &group.model).is_some()) {
+                        requirements.images = false;
+                    }
+                    requirements.reason(item)
+                }
             } else { Some("模型已不在提供商目录中，配置保留但不参与转发".to_string()) };
         let actual = item.as_ref().map(model_id).unwrap_or_else(|| member.model.clone());
         if let Some(reason) = reason {

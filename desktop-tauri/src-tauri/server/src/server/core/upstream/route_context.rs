@@ -27,6 +27,11 @@ pub(crate) struct RequestRouting {
     configuration_profiles: std::sync::Arc<config::RoutingProfiles>,
     configuration_settings: config::RoutingSettings,
     positions: HashMap<String, usize>,
+    account_id: Option<String>,
+    require_account: bool,
+    pub strict_vision: bool,
+    vision_model: Option<String>,
+    image_model: Option<String>,
 }
 
 impl RequestRouting {
@@ -69,6 +74,7 @@ impl RequestRouting {
         };
         Self { settings: profiles.settings_for(model, base), profile: profiles.effective(model).cloned(),
             scope: profiles.scope(model).to_string(), captured_at: crate::server::logging::now_ms(), group: None,
+            account_id: None, require_account: false, strict_vision: false, vision_model: None, image_model: None,
             group_projection: Default::default(), vision_target: None, source_test: None, profiles: profiles.clone(), excluded: Vec::new(), rule_trace: Vec::new(), turn_id: String::new(),
             account_snapshot: accounts.to_vec(), classifier_stack: Vec::new(), retry_candidate: None, attempt_health: Default::default(), rotation_cursors: Default::default(), configuration_profiles, configuration_settings: base, positions: ordered.iter().enumerate().filter_map(|(index, account)|
                 routing::account_id(account).map(|id| (id.to_string(), index))).collect() }
@@ -76,6 +82,13 @@ impl RequestRouting {
 
     pub fn capture_request(model: &str, store: &crate::server::core::account_store::store::AccountStore,
         body: &Value, scope: Option<&crate::server::core::key_scope::KeyScope>, ignore: bool,
+        images: Option<crate::server::core::providers::images::ImageOperation>) -> Result<Self, crate::server::errors::GatewayError> {
+        Self::capture_request_with_vision(model, store, body, scope, ignore, None, images)
+    }
+
+    pub(super) fn capture_request_with_vision(model: &str, store: &crate::server::core::account_store::store::AccountStore,
+        body: &Value, scope: Option<&crate::server::core::key_scope::KeyScope>, ignore: bool,
+        vision: Option<&config::vision_compat::VisionSettings>,
         images: Option<crate::server::core::providers::images::ImageOperation>) -> Result<Self, crate::server::errors::GatewayError> {
         let (configuration_profiles, base) = config::routing_snapshot();
         let snapshot = store.routing_snapshot();
@@ -89,8 +102,14 @@ impl RequestRouting {
         }
         let mut routing = Self::capture_with(model, &accounts, &profiles, base, configuration_profiles);
         routing.turn_id = turn_identity(body);
+        routing.account_id = scope.and_then(|scope| scope.account_id()).map(str::to_string);
+        routing.require_account = scope.is_some_and(|scope| scope.requires_account());
+        if let Some(id) = &routing.account_id { routing.positions.retain(|account, _| account == id); }
+        if images.is_some() && routing.require_account {
+            routing.image_model = Some(model.to_owned());
+        }
         if ignore { routing.source_test = Some(model.to_string()); }
-        if !ignore {
+        if !ignore && routing.image_model.is_none() {
             if let Some(group) = profiles.group_for_model(model).cloned() {
                 if group.kind.is_image() != images.is_some() {
                     return Err(crate::server::errors::GatewayError::bad_request("路由组类型与请求端点不匹配"));
@@ -98,7 +117,8 @@ impl RequestRouting {
                 if !crate::server::core::key_scope::allows_model(scope, &group.model) {
                     return Err(crate::server::errors::GatewayError::with_status(404, "此路由组不在网关 Key 的可用模型列表里").with_code("model_not_found"));
                 }
-                routing.group_projection = routing_groups::project_with_groups(&group, &profiles.groups, &accounts, &RequestNeeds::from_body(body), scope);
+                let needs = RequestNeeds::from_body(body);
+                routing.group_projection = routing_groups::project_with_groups_and_vision(&group, &profiles.groups, &accounts, &needs, scope, vision);
                 if let Some(operation) = images {
                     let projection = &mut routing.group_projection;
                     projection.accounts.retain(|account| {
@@ -153,6 +173,14 @@ impl RequestRouting {
         ordered
     }
 
+    pub fn requires_account(&self) -> bool {
+        self.require_account
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+
     pub fn accounts(&self, accounts: Vec<Value>) -> Vec<Value> {
         if let Some(model) = &self.source_test {
             return accounts.into_iter().map(|mut account| {
@@ -171,7 +199,8 @@ impl RequestRouting {
             return self.group_projection.accounts.iter().filter_map(|candidate| {
                 if self.excluded.contains(&routing_groups::attempt_key(candidate)) { return None; }
                 let mut current = accounts.iter().find(|account| routing::account_id(account) == routing::account_id(candidate)
-                    && routing::provider_of(account) == routing::provider_of(candidate))?.clone();
+                    && routing::provider_of(account) == routing::provider_of(candidate)
+                    && self.account_id.as_deref().map_or(true, |id| routing::account_id(account) == Some(id)))?.clone();
                 for (key, value) in candidate.as_object().into_iter().flatten().filter(|(key, _)| key.starts_with("routing")) { current[key] = value.clone(); }
                 Some(current)
             }).collect();
@@ -180,9 +209,62 @@ impl RequestRouting {
             .is_some_and(|id| self.positions.contains_key(id))).collect();
         accounts.sort_by_key(|account| routing::account_id(account).and_then(|id| self.positions.get(id)).copied().unwrap_or(usize::MAX));
         for (index, account) in accounts.iter_mut().enumerate() {
-            if let Some(object) = account.as_object_mut() { object.insert("routingPriority".to_string(), index.into()); }
+            if let Some(object) = account.as_object_mut() {
+                object.insert("routingPriority".to_string(), index.into());
+                if let Some(model) = &self.vision_model { object.insert("routingModel".into(), model.clone().into()); }
+                if let Some(model) = &self.image_model { object.insert("routingModel".into(), model.clone().into()); }
+            }
         }
         accounts
+    }
+
+    pub(super) fn for_vision_target(&self, store: &crate::server::core::account_store::AccountStore,
+        provider: &str, model: &str, scope: Option<&crate::server::core::key_scope::KeyScope>,
+        pinned: Option<&str>, candidate: Option<&str>, needs: Option<&RequestNeeds>) -> Result<Self, crate::server::errors::GatewayError> {
+        use crate::server::errors::GatewayError;
+        let mut next = self.clone();
+        if let Some(current_group) = &self.group {
+            let profiles = config::routing_profiles();
+            if profiles.group_for_model(&current_group.model).is_none_or(|group| group.id != current_group.id) {
+                return Err(GatewayError::with_status(409, "所选路由组已删除或入口已变更，图片兼容已停止"));
+            }
+        }
+        next.strict_vision = true;
+        next.vision_model = Some(model.to_string());
+        if let Some(group) = &self.group {
+            if let Some(needs) = needs {
+                let snapshot = store.routing_snapshot();
+                let accounts: Vec<_> = snapshot.accounts.iter().map(|account| account.as_ref().clone()).collect();
+                next.group_projection = routing_groups::project_with_groups(group, &next.profiles.groups, &accounts, needs, scope);
+            }
+            next.group_projection.accounts.retain(|account| routing::provider_of(account) == provider
+                && routing_groups::candidate_model(account).is_some_and(|value| value.eq_ignore_ascii_case(model))
+                && pinned.is_none_or(|id| routing::account_id(account) == Some(id))
+                && candidate.is_none_or(|id| routing_groups::attempt_key(account) == id));
+            if next.group_projection.accounts.is_empty() {
+                return Err(GatewayError::with_status(403, "视觉目标不在所选路由组的参与成员内")
+                    .with_code("vision_target_outside_route"));
+            }
+        } else {
+            if !self.providers(vec![provider.to_string()]).contains(&provider.to_string()) {
+                return Err(GatewayError::with_status(403, "视觉提供商未参与所选路由，请检查目标模型的路由配置")
+                    .with_code("vision_target_outside_route"));
+            }
+            next.positions.retain(|id, _| pinned.is_none_or(|pinned| pinned == id));
+            if next.positions.is_empty() {
+                return Err(GatewayError::with_status(503, "当前权限和目标路由内没有参与图片处理的账号")
+                    .with_code("vision_target_unavailable"));
+            }
+        }
+        Ok(next)
+    }
+
+    pub(super) fn cache_identity(&self) -> String {
+        let mut accounts: Vec<_> = self.positions.iter().map(|(id, position)| (id, position)).collect();
+        accounts.sort_by_key(|(id, _)| *id);
+        let candidates: Vec<_> = self.group_projection.accounts.iter().map(|account| routing_groups::attempt_key(account)).collect();
+        json!({ "scope": self.scope, "accounts": accounts, "group": self.group, "candidates": candidates,
+            "account": self.account_id, "requireAccount": self.require_account }).to_string()
     }
 
     pub fn json(&self) -> Value {
@@ -218,6 +300,56 @@ pub(crate) fn turn_identity(body: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_image_accounts(run: impl FnOnce(&crate::server::core::account_store::AccountStore)) {
+        use crate::server::core::account_store::{AccountStore, state::{AccountState, StoredAccount}};
+        let (db, _temp) = crate::server::db::test_temp::TempDb::open("restricted-image-route");
+        config::init(Some(db.clone()));
+        let store = AccountStore::with_db(Some(db));
+        let accounts = ["fixed-image-account", "other-image-account"].into_iter().map(|id| {
+            StoredAccount::from_value(json!({"id":id,"provider":"custom-image-fixture","enabled":true})).unwrap()
+        }).collect();
+        store.with_lock(|guard| store.save_locked(&AccountState { accounts, priority_scope: None }, guard)).unwrap();
+        run(&store);
+    }
+
+    #[test]
+    fn restricted_image_target_keeps_its_fixed_account_and_raw_model() {
+        crate::test_support::isolated(concat!(module_path!(), "::restricted_image_target_keeps_its_fixed_account_and_raw_model"), || {
+            with_image_accounts(|store| {
+                use crate::server::core::{key_scope::KeyScope, providers::images::ImageOperation};
+                let scope = KeyScope::provider_only("custom-image-fixture")
+                    .restrict_image_target("custom-image-fixture", "fixed-image-account").unwrap();
+                let body = json!({"model":"Internal-Pixels"});
+                let route = RequestRouting::capture_request("Internal-Pixels", store, &body,
+                    Some(&scope), false, Some(ImageOperation::Generate)).unwrap();
+                let accounts = store.routing_snapshot().accounts.iter().map(|row| row.as_ref().clone()).collect();
+                let selected = route.accounts(accounts);
+                assert_eq!(selected.len(), 1);
+                assert_eq!(selected[0]["id"], "fixed-image-account");
+                assert_eq!(selected[0]["routingModel"], "Internal-Pixels");
+                assert!(route.source_test.is_none(), "image targets must retain normal model and Key gates");
+            });
+        });
+    }
+
+    #[test]
+    fn ordinary_image_key_scope_does_not_select_an_internal_target() {
+        crate::test_support::isolated(concat!(module_path!(), "::ordinary_image_key_scope_does_not_select_an_internal_target"), || {
+            with_image_accounts(|store| {
+                use crate::server::core::{key_scope::KeyScope, providers::images::ImageOperation};
+                let scope = KeyScope::provider_only("custom-image-fixture");
+                let body = json!({"model":"Internal-Pixels"});
+                let route = RequestRouting::capture_request("Internal-Pixels", store, &body,
+                    Some(&scope), false, Some(ImageOperation::Generate)).unwrap();
+                let accounts = store.routing_snapshot().accounts.iter().map(|row| row.as_ref().clone()).collect();
+                let selected = route.accounts(accounts);
+                assert_eq!(selected.len(), 2);
+                assert!(selected.iter().all(|row| row.get("routingModel").is_none()));
+            });
+        });
+    }
+
     #[test]
     fn tool_results_keep_a_turn_but_a_repeated_user_message_starts_a_new_one() {
         let mut body = json!({"messages":[{"role":"user","content":"again"}]});

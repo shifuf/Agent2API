@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Combobox, Input } from '@ui'
+import { Input, BaseCombobox as Combobox } from '@ui'
 import { modelCandidates, type ModelCandidate } from './public-model-catalog'
 import type { ModelCatalog, Translate } from './models-types'
 import type { usePublicModelCatalog } from './public-model-picker'

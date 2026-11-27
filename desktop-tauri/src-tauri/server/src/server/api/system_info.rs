@@ -14,9 +14,8 @@
 //! 端口的人。
 //!
 //! ── 只报「有没有」，不报值 ──────────────────────────────────
-//! Key 只给条数、GitHub 令牌只给 filled / origin、代理只给「是否指定出口」。
-//! 这条纪律与 `/api/update/token` 一致：这个页面会被截图发到公开 issue 里，
-//! 任何一处回显都会变成一次凭证泄露。
+//! Key 只给条数、代理只给「是否指定出口」。
+//! 这个页面会被截图发到公开 issue 里，任何一处回显都会变成一次凭证泄露。
 //!
 //! ── 路径脱敏由后端做 ────────────────────────────────────────
 //! `hideUsername` 走查询参数（`?hideUsername=1`），命中的路径在主目录前缀处
@@ -35,7 +34,7 @@ use serde_json::{json, Value};
 use crate::server::access;
 use crate::server::config;
 use crate::server::core::system_info;
-use crate::server::core::update::{self, selfupdate, status_json, CURRENT_VERSION};
+use crate::server::core::update::{self, selfupdate, CURRENT_VERSION};
 use crate::server::db;
 use crate::server::http::ok_json;
 use crate::server::ServerState;
@@ -102,7 +101,6 @@ fn collect_system_info(state: &ServerState, hide: bool) -> Value {
         .map(|store| store.len())
         .unwrap_or(0);
 
-    let token_status = status_json();
     let has_update_proxy = config::update_proxy().is_some();
 
     json!({
@@ -138,7 +136,7 @@ fn collect_system_info(state: &ServerState, hide: bool) -> Value {
             "host": state.host.to_string(),
             "port": state.port,
             "panelPort": state.panel_port,
-            "uiHosted": state.ui_dir().is_some(),
+            "uiHosted": state.ui_hosted(),
             "localPanel": state.local_panel,
             "configDir": show(&config_dir),
             "dbFile": show(&db_file),
@@ -157,14 +155,13 @@ fn collect_system_info(state: &ServerState, hide: bool) -> Value {
             "allowNoKey": env_flag("AGENT2API_ALLOW_NO_KEY"),
             "v1FailClosed": access::v1_fail_closed(),
             "panelGate": access::panel_gate(),
-            "githubTokenFilled": token_status.get("filled").and_then(Value::as_bool).unwrap_or(false),
-            "githubTokenOrigin": token_status.get("origin").cloned().unwrap_or(Value::Null),
             // 只报「有没有指定出口」：代理地址里常带账号密码，截图会泄露
             "updateProxy": has_update_proxy,
         },
         "features": {
             "debugMode": snapshot.debug_mode(),
             "sanitizeFingerprints": snapshot.sanitize_fingerprints(),
+            "privacyRedaction": snapshot.privacy_settings().settings.enabled,
             "cors": snapshot.cors_enabled(),
             "developerRoleCompat": snapshot.developer_role_compat(),
             "thirdPartyReasoningCollapse": snapshot.third_party_reasoning_collapse(),
@@ -177,6 +174,7 @@ fn collect_system_info(state: &ServerState, hide: bool) -> Value {
             "captchaEnabled": snapshot.captcha_enabled(state.local_panel),
             "updateBeta": config::update_beta(),
         },
+        "capacity": crate::server::core::runtime_capacity::snapshot(),
         "stats": {
             "accounts": account_count,
             "enabledAccounts": enabled_accounts,

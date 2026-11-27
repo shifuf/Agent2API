@@ -74,6 +74,14 @@
 
 use std::sync::Arc;
 
+use axum::http::HeaderMap;
+use crate::server::core::protocol::native::WireProtocol;
+
+mod native;
+mod errors;
+mod translate;
+use translate::ProtocolTranslateStream;
+
 use serde_json::Value;
 
 use crate::server::core::account_store::AccountStore;
@@ -110,6 +118,8 @@ pub(crate) async fn forward(
     provider_id: &str,
     account_id: &str,
     body: &Value,
+    native_protocol: Option<WireProtocol>,
+    client_headers: &HeaderMap,
     route_model: Option<&str>,
     source_test: bool,
     proxy: Option<ResolvedProxy>,
@@ -195,12 +205,23 @@ pub(crate) async fn forward(
     // 最终地址之后**再过一次读侧迁移（提供商层已在 `custom_providers::item_of`
     // 过了一遍，账号覆盖项只在这里能碰到）。
     let base_url = custom_providers::migrate_base_url(&base_url, quirks.emulate_opencode);
+    let user_agent = crate::server::core::user_agent::override_value(provider_id, &credential.user_agent);
+    if let Some(native_protocol) = native_protocol {
+        if WireProtocol::from_provider(protocol) != Some(native_protocol) {
+            return Err(GatewayError::with_status(409, "提供商协议在转发前发生变化，请重试；未发送错误协议的请求"));
+        }
+        return native::forward(
+            native_protocol, provider_id, account_id, &credential.api_key, user_agent,
+            &base_url, &quirks, body, route_model, client_headers, proxy, stream, telemetry, slot, connections,
+        ).await;
+    }
     if let Some(kind) = kind {
         return forward_translated(
             kind,
             provider_id,
             account_id,
             &credential.api_key,
+            user_agent,
             &base_url,
             &quirks,
             body,
@@ -261,7 +282,6 @@ pub(crate) async fn forward(
     // 但同源更不容易在将来改坏）
     quirks.apply_emulation_to_body(&mut outbound, &base_url);
     super::tool_schema::normalize_grok_tools(&mut outbound);
-    telemetry.mask_private_body(&mut outbound)?;
     let payload = serde_json::to_string(&outbound)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
     // ── 出站头（三段拼装，顺序不可换）────────────────────────────
@@ -281,6 +301,8 @@ pub(crate) async fn forward(
     }
     quirks.apply_emulation_headers(&mut headers, api_key, &outbound, &base_url);
     quirks.apply_to(&mut headers);
+    // 只有提供商允许的账号覆盖才在配套请求头之后生效。
+    apply_user_agent_override(&mut headers, user_agent);
 
     let outbound_model = outbound.get("model").and_then(Value::as_str).unwrap_or("");
     logging::verbose(
@@ -315,7 +337,7 @@ pub(crate) async fn forward(
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string);
-        let detail = read_upstream_error(response, telemetry.capture().as_deref(), telemetry.privacy.is_some()).await;
+        let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
         return Err(classify_custom_error(
             status,
             &detail.message,
@@ -439,7 +461,6 @@ impl ProviderQuirks {
             }
         }
     }
-
     /// 伪装头与匿名凭证（只在 `clientEmulation: "opencode"` 时动手）。
     ///
     /// `api_key` 为空时用匿名凭证 `public` —— 这正是「不填 Key 也能用 OpenCode
@@ -486,6 +507,12 @@ impl ProviderQuirks {
     }
 }
 
+/// 已经过提供商策略过滤的账号 User-Agent，在配套头拼好后覆盖同名头。
+/// 值在落库时完成校验；空串保留默认身份，不产生重复请求头。
+fn apply_user_agent_override(headers: &mut Vec<(String, String)>, user_agent: &str) {
+    crate::server::core::user_agent::apply(headers, user_agent);
+}
+
 /// **翻译协议**（responses / anthropic）的一次转发。
 ///
 /// 与 chat 分支同构的「一次发送」，差异只有三处（都在 [`OutboundKind`] 上
@@ -498,6 +525,7 @@ async fn forward_translated(
     provider_id: &str,
     account_id: &str,
     api_key: &str,
+    user_agent: &str,
     base_url: &str,
     quirks: &ProviderQuirks,
     body: &Value,
@@ -523,6 +551,9 @@ async fn forward_translated(
     // 客户端形态伪装：与 chat 分支同一时机（改写后、翻译前）—— 桩工具要由
     // 转换器一起翻成上游协议的形态（anthropic 的 tools 数组）；Go 面不改请求体
     quirks.apply_emulation_to_body(&mut outbound_chat, base_url);
+    telemetry.note_upstream_reasoning(
+        model_rules::read_client_level(&outbound_chat).filter(|level| !model_rules::reasoning_is_off(level)),
+    );
     // 发给上游的真名 = 改写后的 model 字段（rewrite_body 的产物；请求没带
     // model 时是空串，与 chat 分支「没有回写答案」的口径一致）
     let wire_model = outbound_chat
@@ -558,6 +589,8 @@ async fn forward_translated(
             }
             quirks.apply_emulation_headers(&mut headers, api_key, &outbound_chat, base_url);
             quirks.apply_to(&mut headers);
+            apply_user_agent_override(&mut headers,
+                crate::server::core::user_agent::override_value(provider_id, user_agent));
             (url, headers, payload)
         }
         OutboundKind::Anthropic => {
@@ -606,11 +639,12 @@ async fn forward_translated(
             }
             quirks.apply_emulation_headers(&mut headers, api_key, &outbound_chat, base_url);
             quirks.apply_to(&mut headers);
+            apply_user_agent_override(&mut headers,
+                crate::server::core::user_agent::override_value(provider_id, user_agent));
             (url, headers, payload)
         }
     };
     super::tool_schema::normalize_grok_tools(&mut payload);
-    telemetry.mask_private_body(&mut payload)?;
     let payload = serde_json::to_string(&payload)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
 
@@ -649,7 +683,7 @@ async fn forward_translated(
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string);
-        let detail = read_upstream_error(response, telemetry.capture().as_deref(), telemetry.privacy.is_some()).await;
+        let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
         return Err(classify_custom_error(
             status,
             &detail.message,
@@ -681,148 +715,6 @@ async fn forward_translated(
         )
         .await?;
         Ok(ForwardOutcome::Completion { body: aggregated.body })
-    }
-}
-
-/// 上游协议 SSE 字节流 → 标准 chat SSE 字节流（responses / anthropic 共用壳）。
-///
-/// ── 为什么需要它 ────────────────────────────────────────────
-/// `ForwardStream` 与聚合器的输入都是**标准 chat SSE**（它们是 SSE 逐行
-/// 解析的唯一入口，usage 提取 / model 回写 / reasoning 合并都挂在那两层）。
-/// 翻译协议的上游吐的是自家协议的事件流，因此进入那两层之前先过一道
-/// 「字节 → chat 帧」的翻译 —— 本结构只做管道（上游字节 → 转换器 → 帧队列），
-/// 协议知识全在 `protocol::*_outbound` 的两个转换器里。
-///
-/// 上游断开时把 reqwest 错误描述成文案转成 `io::Error` 上抛：流式路径由
-/// `ForwardStream` 补「错误帧 + [DONE]」收尾，聚合路径转成 502 —— 与 chat
-/// 协议同一条错误语义。调试采集器在这里采**上游原始字节**（翻译前），
-/// 与 chat 路径「采上游原样吐出的东西」的语义一致。
-struct ProtocolTranslateStream {
-    /// 上游字节流。错误在构造时就描述成文案折进 `io::Error`（与
-    /// `ForwardStream::new` 同一手法）：空闲守卫的入参就是这个类型，
-    /// 两个消费层（ForwardStream / 聚合器）拿到的也是同一形态。
-    inner: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>>,
-    machine: TranslateMachine,
-    /// 已翻译待下发的帧（一个上游 chunk 可能产出多帧）
-    pending: std::collections::VecDeque<bytes::Bytes>,
-    /// 上游已结束（不再 poll 上游，把 pending 吐完即 None）
-    upstream_done: bool,
-    telemetry: Arc<RequestTelemetry>,
-    capture: Option<Arc<crate::server::core::debug_traffic::TrafficCapture>>,
-}
-
-/// 两个翻译状态机的分派壳（转换器接口同形，包一层枚举避免 dyn 分发）
-enum TranslateMachine {
-    Responses(responses_outbound::ChatFromResponsesStream),
-    Anthropic(anthropic_outbound::ChatFromAnthropicStream),
-}
-
-impl TranslateMachine {
-    fn has_upstream_terminal(&self) -> bool {
-        match self {
-            Self::Responses(machine) => machine.has_upstream_terminal(),
-            Self::Anthropic(machine) => machine.has_upstream_terminal(),
-        }
-    }
-
-    fn push(&mut self, chunk: &[u8]) -> Vec<bytes::Bytes> {
-        match self {
-            Self::Responses(machine) => machine.push(chunk),
-            Self::Anthropic(machine) => machine.push(chunk),
-        }
-    }
-
-    fn finish(&mut self) -> Vec<bytes::Bytes> {
-        match self {
-            Self::Responses(machine) => machine.finish(),
-            Self::Anthropic(machine) => machine.finish(),
-        }
-    }
-}
-
-impl ProtocolTranslateStream {
-    fn new(
-        kind: OutboundKind,
-        model: &str,
-        response: reqwest::Response,
-        telemetry: &Arc<RequestTelemetry>,
-    ) -> Self {
-        use futures::StreamExt;
-        // 上游字节 → io::Error（描述成文案）→ 空闲守卫（设置页「请求超时」
-        // 的「流式响应空闲超时」，与 chat 路径同一份口径、同一个实现）
-        let described = response.bytes_stream().map(|item| {
-            item.map_err(|error| {
-                std::io::Error::other(crate::server::core::egress::describe_error_detail(&error))
-            })
-        });
-        let guarded = crate::server::core::upstream::stall::idle_guard(
-            crate::server::core::upstream::model_trace::observe(Box::pin(described), telemetry.clone()),
-            std::time::Duration::from_millis(
-                crate::server::config::timeout_settings().stream_idle_ms(),
-            ),
-        );
-        Self {
-            inner: guarded,
-            machine: match kind {
-                OutboundKind::Responses => TranslateMachine::Responses(
-                    responses_outbound::ChatFromResponsesStream::new(model),
-                ),
-                OutboundKind::Anthropic => TranslateMachine::Anthropic(
-                    anthropic_outbound::ChatFromAnthropicStream::new(model),
-                ),
-            },
-            pending: std::collections::VecDeque::new(),
-            upstream_done: false,
-            telemetry: telemetry.clone(),
-            capture: telemetry.capture(),
-        }
-    }
-}
-
-impl futures::Stream for ProtocolTranslateStream {
-    type Item = Result<bytes::Bytes, std::io::Error>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        use futures::StreamExt;
-        loop {
-            if let Some(frame) = self.pending.pop_front() {
-                return std::task::Poll::Ready(Some(Ok(frame)));
-            }
-            if self.upstream_done {
-                return std::task::Poll::Ready(None);
-            }
-            match self.inner.poll_next_unpin(cx) {
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-                std::task::Poll::Ready(None) => {
-                    self.upstream_done = true;
-                    // 上游 EOF：转换器收尾（finish_reason / usage / [DONE]）
-                    for frame in self.machine.finish() {
-                        self.pending.push_back(frame);
-                    }
-                    // The parser already owns the complete event buffer. A
-                    // bounded model observer cannot decide completion here.
-                    self.telemetry.note_upstream_stream_end(self.machine.has_upstream_terminal());
-                }
-                std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    // 调试模式：采上游原始字节（在翻译之前，与 chat 路径同语义）
-                    if let Some(capture) = &self.capture {
-                        capture.push(&bytes);
-                    }
-                    for frame in self.machine.push(&bytes[..]) {
-                        self.pending.push_back(frame);
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(error))) => {
-                    self.upstream_done = true;
-                    // 文案已在构造时描述好（见 inner 字段说明）：reqwest 错误的
-                    // 描述、空闲守卫的超时原文，原样上抛
-                    return std::task::Poll::Ready(Some(Err(error)));
-                }
-            }
-        }
     }
 }
 
@@ -872,8 +764,6 @@ fn rewrite_body(body: &Value, provider_id: &str, requested: &str, source_test: b
         .map(str::trim)
         .filter(|text| !text.is_empty())
     {
-        let explicit =
-            outbound.get("reasoning_effort").is_some() || outbound.get("reasoning").is_some();
         if model_rules::reasoning_is_off(level) {
             logging::verbose(
                 "[CustomProvider]",
@@ -882,25 +772,20 @@ fn rewrite_body(body: &Value, provider_id: &str, requested: &str, source_test: b
                      （关闭思考），本网关不向任何上游发「关闭思考」字段，跳过注入"
                 ),
             );
-        } else if explicit {
-            logging::verbose(
-                "[CustomProvider]",
-                &format!(
-                    "provider={provider_id} 映射 {requested} 绑定的思考等级 {level} 未注入：\
-                     客户端已显式指定思考字段"
-                ),
-            );
-        } else if let Some(object) = outbound.as_object_mut() {
-            logging::verbose(
-                "[CustomProvider]",
-                &format!(
-                    "provider={provider_id} 映射 {requested} 注入思考等级 reasoning_effort={level}"
-                ),
-            );
-            object.insert(
-                "reasoning_effort".to_string(),
-                Value::String(level.to_string()),
-            );
+        } else {
+            model_rules::clear_reasoning_controls(&mut outbound);
+            if let Some(object) = outbound.as_object_mut() {
+                object.insert(
+                    "reasoning_effort".to_string(),
+                    Value::String(level.to_string()),
+                );
+                logging::verbose(
+                    "[CustomProvider]",
+                    &format!(
+                        "provider={provider_id} 映射 {requested} 覆盖思考等级 reasoning_effort={level}"
+                    ),
+                );
+            }
         }
     }
     (

@@ -14,7 +14,7 @@ mod sync360_tests {
     use serde_json::json;
 
     #[test]
-    fn restore_requires_encrypted_privacy_rules_and_rekeys_them() {
+    fn restore_rekeys_legacy_privacy_and_accepts_upstream_settings() {
         let original = [7; 32];
         let destination = [9; 32];
         let scope = SecretScope::Accounts.key_file().to_owned();
@@ -24,7 +24,12 @@ mod sync360_tests {
         let mut value = json!({"version":1,"enabled":true,"rulesEnc":crypto::seal_with_key(rules, &original).unwrap()});
         transform.config("privacyRedaction", &mut value).unwrap();
         assert_eq!(crypto::open_with_key(value["rulesEnc"].as_str().unwrap(), &destination).unwrap(), rules);
-        for invalid in [json!({"enabled":true}), json!({"rulesEnc":"{}"}), json!({"rulesEnc":"enc1:invalid"})] {
+        let mut upstream = json!({"enabled":true,"words":["private"],"reversible":true});
+        transform.config("privacyRedaction", &mut upstream).unwrap();
+        assert_eq!(upstream["version"], 2);
+        let restored: Value = serde_json::from_slice(&crypto::open_with_key(upstream["rulesEnc"].as_str().unwrap(), &destination).unwrap()).unwrap();
+        assert_eq!(restored["words"], json!(["private"]));
+        for invalid in [json!({"enabled":"invalid"}), json!({"rulesEnc":"{}"}), json!({"rulesEnc":"enc1:invalid"})] {
             let database = Connection::open_in_memory().unwrap();
             database.execute_batch("CREATE TABLE accounts(data TEXT); CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT);").unwrap();
             database.execute("INSERT INTO kv VALUES ('privacyRedaction',?1)", [invalid.to_string()]).unwrap();
@@ -104,7 +109,7 @@ mod sync360_tests {
         let secret = br#"{"password":"fixture"}"#;
         let storage = br#"{"cookie":"fixture"}"#;
         database.execute("INSERT INTO task_jobs VALUES('both',?1,?2)", params![crypto::seal_with_key(secret, &original).unwrap(), crypto::seal_with_key(storage, &original).unwrap()]).unwrap();
-        let mut transform = SecretTransform { source: &source, rewrite: true, local: BTreeMap::from([(scope, Zeroizing::new(destination))]), count: 0 };
+        let mut transform = SecretTransform { source: &source, rewrite: true, local: BTreeMap::from([(SecretScope::TaskPlugins.key_file().to_owned(), Zeroizing::new(destination))]), count: 0 };
         transform.task_secrets(&database).unwrap();
         assert_eq!(transform.count, 2);
         let pair: (String, String) = database.query_row("SELECT secrets_enc,storage_enc FROM task_jobs WHERE id='both'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
@@ -112,12 +117,76 @@ mod sync360_tests {
         assert_eq!(crypto::open_with_key(&pair.1, &destination).unwrap(), storage);
         assert!(database.query_row("SELECT secrets_enc='' AND storage_enc='' FROM task_jobs WHERE id='empty'", [], |row| row.get::<_, bool>(0)).unwrap());
     }
+
+    #[test]
+    fn restore_accepts_mixed_task_key_domains_and_seals_only_to_task_domain() {
+        let account_key = [17; 32];
+        let task_key = [18; 32];
+        let destination = [19; 32];
+        let source = BackupKeys { values: BTreeMap::from([
+            (SecretScope::Accounts.key_file().to_owned(), Zeroizing::new(account_key)),
+            (SecretScope::TaskPlugins.key_file().to_owned(), Zeroizing::new(task_key)),
+        ]) };
+        let database = Connection::open_in_memory().unwrap();
+        database.execute_batch("CREATE TABLE task_jobs(id TEXT PRIMARY KEY,secrets_enc TEXT,storage_enc TEXT)").unwrap();
+        let plain = br#"{"value":"fixture"}"#;
+        database.execute("INSERT INTO task_jobs VALUES('mixed',?1,?2)", params![crypto::seal_with_key(plain, &account_key).unwrap(), crypto::seal_with_key(plain, &task_key).unwrap()]).unwrap();
+        let mut transform = SecretTransform { source: &source, rewrite: true, local: BTreeMap::from([(SecretScope::TaskPlugins.key_file().to_owned(), Zeroizing::new(destination))]), count: 0 };
+        transform.task_secrets(&database).unwrap();
+        let pair: (String, String) = database.query_row("SELECT secrets_enc,storage_enc FROM task_jobs", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        for encrypted in [pair.0, pair.1] {
+            assert_eq!(crypto::open_with_key(&encrypted, &destination).unwrap(), plain);
+            assert!(crypto::open_with_key(&encrypted, &account_key).is_err());
+            assert!(crypto::open_with_key(&encrypted, &task_key).is_err());
+        }
+        assert_eq!(transform.count, 2);
+    }
+
+    #[test]
+    fn restore_rekeys_upstream_notification_credentials_in_panel_scope() {
+        let original = [23; 32];
+        let destination = [24; 32];
+        let scope = SecretScope::PanelCaptcha.key_file().to_owned();
+        let source = BackupKeys { values: BTreeMap::from([(scope.clone(), Zeroizing::new(original))]) };
+        let mut transform = SecretTransform { source: &source, rewrite: true, local: BTreeMap::from([(scope, Zeroizing::new(destination))]), count: 0 };
+        let mut value = json!({"channels":{
+            "webhook":{"headersEnc":crypto::seal_with_key(br#"{"Authorization":"fixture"}"#, &original).unwrap()},
+            "telegram":{"botTokenEnc":crypto::seal_with_key(b"fixture-bot", &original).unwrap()},
+            "bark":{"deviceKeyEnc":crypto::seal_with_key(b"fixture-device", &original).unwrap()}
+        }});
+        transform.config("notifications", &mut value).unwrap();
+        for (channel, field, expected) in [("webhook", "headersEnc", br#"{"Authorization":"fixture"}"#.as_slice()), ("telegram", "botTokenEnc", b"fixture-bot".as_slice()), ("bark", "deviceKeyEnc", b"fixture-device".as_slice())] {
+            assert_eq!(crypto::open_with_key(value["channels"][channel][field].as_str().unwrap(), &destination).unwrap(), expected);
+        }
+        assert_eq!(transform.count, 3);
+    }
+
+    #[test]
+    fn restore_rekeys_both_oauth_formats_and_rejects_plaintext_external_secrets() {
+        let source_key = [47; 32];
+        let destination = [49; 32];
+        let scope = SecretScope::PanelCaptcha.key_file().to_owned();
+        let source = BackupKeys { values: BTreeMap::from([(scope.clone(), Zeroizing::new(source_key))]) };
+        let mut transform = SecretTransform { source: &source, rewrite: true, local: BTreeMap::from([(scope, Zeroizing::new(destination))]), count: 0 };
+        for name in ["panelOauth", "panelOauthExternal"] {
+            let mut value = json!({"publicBaseUrl":"https://fixture.invalid", "google":{"clientSecretEnc":crypto::seal_with_key(b"google", &source_key).unwrap()},"github":{"clientSecretEnc":crypto::seal_with_key(b"github", &source_key).unwrap()}});
+            transform.config(name, &mut value).unwrap();
+            for provider in ["google", "github"] {
+                assert_eq!(crypto::open_with_key(value[provider]["clientSecretEnc"].as_str().unwrap(), &destination).unwrap(), provider.as_bytes());
+            }
+            let mut invalid = json!({"google":{"clientSecretEnc":"plaintext"}});
+            assert!(transform.config(name, &mut invalid).is_err());
+        }
+    }
 }
 
-const SCOPES: [SecretScope; 3] = [
+const SCOPES: [SecretScope; 6] = [
     SecretScope::Accounts,
     SecretScope::UpdateToken,
     SecretScope::CloudSync,
+    SecretScope::CodingSessions,
+    SecretScope::PanelCaptcha,
+    SecretScope::TaskPlugins,
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -217,6 +286,21 @@ struct SecretTransform<'a> {
 }
 
 impl SecretTransform<'_> {
+    fn external_oauth(&mut self, value: &mut Value) -> Result<(), String> {
+        if !value.is_object() { return Err("OAuth 设置格式无效".into()); }
+        for provider in ["google", "github"] {
+            if let Some(settings) = value.get_mut(provider) {
+                if !settings.is_object() { return Err("OAuth 提供商设置格式无效".into()); }
+                if let Some(secret) = settings.get_mut("clientSecretEnc") {
+                    let text = secret.as_str().ok_or("OAuth 密文字段格式无效")?;
+                    if !text.is_empty() && !crypto::is_envelope(text) { return Err("OAuth 密钥必须为有效密文".into()); }
+                    self.value(secret, SecretScope::PanelCaptcha, "OAuth Client Secret", false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn value(
         &mut self,
         value: &mut Value,
@@ -293,14 +377,33 @@ impl SecretTransform<'_> {
                     if !text.is_empty() && !crypto::is_envelope(text) { return Err("通知配置必须包含有效密文".into()); }
                 }
                 self.field(value, "channelsEnc", SecretScope::Accounts, "通知渠道配置", true)?;
+                if let Some(channels) = value.get_mut("channels") {
+                    for (channel, field, json) in [("webhook", "headersEnc", true), ("telegram", "botTokenEnc", false), ("bark", "deviceKeyEnc", false)] {
+                        if let Some(settings) = channels.get_mut(channel) {
+                            self.field(settings, field, SecretScope::PanelCaptcha, "通知渠道凭据", json)?;
+                        }
+                    }
+                }
             }
             "privacyRedaction" => {
-                let encrypted = value.get_mut("rulesEnc").ok_or("隐私配置缺少规则密文")?;
-                if !encrypted.as_str().is_some_and(crypto::is_envelope) {
-                    return Err("隐私配置必须包含有效密文".into());
+                if let Some(encrypted) = value.get_mut("rulesEnc") {
+                    if !encrypted.as_str().is_some_and(crypto::is_envelope) {
+                        return Err("隐私配置必须包含有效密文".into());
+                    }
+                    self.value(encrypted, SecretScope::Accounts, "隐私规则", true)?;
+                } else {
+                    let settings: crate::server::core::privacy::PrivacySettings = serde_json::from_value(value.clone())
+                        .map_err(|_| "隐私配置格式异常")?;
+                    let compiled = crate::server::core::privacy::CompiledPrivacySettings::compile(settings)?;
+                    if self.rewrite {
+                        let mut encrypted = Value::String(serde_json::to_string(&compiled.settings).map_err(|_| "隐私配置序列化失败")?);
+                        self.value(&mut encrypted, SecretScope::Accounts, "隐私规则", true)?;
+                        *value = serde_json::json!({"version":2,"enabled":compiled.settings.enabled,"rulesEnc":encrypted});
+                    }
                 }
-                self.value(encrypted, SecretScope::Accounts, "隐私规则", true)?;
             }
+            "panelOauthExternal" => self.external_oauth(value)?,
+            "panelOauth" if value.get("settingsEnc").is_none() && (value.get("google").is_some() || value.get("github").is_some()) => self.external_oauth(value)?,
             "panelTurnstile" | "panelOauth" => {
                 let encrypted = value.get_mut("settingsEnc").ok_or("面板身份设置缺少密文")?;
                 if !encrypted.as_str().is_some_and(crypto::is_envelope) { return Err("面板身份设置必须包含有效密文".into()); }
@@ -337,6 +440,12 @@ impl SecretTransform<'_> {
                         }
                     }
                 }
+            }
+            "panelCaptcha" => {
+                self.field(value, "secretKey", SecretScope::PanelCaptcha, "Turnstile 服务端密钥", false)?;
+            }
+            "assistantCoding" => {
+                self.field(value, "accessToken", SecretScope::CodingSessions, "编程会话连接密钥", false)?;
             }
             "cloudSync" => {
                 if !value.is_object() {
@@ -384,9 +493,21 @@ impl SecretTransform<'_> {
             let mut fields = [Value::String(secrets), Value::String(storage)];
             for value in &mut fields {
                 let text = value.as_str().ok_or("任务密文字段无效")?;
-                if text.is_empty() { continue; }
-                if !crypto::is_envelope(text) { return Err("任务配置必须包含有效密文".into()); }
-                self.value(value, SecretScope::Accounts, "任务密文", true)?;
+                let opened = crate::server::core::task_plugins::secret_compat::open_with(text, |raw, scope| {
+                    self.source.decrypt(raw, scope, "任务密文").map(|plain| plain.to_vec())
+                })?;
+                let Some(opened) = opened else { continue };
+                let plaintext = Zeroizing::new(opened.plaintext);
+                if self.rewrite {
+                    let scope = SecretScope::TaskPlugins;
+                    let name = scope.key_file().to_owned();
+                    if !self.local.contains_key(&name) {
+                        self.local.insert(name.clone(), Zeroizing::new(crypto::secret_key(scope)?));
+                    }
+                    let key = self.local.get(&name).ok_or("目标机器密钥不可用")?;
+                    *value = Value::String(crypto::seal_with_key(&plaintext, key)?);
+                    self.count += 1;
+                }
             }
             if self.rewrite {
                 conn.execute("UPDATE task_jobs SET secrets_enc=?1, storage_enc=?2 WHERE rowid=?3", params![fields[0].as_str(), fields[1].as_str(), id]).map_err(|_| "迁移任务密文失败")?;
@@ -450,8 +571,11 @@ fn transform(conn: &Connection, source: &BackupKeys, rewrite: bool) -> Result<us
         "privacyRedaction",
         "panelTurnstile",
         "panelOauth",
+        "panelOauthExternal",
         "githubToken",
         "agentProfiles",
+        "assistantCoding",
+        "panelCaptcha",
         "cloudSync",
     ] {
         let text: Option<String> = conn

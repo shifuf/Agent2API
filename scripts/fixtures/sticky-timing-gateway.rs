@@ -6,8 +6,13 @@ use agent2api_server::server::core::{plugin_host::{Host, HostOptions, RpcAdapter
 use agent2api_provider_protocol::{ErrorClass, ProviderInfo};
 use serde_json::json;
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() {
+fn main() {
+    std::thread::Builder::new().stack_size(agent2api_server::WORKER_STACK_BYTES)
+        .spawn(|| agent2api_server::build_runtime().unwrap().block_on(run()))
+        .unwrap().join().unwrap();
+}
+
+async fn run() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let provider = arguments.get(5).map(String::as_str).unwrap_or("timing-fixture");
     let runtime_cases = ["runtime-524", "runtime-503", "runtime-cleanup"];

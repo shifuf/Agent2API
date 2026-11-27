@@ -341,14 +341,14 @@ pub(super) fn response_error(
     let quota = (provider == "tavily" && matches!(effective, 432 | 433))
         || (provider == "firecrawl" && effective == 402)
         || quota_message(&markers);
-    let code = if effective == 400 || effective == 422 {
-        SearchErrorCode::InvalidInput
-    } else if quota {
+    let code = if quota {
         SearchErrorCode::QuotaExhausted
     } else if effective == 401 {
         SearchErrorCode::InvalidProviderKey
     } else if effective == 429 {
         SearchErrorCode::RateLimited
+    } else if effective == 400 || effective == 422 {
+        SearchErrorCode::InvalidInput
     } else {
         SearchErrorCode::ProviderUnavailable
     };
@@ -356,9 +356,9 @@ pub(super) fn response_error(
         SearchErrorCode::InvalidProviderKey => {
             "The provider API key is invalid or unauthorized".to_string()
         }
-        SearchErrorCode::QuotaExhausted => "The provider quota is exhausted".into(),
-        SearchErrorCode::RateLimited => "The provider rate limit was exceeded".into(),
-        _ => format!("The upstream provider returned HTTP {effective}"),
+        SearchErrorCode::QuotaExhausted => format!("The provider quota is exhausted: {text}"),
+        SearchErrorCode::RateLimited => format!("The provider rate limit was exceeded: {text}"),
+        _ => format!("The upstream provider returned {text}"),
     };
     Some(SearchError {
         code,

@@ -56,7 +56,6 @@ pub async fn put_reasoning_collapse(State(_state): State<ServerState>, headers: 
             "[Config]",
             "⚠️  第三方模型回答完自动折叠过程设置写入失败，本次运行内仍生效",
         );
-        return errors::management_error(500, "设置未能持久化");
     }
     logging::log(
         "[Config]",

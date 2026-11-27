@@ -63,6 +63,19 @@ pub fn shim_js() -> &'static str {
     } catch (e) { /* 老浏览器 / 被禁用：留着标记只是多一次放行，不影响正确性 */ }
   })();
 
+  var MANAGEMENT_SESSION_CHANGE = 'wb:management-session-changed';
+  var managementGeneration = 0;
+  window.addEventListener(MANAGEMENT_SESSION_CHANGE, function () {
+    managementGeneration += 1;
+    if (currentFlow && currentFlow.managed) {
+      // 原 flow 不属于新管理来源；只废弃本地资格，不查询、取消或重发给新会话。
+      currentFlow.sourceLost = true;
+      closeWebOverlay(true);
+      loginActive = false; loginProvider = ''; emitLogin();
+    }
+  });
+  function notifyManagementSessionChanged() { window.dispatchEvent(new Event(MANAGEMENT_SESSION_CHANGE)); }
+
   // ── API Key 的存取 ────────────────────────────────────────
   var KEY_STORAGE = 'agent2api.webKey';
   function readStoredKey() {
@@ -70,7 +83,9 @@ pub fn shim_js() -> &'static str {
   }
   var apiKey = readStoredKey();
   function storeKey(value) {
+    var changed = value !== apiKey;
     apiKey = value;
+    if (changed) notifyManagementSessionChanged();
     try {
       if (value) localStorage.setItem(KEY_STORAGE, value);
       else localStorage.removeItem(KEY_STORAGE);
@@ -85,11 +100,6 @@ pub fn shim_js() -> &'static str {
   // `x-panel-token` / `x-panel-refresh` 头。直连环境下 cookie 照常下发
   // 且服务端优先认它，这套头是纯增量，互不干扰。
   var PANEL_AUTH = 'agent2api.panelAuth';
-  var managementSessionGeneration = 0;
-  function managementSessionChanged() {
-    managementSessionGeneration += 1;
-    window.dispatchEvent(new Event('wb:management-session-changed'));
-  }
   /**
    * 本地记下的 access 到期时刻（毫秒；0 = 不知道）。
    *
@@ -132,19 +142,22 @@ pub fn shim_js() -> &'static str {
   }
 
   function storePanelAuth(access, refresh) {
-    var previousAccess = storedPanelToken('access');
+    // 只通知当前真实变更；凭据仍由原存储单点保管，不进入flow或事件。
+    notifyManagementSessionChanged();
     try {
       localStorage.setItem(PANEL_AUTH, JSON.stringify({
         access: access, refresh: refresh, expiresAt: panelExpiresAt || currentExpiry(),
       }));
     } catch (e) { /* 隐私模式等：留在本次调用链即可 */ }
-    if (previousAccess !== access) managementSessionChanged();
   }
   function clearPanelAuth() {
-    managementSessionChanged();
+    notifyManagementSessionChanged();
     panelExpiresAt = 0;
     try { localStorage.removeItem(PANEL_AUTH); } catch (e) { /* 无害 */ }
   }
+  window.addEventListener('storage', function (event) {
+    if (event.key === KEY_STORAGE || event.key === PANEL_AUTH || event.key === null) notifyManagementSessionChanged();
+  });
 
   // ── 覆盖层（Key 输入 / 链接兜底 / 粘贴回调）：原生 DOM，界面样式不依赖 ──
   // options（可选）：
@@ -372,9 +385,6 @@ pub fn shim_js() -> &'static str {
     if (!method) throw new Error('该登录方式已不在提供商的运行时清单中，请重新选择');
     return {
       manualCallback: method.manualCallback === true,
-      managedLogin: method.managedLogin === true,
-      interactiveLogin: method.interactiveLogin === true,
-      methodIndex: options.methodIndex,
       callbackInput: method.callbackInput === 'code' ? 'code' : 'url',
       localOnly: method.localOnly === true,
       instructions: typeof metadata.instructions === 'string' ? metadata.instructions : '',
@@ -586,8 +596,15 @@ pub fn shim_js() -> &'static str {
         });
         callbackUrl = '';
         if (currentFlow !== flow || flow.canceled) throw canceledError();
+        if (submitted && submitted.retryable === true) {
+          flow.hint = typeof submitted.hint === 'string' ? submitted.hint : '回调未被接受，请重新复制本次登录的完整回调地址';
+          emitLogin();
+          continue;
+        }
         if (submitted && typeof submitted.nextUrl === 'string' && submitted.nextUrl) {
           authUrl = checkedLoginUrl(submitted.nextUrl, flow.dynamic ? flow.started : null, flow.callbackTargets);
+          flow.hint = '还需继续授权，请打开下一步授权页，完成后回填新的完整回调地址。';
+          emitLogin();
           continue;
         }
       } catch (error) {
@@ -678,10 +695,39 @@ pub fn shim_js() -> &'static str {
 
   // ── HTTP 调用：信封解包与桌面 gateway::unwrap_envelope 对齐 ──
   async function httpCall(method, path, body, retried, selectedKey, signal) {
+    var loginOwner = currentFlow;
+    var requestGeneration = managementGeneration;
     // 到期前先把令牌换掉：这一步让「access 过期 → 401 → 续期」不再发生，
     // 也就没有那条每 2 小时一次的 401（见 `ensureFreshSession`）。
     // 只在首轮做：重试那一趟（retried=true）刚刚续过期，再判一次纯属多余。
     if (!retried) await ensureFreshSession();
+    var requestMethod = String(method).toUpperCase();
+    var requestPath = '';
+    try { requestPath = new URL(path, window.location.href).pathname; } catch (e) { /* 交给原请求处理无效路径 */ }
+    // 权限确认只允许用户主动提交，管理会话或 Key 恢复不能重发这条 PATCH。
+    var noAuthReplay = requestMethod === 'PATCH' && requestPath === '/api/plugins/permissions';
+    // 覆盖具名回调桥和动态交互的直接 api_request；登录材料只发一次，不因 401 重放。
+    var sensitiveLogin = requestMethod === 'POST' && (requestPath.indexOf('/api/session/login/') === 0 || requestPath === '/api/accounts');
+    noAuthReplay = noAuthReplay || sensitiveLogin || requestPath.indexOf('/api/plugins/desktop-import/chatglm/') === 0
+      || requestPath.indexOf('/api/plugins/enrollment/') === 0
+      || requestMethod === 'POST' && (requestPath === '/api/accounts/refresh' || requestPath === '/api/accounts/refresh-expiring'
+        || requestPath === '/api/accounts/checkin' || requestPath === '/api/checkin-activity'
+        || requestPath === '/api/checkin-activity/reset'
+        || requestPath === '/api/plugins/tasks/run' || requestPath === '/api/travel-schedule/run'
+        || requestPath.endsWith('/growth/travel') || requestPath.endsWith('/growth/task') || requestPath.endsWith('/growth/school')
+        || requestPath.endsWith('/campaigns/claim') || requestPath.endsWith('/campaigns/redeem')
+        || requestPath.endsWith('/onboarding/claim'));
+    var managedRead = requestMethod === 'GET' && loginOwner && loginOwner.managed
+      && (requestPath === '/api/session/login/wait' || requestPath === '/api/session/login/interaction');
+    if (sensitiveLogin || managedRead) retried = true;
+    if (requestGeneration !== managementGeneration && (noAuthReplay || managedRead)) {
+      throw new Error('管理会话已变化，本次请求未重发，请重新读取状态。');
+    }
+    if (loginOwner && loginOwner.managed && requestPath.indexOf('/api/session/login/') === 0) {
+      checkManagedFlow(loginOwner, requestPath === '/api/session/login/cancel');
+      if (requestPath === '/api/session/login/interaction' && (loginOwner.readOnlyOnly || loginOwner.saved === null
+        || loginOwner.saved === true || loginOwner.phase !== 'waiting')) throw new Error(MANAGED_SAVE_UNKNOWN);
+    }
     var headers = { 'Accept': 'application/json' };
     if (apiKey) headers['x-api-key'] = apiKey;
     // 面板会话的头部回退（见 PANEL_AUTH 段）：有存令牌就带上；
@@ -713,27 +759,35 @@ pub fn shim_js() -> &'static str {
       throw new Error('无法连接网关：' + (error && error.message ? error.message : error));
     }
     var text = await response.text();
+    if (requestGeneration !== managementGeneration && (noAuthReplay || managedRead)) {
+      throw new Error('管理会话已变化，本次请求未重发，请重新读取状态。');
+    }
+    if (loginOwner && loginOwner.managed && requestPath.indexOf('/api/session/login/') === 0) {
+      checkManagedFlow(loginOwner, requestPath === '/api/session/login/cancel');
+    }
     if (response.status === 401 && !retried && !signal) {
-      // 按错误类型分流。panel_login_required：管理员已注册、要登录 ——
-      // 先用长效 refresh 静默换新（access 过期时用户无感），不行再整页
-      // 跳独立登录页；其余 401 = 未配管理员的部署，弹 Key 框兜底。
+      // 只有管理鉴权错误才恢复会话或询问 Key；上游账号的 401 不改变面板登录。
       var probe = null;
       try { probe = JSON.parse(text); } catch (e) { /* 非 JSON */ }
       var errorType = probe && probe.error && probe.error.type;
       if (errorType === 'panel_login_required') {
         var refreshed = await tryRefresh();
-        if (refreshed) return httpCall(method, path, body, true, selectedKey);
-        // 续期失败 = 会话链真的没了：清掉本地令牌再跳登录页，
-        // 否则下次进来还带着死 token，永远是同一轮失败。
-        clearPanelAuth();
-        window.location.href = '/login';
-        // 页面即将整页跳转，返回一个挂起的承诺占位
-        return new Promise(function () {});
-      }
-      var key = selectedKey === undefined ? await askForKey() : null;
-      if (key) {
-        storeKey(key);
-        return httpCall(method, path, body, true, selectedKey);
+        if (refreshed) {
+          if (!noAuthReplay) return httpCall(method, path, body, true, selectedKey);
+        } else {
+          // 续期失败 = 会话链真的没了：清掉本地令牌再跳登录页，
+          // 否则下次进来还带着死 token，永远是同一轮失败。
+          clearPanelAuth();
+          window.location.href = '/login';
+          // 页面即将整页跳转，返回一个挂起的承诺占位
+          return new Promise(function () {});
+        }
+      } else if (errorType === 'invalid_api_key') {
+        var key = selectedKey === undefined ? await askForKey() : null;
+        if (key) {
+          storeKey(key);
+          if (!noAuthReplay) return httpCall(method, path, body, true, selectedKey);
+        }
       }
     }
     var payload;
@@ -844,6 +898,9 @@ pub fn shim_js() -> &'static str {
       if (data && typeof data.accessToken === 'string' && data.accessToken
         && typeof data.refreshToken === 'string' && data.refreshToken) {
         storePanelAuth(data.accessToken, data.refreshToken);
+      } else {
+        // HttpOnly cookie 模式成功换会话也必须换代；不能因为JS拿不到令牌漏通知。
+        notifyManagementSessionChanged();
       }
       return true;
     } catch (e) {
@@ -858,8 +915,9 @@ pub fn shim_js() -> &'static str {
     if (stateEmitTimer) return;
     stateEmitTimer = setTimeout(async function () {
       stateEmitTimer = null;
+      if (window.wbApp && window.wbApp.currentPage === 'accounts') return;
       try {
-        var next = await call('GET', '/api/session');
+        var next = await call('GET', '/api/session?accounts=index');
         stateListeners.forEach(function (cb) { try { cb(next); } catch (e) { console.warn(e); } });
       } catch (e) { /* 面板关闭中的正常失败 */ }
     }, 300);
@@ -875,28 +933,36 @@ pub fn shim_js() -> &'static str {
       return typeof value === 'string' && value;
     }).join('\n') : '';
   }
-  function loginSnapshot() {
+  function loginSnapshot(includeAuthUrl) {
     var flow = loginActive && currentFlow;
-    return {
+    var snapshot = {
       active: loginActive, provider: loginProvider,
       mode: flow ? flow.mode : null, edition: flow ? flow.edition : null,
       instructions: flow ? [flow.instructions].concat(flow.notices || []).filter(Boolean).join('\n') : '',
       hint: flow ? flow.hint || '' : '',
       state: flow && flow.dynamic && flow.state ? flow.state : null,
+      managedLogin: !!(flow && flow.managed), methodIndex: flow && flow.started ? flow.started.methodIndex : undefined,
+      remainingMs: flow && flow.managed ? Math.max(0, flow.monotonicDeadline - performance.now()) : undefined,
+      timeoutMs: flow ? flow.timeoutMs : undefined,
+      phase: flow && flow.managed ? flow.phase : undefined,
+      saved: flow && flow.managed ? flow.saved : undefined,
       manualCallback: !!(flow && flow.dynamic && flow.manualCallback),
-      managedLogin: !!(flow && flow.managedLogin),
-      interactiveLogin: !!(flow && flow.interactiveLogin),
-      methodIndex: flow && flow.method ? flow.method.methodIndex : undefined,
-      remainingMs: flow && flow.deadline ? Math.max(0, flow.deadline - Date.now()) : undefined,
-      expiresAt: flow && flow.started ? flow.started.expiresAt : undefined,
       callbackInput: flow && flow.dynamic ? flow.callbackInput : 'url',
     };
+    if (includeAuthUrl && flow && flow.dynamic && flow.authUrl) {
+      snapshot.authUrl = flow.authUrl;
+      snapshot.browserOpened = flow.browserOpened === true;
+    }
+    return snapshot;
   }
   function emitLogin() {
-    var payload = loginSnapshot();
-    var notify = function (cb) { try { cb(payload); } catch (e) { /* 不记录可能含登录 URL 的异常 */ } };
-    loginListeners.forEach(notify);
-    loginProgressListeners.forEach(notify);
+    var statePayload = loginSnapshot(false);
+    var progressPayload = loginSnapshot(true);
+    var notify = function (payload) {
+      return function (cb) { try { cb(payload); } catch (e) { /* 不记录可能含登录 URL 的异常 */ } };
+    };
+    loginListeners.forEach(notify(statePayload));
+    loginProgressListeners.forEach(notify(progressPayload));
     // 复用安全粘贴 dialog 的纯文本节点，轮询进度不能作为 HTML 解释。
     if (activeOverlay) {
       var text = activeOverlay.overlay.querySelector('[data-a2a-login-progress]');
@@ -914,8 +980,104 @@ pub fn shim_js() -> &'static str {
     + '授权完成后的回调会落到你本机而不是网关 —— 请复制浏览器地址栏里的'
     + '完整回调地址，粘回面板重试。';
 
+  var MANAGED_SAVE_UNKNOWN = '账号保存未确认，请查询本次状态；不会再次保存。';
+  function managedLoginText(key) {
+    return window.wbI18n && typeof window.wbI18n.t === 'function' ? window.wbI18n.t(key) : key;
+  }
+  function managedObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
+  function managedId(value, limit) {
+    return typeof value === 'string' && value.length > 0 && value.length <= (limit || 512)
+      && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
+  }
+  function checkManagedFlow(flow, closing) {
+    if (flow.sourceLost || flow.managementGeneration !== managementGeneration) {
+      throw new Error('管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。');
+    }
+    if (flow.readOnlyClosed) {
+      var unknown = new Error(MANAGED_SAVE_UNKNOWN); unknown.loginStateReadOnly = true; throw unknown;
+    }
+    if (currentFlow !== flow || flow.canceled && !closing) throw canceledError();
+  }
+  function managedWaitResult(wait, flow) {
+    checkManagedFlow(flow);
+    if (!managedObject(wait) || wait.managedLogin !== true || wait.provider !== flow.provider || wait.flow !== flow.state
+      || wait.ok === false || wait.success === false || wait.methodIndex !== flow.methodIndex || !Number.isSafeInteger(wait.methodIndex) || wait.methodIndex < 0
+      || (wait.saved !== null && typeof wait.saved !== 'boolean')
+      || (wait.pending !== undefined && typeof wait.pending !== 'boolean')
+      || (wait.done !== undefined && typeof wait.done !== 'boolean')) throw new Error(MANAGED_SAVE_UNKNOWN);
+    var phase = wait.phase;
+    var terminal = ['saved', 'failed', 'canceled', 'unconfirmed'].indexOf(phase) >= 0;
+    if (!terminal && phase !== 'waiting' && phase !== 'saving') throw new Error(MANAGED_SAVE_UNKNOWN);
+    var expectedSaved = phase === 'saved' ? true : phase === 'saving' || phase === 'unconfirmed' ? null : false;
+    if (wait.saved !== expectedSaved || (terminal ? wait.done !== true || wait.pending === true
+      : wait.done === true || wait.pending !== true)) throw new Error(MANAGED_SAVE_UNKNOWN);
+    ['instructions', 'hint', 'error'].forEach(function (key) {
+      if (wait[key] !== undefined && wait[key] !== null && (typeof wait[key] !== 'string' || wait[key].length > 8192)) {
+        throw new Error(MANAGED_SAVE_UNKNOWN);
+      }
+    });
+    if (wait.error && (phase === 'waiting' || phase === 'saving' || phase === 'saved')) throw new Error(MANAGED_SAVE_UNKNOWN);
+    var session = null;
+    if (phase === 'saved') {
+      var summary = wait.session;
+      if (!managedObject(summary) || summary.provider !== flow.provider
+        || (!managedId(summary.accountUid) && !managedId(summary.accountId))) throw new Error(MANAGED_SAVE_UNKNOWN);
+      ['accountUid', 'accountId'].forEach(function (key) {
+        if (summary[key] !== undefined && summary[key] !== null && !managedId(summary[key])) throw new Error(MANAGED_SAVE_UNKNOWN);
+      });
+      session = { provider: flow.provider };
+      ['accountUid', 'accountId', 'nickname', 'edition', 'warning'].forEach(function (key) {
+        if (typeof summary[key] === 'string' && summary[key].length <= (key === 'warning' ? 8192 : 512)) session[key] = summary[key];
+      });
+      if (typeof summary.proxySaved === 'boolean') session.proxySaved = summary.proxySaved;
+    }
+    return { managedLogin: true, provider: flow.provider, flow: flow.state, methodIndex: flow.methodIndex,
+      phase: phase, saved: wait.saved, pending: wait.pending, done: wait.done, error: wait.error,
+      instructions: wait.instructions, hint: wait.hint, session: session };
+  }
+  async function queryUnconfirmedManagedWait(flow) {
+    checkManagedFlow(flow);
+    flow.readOnlyOnly = true;
+    flow.phase = 'unconfirmed'; flow.saved = null; flow.instructions = ''; flow.hint = MANAGED_SAVE_UNKNOWN;
+    emitLogin();
+    var decision = await ensureOverlay(managedLoginText('保存未确认'), '<div>' + escapeHtml(managedLoginText(MANAGED_SAVE_UNKNOWN)) + '</div>',
+      managedLoginText('查询本次登录状态（只读）'), { cancelText: managedLoginText('关闭') });
+    checkManagedFlow(flow);
+    if (decision === null || decision === DISPOSED) {
+      var abandoned = new Error(MANAGED_SAVE_UNKNOWN);
+      abandoned.loginStateReadOnly = true;
+      throw abandoned;
+    }
+    // 用户主动查询只进入下一次原 flow GET；没有 start/callback/interaction/save 的补偿分支。
+  }
+  async function pollManagedWait(flow) {
+    while (true) {
+      checkManagedFlow(flow);
+      var result;
+      try {
+        result = managedWaitResult(await call('GET', '/api/session/login/wait?state=' + encodeURIComponent(flow.state)), flow);
+      } catch (error) {
+        checkManagedFlow(flow);
+        await queryUnconfirmedManagedWait(flow);
+        continue;
+      }
+      flow.phase = result.phase; flow.saved = result.saved;
+      if (result.phase === 'saved' && result.saved === true && result.done === true && result.session) return result;
+      if (result.phase === 'canceled') throw canceledError();
+      if (result.phase === 'failed') throw new Error(result.error || '托管登录未确认保存账号，未宣布登录成功');
+      if (result.phase === 'unconfirmed') { await queryUnconfirmedManagedWait(flow); continue; }
+      flow.instructions = result.phase === 'saving' ? '' : result.instructions || '';
+      flow.hint = result.phase === 'saving' ? '正在保存账号，保存结果尚未确认' : result.hint || '';
+      if (flow.readOnlyOnly && result.phase !== 'saving') { await queryUnconfirmedManagedWait(flow); continue; }
+      emitLogin();
+      if (performance.now() >= flow.monotonicDeadline) { await queryUnconfirmedManagedWait(flow); continue; }
+      await sleep(flow.pollIntervalMs);
+    }
+  }
+
   async function pollWait(flow) {
-    while (Date.now() < flow.deadline) {
+    if (flow.managed) return pollManagedWait(flow);
+    while (flow.managed ? performance.now() < flow.monotonicDeadline : Date.now() < flow.deadline) {
       if (currentFlow !== flow || flow.canceled) throw canceledError();
       var wait;
       try {
@@ -925,30 +1087,20 @@ pub fn shim_js() -> &'static str {
         throw error;
       }
       if (currentFlow !== flow || flow.canceled) throw canceledError();
-      if (flow.managedLogin) {
-        if (flow.sourceGeneration !== managementSessionGeneration) throw new Error('管理会话已变化，请重新发起登录。');
-        if (!wait || wait.managedLogin !== true || wait.provider !== loginProvider || wait.flow !== flow.state
-          || wait.methodIndex !== flow.method.methodIndex
-          || ['waiting', 'saving', 'saved', 'failed', 'canceled', 'unconfirmed'].indexOf(wait.phase) < 0) {
-          throw new Error('网关未返回有效的托管登录保存回执，请重新查询本次状态。');
-        }
-        if (wait.phase === 'saved') {
-          if (wait.saved !== true || wait.done !== true || wait.pending === true || !wait.session
-            || wait.session.provider !== loginProvider || !(wait.session.accountUid || wait.session.accountId)) {
-            throw new Error('网关未返回有效的托管登录保存回执，请重新查询本次状态。');
-          }
-          return wait;
-        }
-        if (wait.phase === 'canceled') throw canceledError();
-        if (wait.phase === 'failed' || wait.phase === 'unconfirmed') {
-          throw new Error(wait.error || '账号保存未确认，请查询本次状态；不会再次保存。');
-        }
-        if (wait.pending !== true || wait.done === true || wait.saved !== (wait.phase === 'saving' ? null : false)) {
-          throw new Error('网关未返回有效的托管登录保存回执，请重新查询本次状态。');
-        }
-      } else if (wait && wait.managedLogin === true) throw new Error('网关返回的登录步骤不属于当前方式，已停止本次交互。');
+      if (wait && wait.managedLogin === true) {
+        // 不能将意外 managed 回包降级成旧 done+summary；原启动来源不相符只报未知。
+        flow.managed = true;
+        throw new Error(MANAGED_SAVE_UNKNOWN);
+      }
+      if (flow.managed && performance.now() >= flow.monotonicDeadline) throw new Error('托管登录已过期，请重新发起');
       if (wait && wait.done === true && !wait.pending) {
-        if (wait.error) throw asError(wait.error);
+        if (wait.error) {
+          var failure = asError(wait.error);
+          if (wait.diagnostic && typeof wait.diagnostic === 'object') failure.diagnostic = wait.diagnostic;
+          throw failure;
+        }
+        if (flow.managed && (!wait.session || wait.session.provider !== flow.provider
+          || !(wait.session.accountUid || wait.session.accountId))) throw new Error('登录桥返回了空会话，无法确认账号已添加');
         return wait.session == null ? {} : wait.session;
       }
       if (wait) {
@@ -966,7 +1118,7 @@ pub fn shim_js() -> &'static str {
     var timeoutHint = flow.callbackInput === 'code'
       ? '：请重新发起，并按此方式要求粘贴本人已授权的令牌或一次性 code。'
       : MANUAL_CALLBACK_TIMEOUT_HINT;
-    throw new Error('登录等待超时（5 分钟）' + (flow.manualCallback ? timeoutHint : ''));
+    throw new Error('登录等待超时（' + Math.round((flow.timeoutMs || 300000) / 60000) + ' 分钟）' + (flow.manualCallback ? timeoutHint : ''));
   }
 
   /** 取消信号：用 `canceled` 标记与普通失败区分（界面据此提示「已取消」而非报错） */
@@ -987,9 +1139,11 @@ pub fn shim_js() -> &'static str {
     var dynamic = config.dynamic === true;
     var popup = null;
     var flow = {
-      state: '', canceled: false, dynamic: dynamic, mode: config.mode || 'embedded', edition: config.edition || 'cn',
+      state: '', provider: provider, canceled: false, dynamic: dynamic, managed: false,
+      managementGeneration: managementGeneration, sourceLost: false, phase: undefined, saved: undefined,
+      mode: config.mode || 'embedded', edition: config.edition || 'cn',
+      authUrl: '', browserOpened: false,
       instructions: '', hint: '', notices: [], manualCallback: false, callbackInput: 'url', started: null, callbackTargets: [],
-      managedLogin: false, interactiveLogin: false, sourceGeneration: managementSessionGeneration,
       pollIntervalMs: 3000, deadline: 0,
     };
     currentFlow = flow;
@@ -1004,22 +1158,31 @@ pub fn shim_js() -> &'static str {
     }
     try {
       // 工厂延后到全局锁生效后执行，避免第二次调用先 POST 再被锁拒绝。
+      var startedAt = performance.now();
       var started = await (typeof startRequest === 'function' ? startRequest(flow) : startRequest);
+      if (flow.canceled || currentFlow !== flow) {
+        var canceledState = started && (started.state || started.flow);
+        if (canceledState && !flow.managed) await cancelWebLogin(String(canceledState));
+        throw canceledError();
+      }
       flow.started = started || {};
       flow.state = String(started && (started.state || started.flow) || '');
       if (!flow.state.trim()) throw new Error('网关未返回登录流程状态');
-      if (flow.canceled || currentFlow !== flow) await cancelWebLogin(flow.state);
       var authUrl = started && Object.prototype.hasOwnProperty.call(started, 'url')
         ? started.url : started && started.authUrl;
       if (authUrl == null) authUrl = '';
       if (typeof authUrl !== 'string') throw new Error('网关返回的登录链接格式无效');
       var hasUrl = !!authUrl.trim();
-      flow.managedLogin = dynamic && started.managedLogin === true;
-      flow.interactiveLogin = dynamic && started.interactiveLogin === true;
-      if (dynamic && (flow.managedLogin !== !!(flow.method && flow.method.managedLogin)
-        || flow.interactiveLogin && !(flow.method && flow.method.interactiveLogin)
-        || flow.managedLogin && started.methodIndex !== flow.method.methodIndex)) {
-        throw new Error('网关返回的登录步骤不属于当前方式，已停止本次交互。');
+      flow.managed = started.managedLogin === true;
+      if (flow.managed) {
+        checkManagedFlow(flow);
+        flow.phase = 'waiting'; flow.saved = false;
+      }
+      if (flow.managed && (started.provider !== provider || started.flow !== flow.state || hasUrl
+        || started.browserMode !== 'none' || started.manualCallback !== false || started.callbackInput !== 'url'
+        || !Number.isSafeInteger(started.methodIndex) || started.methodIndex !== flow.methodIndex
+        || typeof started.remainingMs !== 'number' || !Number.isFinite(started.remainingMs) || started.remainingMs <= 0)) {
+        throw new Error('托管登录启动信息无效，请重新发起');
       }
       flow.manualCallback = dynamic && typeof started.manualCallback === 'boolean' ? started.manualCallback
         : dynamic ? !!(flow.method && flow.method.manualCallback) : legacyNeedsManualCallback(provider);
@@ -1039,15 +1202,27 @@ pub fn shim_js() -> &'static str {
       // 插件 pollIntervalMs=0 是回调型，不代表关闭网关 /wait；不用于猜 manualCallback。
       flow.pollIntervalMs = Number.isFinite(interval) && interval > 0
         ? Math.max(1000, Math.min(30000, interval)) : 3000;
-      var remaining = Number(started.remainingMs);
-      flow.deadline = Date.now() + (Number.isFinite(remaining) ? Math.max(0, Math.min(5 * 60 * 1000, remaining)) : 5 * 60 * 1000);
+      var timeout = Number(started.timeoutMs);
+      flow.timeoutMs = Number.isFinite(timeout) && timeout > 0
+        ? Math.max(60000, Math.min(15 * 60 * 1000, timeout)) : 5 * 60 * 1000;
+      flow.deadline = Date.now() + flow.timeoutMs;
+      if (flow.managed) {
+        flow.monotonicDeadline = startedAt + Math.min(started.remainingMs, flow.timeoutMs);
+        flow.manualCallback = false;
+        if (performance.now() >= flow.monotonicDeadline) throw new Error('托管登录已过期，请重新发起');
+      }
       if (hasUrl) {
         if (!dynamic) authUrl = buildRaccoonWebAuthUrl(provider, flow.state, authUrl);
         flow.callbackTargets = loginCallbackTargets(authUrl);
         // 旧版没有白名单契约，保留原 SSO 行为；动态版严格采用真实 allowedHosts。
         authUrl = checkedLoginUrl(authUrl, dynamic ? started : null, flow.callbackTargets);
-        if (popup && !popup.closed) popup.location.href = authUrl;
-        else {
+        flow.authUrl = authUrl;
+        if (config.autoOpenBrowser === false) {
+          flow.browserOpened = false;
+        } else if (popup && !popup.closed) {
+          popup.location.href = authUrl;
+          flow.browserOpened = true;
+        } else {
           var opened = false;
           try {
             // 先拿同源空页句柄再断开 opener；直接 noopener 会在成功时也返回 null，
@@ -1059,6 +1234,7 @@ pub fn shim_js() -> &'static str {
               opened = true;
             }
           } catch (e) { /* 显示安全链接兜底 */ }
+          flow.browserOpened = opened;
           if (!opened) showLinkFallback(authUrl);
         }
       } else if (popup && !popup.closed) {
@@ -1067,7 +1243,7 @@ pub fn shim_js() -> &'static str {
       }
       emitLogin();
       var waiting = pollWait(flow);
-      if (!flow.manualCallback || flow.managedLogin || flow.interactiveLogin) return await waiting;
+      if (!flow.manualCallback) return await waiting;
       // 一个 /wait Promise 与安全粘贴 dialog 竞速，accepted 后仍等待同一个终态。
       var outcome = await Promise.race([
         waiting.then(function (session) { return { session: session }; },
@@ -1086,7 +1262,7 @@ pub fn shim_js() -> &'static str {
         var quiet = flow.externalCancel || (error && error.silent);
         return quiet ? { canceled: true, silent: true } : { canceled: true };
       }
-      if (flow.state) {
+      if (flow.state && !flow.managed && !(error && error.loginStateReadOnly)) {
         call('POST', '/api/session/login/cancel', { state: flow.state }).catch(function () {});
       }
       throw error;
@@ -1113,7 +1289,7 @@ pub fn shim_js() -> &'static str {
         args.socialRestore, args.options);
     },
     login_state: function () { return window.workbuddyDesktop.getLoginState(); },
-    cancel_login: function () { return window.workbuddyDesktop.cancelLogin(); },
+    cancel_login: function (args) { return window.workbuddyDesktop.cancelLogin(args && args.state); },
     api_request: function (args) {
       var request = (args && args.request) || {};
       return httpCall(request.method || 'GET', request.path || '/', request.body, false,
@@ -1375,11 +1551,12 @@ pub fn shim_js() -> &'static str {
    * File（流式上传），账号导入要读成文本解析，两者的后续步骤没有交集。
    * 解析口径与桌面壳 `commands.rs::import_accounts` 对齐，见 buildImportPayload。
    */
-  function pickFile(accept) {
+  function pickFile(accept, multiple) {
     return new Promise(function (resolve, reject) {
       var input = document.createElement('input');
       input.type = 'file';
       input.accept = accept;
+      if (multiple) input.multiple = true;
       input.setAttribute('aria-hidden', 'true');
       input.tabIndex = -1;
       // 视觉隐藏而非 display:none（理由见上）
@@ -1419,12 +1596,12 @@ pub fn shim_js() -> &'static str {
       }
 
       input.addEventListener('change', function () {
-        var file = input.files && input.files[0];
-        if (!file) { settleCancel(); return; }
+        var files = input.files ? Array.prototype.slice.call(input.files) : [];
+        if (!files.length) { settleCancel(); return; }
         picked = true;          // 同步置位：兜底那条链不再当取消
         settled = true;
         cleanup();
-        resolve({ canceled: false, file: file });
+        resolve({ canceled: false, file: files[0], files: files });
       });
 
       document.body.appendChild(input);
@@ -1434,18 +1611,70 @@ pub fn shim_js() -> &'static str {
     });
   }
 
-  /** 网页端的「导入账号」：选 .json → 解析 → `POST /api/accounts/import` */
+  /** 网页端的「导入账号」：支持一次多选多个 .json → 合并解析 → `POST /api/accounts/import` */
   async function importAccountsViaFile() {
-    var picked = await pickFile('.json');
+    var picked = await pickFile('.json', true);
     if (picked.canceled) return { canceled: true };
-    var text = await picked.file.text();
-    var payload;
-    try {
-      payload = buildImportPayload(JSON.parse(text));
-    } catch (error) {
-      throw asError(error);
+    var files = Array.isArray(picked.files) && picked.files.length ? picked.files : (picked.file ? [picked.file] : []);
+    if (!files.length) return { canceled: true };
+    var multi = files.length > 1;
+    var allAccounts = [];
+    var providerOrder = [];
+    var providerMap = Object.create(null);
+    var extraProviders = [];
+    var fileErrors = [];
+
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      try {
+        var text = (await file.text()).replace(/^\uFEFF/, '');
+        var part = buildImportPayload(JSON.parse(text));
+        for (var j = 0; j < part.accounts.length; j++) allAccounts.push(part.accounts[j]);
+        if (part.customProviders !== undefined) {
+          if (!Array.isArray(part.customProviders)) throw new Error('customProviders 必须是数组');
+          for (var k = 0; k < part.customProviders.length; k++) {
+            var def = part.customProviders[k];
+            var defId = def && typeof def === 'object' && typeof def.id === 'string' ? def.id.trim() : '';
+            if (defId) {
+              if (!Object.prototype.hasOwnProperty.call(providerMap, defId)) providerOrder.push(defId);
+              providerMap[defId] = def;
+            } else {
+              extraProviders.push(def);
+            }
+          }
+        }
+      } catch (error) {
+        var err = asError(error);
+        if (!multi) throw err;
+        fileErrors.push({ id: file.name || '未知文件', message: err.message || '读取或解析失败' });
+      }
     }
-    return call('POST', '/api/accounts/import', payload);
+
+    if (!allAccounts.length) {
+      if (!fileErrors.length) throw new Error('所选文件中没有可导入的账号');
+      return {
+        total: 0,
+        added: 0,
+        updated: 0,
+        skipped: 0,
+        failed: fileErrors.length,
+        errors: fileErrors,
+        customProviders: { added: 0, updated: 0 },
+      };
+    }
+
+    var payload = { accounts: allAccounts };
+    var mergedProviders = [];
+    for (var p = 0; p < providerOrder.length; p++) mergedProviders.push(providerMap[providerOrder[p]]);
+    for (var q = 0; q < extraProviders.length; q++) mergedProviders.push(extraProviders[q]);
+    if (mergedProviders.length) payload.customProviders = mergedProviders;
+
+    var result = await call('POST', '/api/accounts/import', payload);
+    if (fileErrors.length && result && typeof result === 'object') {
+      result.failed = (Number(result.failed) || 0) + fileErrors.length;
+      result.errors = fileErrors.concat(Array.isArray(result.errors) ? result.errors : []);
+    }
+    return result;
   }
 
   /**
@@ -1479,7 +1708,6 @@ pub fn shim_js() -> &'static str {
   // __TAURI_INTERNALS__ 先装：界面里两处直接 internals.invoke('api_request')
   // （sms-login 的兜底与添加账号的 postAccount）依赖它存在。
   window.__TAURI_INTERNALS__ = {
-    supportsAbortSignal: true,
     invoke: function (command, args) {
       return invokeShell(command, args).catch(asError).then(function (value) {
         if (value instanceof Error) throw value;
@@ -1493,45 +1721,72 @@ pub fn shim_js() -> &'static str {
   };
 
   window.workbuddyDesktop = {
+    routingGroupsAction: function (payload) { return call('POST', '/api/routing/groups/actions', payload); },
+    getSubscriptions: function () { return call('GET', '/api/subscriptions'); },
+    addSubscription: function (payload) { return call('POST', '/api/subscriptions/add', payload || {}); },
+    saveSubscription: function (payload) { return call('POST', '/api/subscriptions/save', payload || {}); },
+    refreshSubscription: function (id) { return call('POST', '/api/subscriptions/refresh', { id: String(id || '') }); },
+    removeSubscription: function (id) { return call('POST', '/api/subscriptions/remove', { id: String(id || '') }); },
+    decodeQrImage: function (payload) { return call('POST', '/api/subscriptions/decode-qr', payload || {}); },
+    getKernelStatus: function () { return call('GET', '/api/subscriptions/kernel'); },
+    downloadKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/download', payload || {}); },
+    importKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/import', payload || {}); },
+    cancelKernelDownload: function () { return call('POST', '/api/subscriptions/kernel/download/cancel', {}); },
+    restartKernel: function () { return call('POST', '/api/subscriptions/kernel/restart', {}); },
+    stopKernel: function () { return call('POST', '/api/subscriptions/kernel/stop', {}); },
+    removeKernel: function () { return call('POST', '/api/subscriptions/kernel/remove', {}); },
+    localTaskRequest: function (method, route, payload) {
+      if (!/^task-(jobs|plugins)(\/[a-z0-9-]+){0,2}$/.test(route) || !['GET','POST','PUT','DELETE'].includes(method)) throw Error('Invalid task operation');
+      return call(method, '/api/' + route, payload);
+    },
+    getGithubAccess: function () { return call('GET', '/api/update/github'); },
+    setGithubAccess: function (payload) { return call('POST', '/api/update/github', payload); },
+    getUpdateToken: function () { return call('GET', '/api/update/token'); },
+    setUpdateToken: function (payload) { return call('POST', '/api/update/token', payload); },
+    getTurnstile: function () { return call('GET', '/api/captcha/turnstile'); },
+    getPanelOauth: function () { return call('GET', '/api/panel-oauth'); },
+    savePanelOauth: function (patch) { return call('PUT', '/api/panel-oauth', patch); },
+    saveTurnstile: function (patch) { return call('PUT', '/api/captcha/turnstile', patch); },
+    previewPrivacy: function (payload) { return call('POST', '/api/privacy/test', payload); },
+    getPricing: function () { return call('GET', '/api/model-pricing'); },
+    savePricing: function (body) { return call('PUT', '/api/model-pricing', body); },
+    refreshPricingFx: function () { return call('POST', '/api/model-pricing/fx'); },
+    repriceRequests: function (body) { return call('POST', '/api/model-pricing/reprice', body); },
+
     // 平台标识：界面据此裁剪本机功能（导入桌面端登录态等在 web 下隐藏）
     platform: 'web',
 
     // ── 会话 ──
-    getState: function () { return call('GET', '/api/session'); },
+    getState: function () { return call('GET', '/api/session?accounts=index'); },
     startLogin: function (edition, mode, provider, socialRestore, options) {
-      var target = String(provider || 'workbuddy').trim();
-      var dynamic = hasMethodIndex(options);
+      var target = String(provider || '').trim();
+      if (!target || !hasMethodIndex(options)) {
+        return Promise.reject(new Error('请从添加账号页面选择当前提供商声明的登录方式；旧版默认登录入口已停止支持。'));
+      }
       if (target === 'monkeycode' || target === 'monkeycode-intl') {
         return Promise.reject(new Error('MonkeyCode 自动网页登录仅限桌面端；浏览器面板请登录对应官网后粘贴 session。'));
       }
-      // 只有旧小浣熊入口才改 redirect/预检；动态方法不能被 provider 特判覆盖。
-      if (!dynamic && target === 'raccoon') {
-        var problem = raccoonCallbackOriginProblem();
-        if (problem) return reportRaccoonCallbackProblem(problem);
-      }
       return runLoginFlow(target, async function (flow) {
-        if (dynamic) flow.method = await selectedLoginMethod(target, options);
+        flow.methodIndex = options.methodIndex;
+        flow.requestId = typeof options.requestId === 'string' ? options.requestId.trim() : '';
+        flow.method = await selectedLoginMethod(target, options);
         if (flow.canceled) throw canceledError();
-        var body = { edition: edition || 'cn', provider: target };
-        // 不压缩第四参 socialRestore；第五参对象保持原字段/原值（含 proxy:null）。
-        if (options !== undefined) body.options = options;
-        if (dynamic) {
-          body.mode = mode || 'embedded';
-          body.socialRestore = socialRestore === true;
-          // 兼容当前 API 的平铺读取；options 字段也完整保留给新端点。
-          body.methodIndex = options.methodIndex;
-          if (Object.prototype.hasOwnProperty.call(options, 'inputs')) body.inputs = options.inputs;
-          if (Object.prototype.hasOwnProperty.call(options, 'proxy')) body.proxy = options.proxy;
-        } else if (options && Object.prototype.hasOwnProperty.call(options, 'proxy')) {
-          // 旧入口（内置表单的网页登录）也能带登录代理：网关的非动态分支读的
-          // 就是顶层 `proxy`（见 api::session 的 legacy_proxy）。少了这一句，
-          // 无头服务器上选了代理也仍然直连。
-          body.proxy = options.proxy;
+        if (target === 'raccoon') {
+          var problem = raccoonCallbackOriginProblem();
+          if (problem) await reportRaccoonCallbackProblem(problem);
         }
-        var started = await call('POST', '/api/session/login/start', body);
-        flow.sourceGeneration = managementSessionGeneration;
-        return started;
-      }, { dynamic: dynamic, mode: mode || 'embedded', edition: edition || 'cn' });
+        var body = { provider: target, mode: 'external', methodIndex: options.methodIndex, locale: options.locale || 'zh-CN' };
+        if (target === 'raccoon') body.callbackOrigin = window.location.origin;
+        if (flow.requestId) body.requestId = flow.requestId;
+        if (Object.prototype.hasOwnProperty.call(options, 'inputs')) body.inputs = options.inputs;
+        if (Object.prototype.hasOwnProperty.call(options, 'proxy')) body.proxy = options.proxy;
+        return call('POST', '/api/session/login/start', body);
+      }, {
+        dynamic: true,
+        mode: mode || 'embedded',
+        edition: edition || 'cn',
+        autoOpenBrowser: !(options && options.autoOpenBrowser === false),
+      });
     },
     submitLoginCallback: function (state, callbackUrl) {
       return call('POST', '/api/session/login/callback', {
@@ -1542,7 +1797,30 @@ pub fn shim_js() -> &'static str {
     getLoginState: function () {
       return Promise.resolve(loginSnapshot());
     },
-    cancelLogin: async function () {
+    cancelLogin: async function (expectedState) {
+      if (expectedState !== undefined) {
+        var owner = currentFlow;
+        var targetState = String(expectedState);
+        var matchesOwner = Boolean(owner && (owner.state === targetState
+          || (owner.requestId && owner.requestId === targetState)));
+        if (owner && owner.managed && (!matchesOwner || owner.sourceLost
+          || owner.managementGeneration !== managementGeneration)) {
+          throw new Error('管理会话已变化，本次登录资格已失效；不会继续查询或重发原流程。');
+        }
+        if (matchesOwner) {
+          if (owner.managed && (owner.saved === null || owner.saved === true || owner.phase === 'unconfirmed')) {
+            owner.readOnlyClosed = true; closeWebOverlay(true); loginActive = false; loginProvider = ''; emitLogin();
+            return false;
+          }
+          owner.canceled = true; owner.externalCancel = true;
+          closeWebOverlay(true);
+          loginActive = false; loginProvider = ''; emitLogin();
+        }
+        var cancelBody = { state: owner && matchesOwner && owner.state ? owner.state : targetState };
+        if (owner && matchesOwner && owner.requestId) cancelBody.requestId = owner.requestId;
+        var res = await call('POST', '/api/session/login/cancel', cancelBody).catch(function () { return null; });
+        return matchesOwner ? { canceled: true } : res;
+      }
       // 桌面壳只记一个活动登录；网页端由本状态机驱动。
       //
       // 三步缺一不可（早先只做了第一步，于是「取消等待」之后粘贴回调那层
@@ -1555,8 +1833,18 @@ pub fn shim_js() -> &'static str {
       //
       // 取消来源在这里统一登记（externalCancel）：界面那一侧在发起取消时
       // 自己已经 toast 过一次，流程这边不要再重复提示。
+      if (currentFlow && currentFlow.managed && (currentFlow.sourceLost
+        || currentFlow.managementGeneration !== managementGeneration)) {
+        closeWebOverlay(true); loginActive = false; loginProvider = ''; emitLogin();
+        return false;
+      }
+      if (currentFlow && currentFlow.managed && (currentFlow.saved === null
+        || currentFlow.saved === true || currentFlow.phase === 'unconfirmed')) {
+        currentFlow.readOnlyClosed = true; closeWebOverlay(true); loginActive = false; loginProvider = ''; emitLogin();
+        return false;
+      }
       var wasActive = loginActive;
-      var state = currentFlow && currentFlow.state;
+      var state = currentFlow && (currentFlow.state || currentFlow.requestId);
       if (currentFlow) { currentFlow.canceled = true; currentFlow.externalCancel = true; }
       if (activeOverlay && activeOverlay.cancelable) {
         // 粘贴框自己会发 /cancel（见 cancelWebLogin），这里不重复发
@@ -1564,7 +1852,9 @@ pub fn shim_js() -> &'static str {
       } else {
         closeWebOverlay(true);
         if (state) {
-          call('POST', '/api/session/login/cancel', { state: state }).catch(function () {});
+          var payload = { state: state };
+          if (currentFlow && currentFlow.requestId) payload.requestId = currentFlow.requestId;
+          call('POST', '/api/session/login/cancel', payload).catch(function () {});
         }
       }
       loginActive = false;
@@ -1585,15 +1875,16 @@ pub fn shim_js() -> &'static str {
           return { ok: true, session: session };
         });
     },
-    getAutoclawOauthCaptchaConfig: function (provider) {
+    getAutoclawOauthCaptchaConfig: function (provider, proxy) {
       return call('POST', '/api/session/login/oauth/captcha-config',
-        provider ? { provider: String(provider) } : {});
+        { provider: provider ? String(provider) : undefined, proxy: proxy });
     },
-    startAutoclawOauth: function (provider, vendor, captchaVerifyParam) {
+    startAutoclawOauth: function (provider, vendor, captchaVerifyParam, proxy) {
       return call('POST', '/api/session/login/oauth/start', {
         provider: provider ? String(provider) : undefined,
         vendor: String(vendor || ''),
         captchaVerifyParam: String(captchaVerifyParam || ''),
+        proxy: proxy,
       });
     },
     // ── ZCode 限时套餐领取（三个薄封装，直接打账号子路径接口）──────
@@ -1617,35 +1908,47 @@ pub fn shim_js() -> &'static str {
       return call('POST', '/api/accounts/' + encodeURIComponent(String(accountId || ''))
         + '/zcode-claim/preview');
     },
-    zcodeClaim: function (accountId, planId, captchaVerifyParam, captchaRegion) {
-      return call('POST', '/api/accounts/' + encodeURIComponent(String(accountId || ''))
-        + '/zcode-claim', {
-        planId: planId ? String(planId) : '',
+    zcodeClaim: async function (accountId, planOrPayload, captchaVerifyParam, captchaRegion) {
+      var body = planOrPayload && typeof planOrPayload === 'object' && !Array.isArray(planOrPayload) ? {
+        provider: planOrPayload.provider, accountId: planOrPayload.accountId, configId: planOrPayload.configId,
+        planId: planOrPayload.planId, captchaVerifyParam: planOrPayload.captchaVerifyParam,
+        captchaRegion: planOrPayload.captchaRegion,
+      } : {
+        planId: planOrPayload ? String(planOrPayload) : '',
         captchaVerifyParam: String(captchaVerifyParam || ''),
         captchaRegion: captchaRegion ? String(captchaRegion) : '',
-      });
+      };
+      await ensureFreshSession();
+      return httpCall('POST', '/api/accounts/' + encodeURIComponent(String(accountId || ''))
+        + '/zcode-claim', body, true);
     },
     // ── ZCode 活动套餐通道的验证码令牌池（见 api/zcode_captcha.rs）──────
     // 与上面三条**不是一回事**：那三条服务「领套餐」（用户动作）；这两条服务
-    // **转发** —— 活动套餐的推理端点每条请求都要一个当次铸的令牌，令牌只能由
-    // 界面静默铸造后推进池子（唯一调用方 ui/zcode-captcha-pool.js）。
-    //
-    // ★ 这两条**必须**在这里给 web 端实现，理由就是本模块存在的理由：铸造器
-    // 只认 `window.workbuddyDesktop`，桌面端由 bridge.rs 注入、headless 由这里
-    // 注入。早先只给了桌面端，于是 headless（Docker / 浏览器面板）下铸造器
-    // 每轮都读到「没有这个方法」→ 安静退让 → 池子永远是空的，活动套餐通道
-    // 整条不可用（Issue #163）。铸造本身仍发生在**浏览器**里（阿里云 SDK 跑在
-    // 页面上），所以 headless 只要有人开着面板页就能维持池子 —— 与桌面端一致。
-    zcodeClaimVerification: function (payload) {
+    // **转发** —— 模型票据只由用户主动验证后提交，不由后台定时生成。
+    // 查询无参时只是概览；实际验证必须绑定账号，WASM 提交保留完整配置绑定。
+    // 桌面壳和网页桥保持同一调用形状，具体验证码界面仍由主程序组件承载。
+    zcodeClaimVerification: async function (payload) {
+      if (payload && payload.action === 'complete') {
+        await ensureFreshSession();
+        return httpCall('POST', '/api/zcode/claim-verification', payload, true);
+      }
       return call('POST', '/api/zcode/claim-verification', payload);
     },
-    zcodeCaptchaStats: function () {
-      return call('GET', '/api/zcode/captcha');
+    zcodeCaptchaStats: function (accountId, provider) {
+      return call('GET', '/api/zcode/captcha' + toQuery({
+        accountId: accountId == null ? '' : String(accountId),
+        provider: provider == null ? '' : String(provider),
+      }));
     },
-    pushZcodeCaptchaTokens: function (tokens) {
-      return call('POST', '/api/zcode/captcha', {
-        tokens: Array.isArray(tokens) ? tokens : [],
-      });
+    pushZcodeCaptchaTokens: async function (payload) {
+      var body = Array.isArray(payload) ? { tokens: payload } : {
+        provider: payload && payload.provider, accountId: payload && payload.accountId,
+        configId: payload && payload.configId,
+        tokens: payload && Array.isArray(payload.tokens) ? payload.tokens.map(function (item) { return { param: item && item.param }; }) : [],
+      };
+      // 只在发送前维护管理会话；一次性票据遇到401也不能自动重放。
+      await ensureFreshSession();
+      return httpCall('POST', '/api/zcode/captcha', body, true);
     },
     onLoginState: function (callback) {
       loginListeners.add(callback);
@@ -1679,9 +1982,9 @@ pub fn shim_js() -> &'static str {
     saveClientIdentification: function (payload) { return call('PUT', '/api/client-identification', payload); },
     previewClientIdentification: function (payload) { return call('POST', '/api/client-identification/preview', payload); },
     getCompactRoutes: function () { return call('GET', '/api/models/compact-routes'); },
+    saveCompactRoutes: function (payload) { return call('PUT', '/api/models/compact-routes', payload); },
     getTitleRoutes: function () { return call('GET', '/api/models/title-routes'); },
     saveTitleRoutes: function (payload) { return call('PUT', '/api/models/title-routes', payload); },
-    saveCompactRoutes: function (payload) { return call('PUT', '/api/models/compact-routes', payload); },
     setModelState: function (payload) { return call('POST', '/api/models/state', payload); },
     // 第 4 / 第 5 个参数（思考等级 / 映射开关）都按「有没有传」决定是否进请求体：
     // 后端按「请求体里有没有这个键」区分三态，undefined 的键不会进 JSON
@@ -1716,7 +2019,10 @@ pub fn shim_js() -> &'static str {
     deleteKey: function (id) { return call('DELETE', '/api/keys/' + encodeURIComponent(id)); },
 
     // ── 多账号 ──
-    getAccounts: function () { return call('GET', '/api/accounts'); },
+    getAccounts: function (query) { return call('GET', '/api/accounts' + toQuery(query)); },
+    queryAccounts: function (query) { return call('POST', '/api/accounts/query', query || {}); },
+    getAccountSelection: function (query) { return call('POST', '/api/accounts/selection', query || {}); },
+    getAccount: function (id) { return call('GET', '/api/accounts/' + encodeURIComponent(id)); },
     getAccountSorting: function () { return call('GET', '/api/accounts/sorting'); },
     saveAccountSorting: function (payload) { return call('PUT', '/api/accounts/sorting', payload || {}); },
     switchAccount: function (id) { return call('POST', '/api/accounts/current', { id: id }); },
@@ -1740,9 +2046,9 @@ pub fn shim_js() -> &'static str {
         direction: direction === 'down' ? 'down' : 'up',
       });
     },
-    clearRateLimits: function (id, model) {
+    clearRateLimits: function (id, model, includeProvider) {
       return call('POST', '/api/accounts/' + encodeURIComponent(id) + '/rate-limits/clear',
-        model ? { model: model } : {});
+        model ? { model: model } : { includeProvider: includeProvider === true });
     },
     batchAccounts: function (payload) {
       payload = payload || {};
@@ -1762,12 +2068,13 @@ pub fn shim_js() -> &'static str {
     },
 
     // ── 账号路由（与 bridge.rs 的同名方法成对，缺一边会报「桥接方法缺失」）──
+    getRoutingErrors: function () { return call('GET', '/api/routing/errors'); },
+    saveRoutingErrors: function (payload) { return call('PUT', '/api/routing/errors', payload); },
     getRoutingConfig: function () { return call('GET', '/api/routing'); },
     getRoutingWorkspace: function (model) { return call('GET', '/api/routing/workspace' + toQuery({ model: model })); },
     saveRoutingProfile: function (payload) { return call('PUT', '/api/routing/profile', payload || {}); },
     getRoutingGroups: function () { return call('GET', '/api/routing/groups'); },
     saveRoutingGroup: function (payload) { return call('PUT', '/api/routing/groups', payload); },
-    routingGroupsAction: function (payload) { return call('POST', '/api/routing/groups/actions', payload); },
     previewRouting: function (payload) { return call('POST', '/api/routing/preview', payload); },
     getRoutingSticky: function (model) { return call('GET', '/api/routing/sticky' + toQuery({ model: model })); },
     clearRoutingSticky: function (payload) { return call('POST', '/api/routing/sticky/clear', payload || {}); },
@@ -1793,12 +2100,16 @@ pub fn shim_js() -> &'static str {
     // Agent（本机 AI 客户端的配置接管；与桌面壳 bridge.rs 的同名方法成对
     // 存在 —— 只加一边时另一形态下的页面会报「桥接方法缺失」。契约见
     // api::agents 的模块头：写操作都返回整份 {clients}，就地替换）
-    getAgents: function () { return call('GET', '/api/agents'); },
+    getAgents: function (options) { return call('GET', '/api/agents' + (options && options.refresh ? '?refresh=1' : '')); },
+    getAgentModels: function (gatewayKeyId) { return call('GET', '/api/agents/models' + (gatewayKeyId == null ? '' : '?gatewayKeyId=' + encodeURIComponent(gatewayKeyId))); },
     saveAgentProfiles: function (payload) { return call('POST', '/api/agents/profiles', payload || {}); },
     applyAgentProfile: function (payload) { return call('POST', '/api/agents/apply', payload || {}); },
     previewAgentProfile: function (payload) { return call('POST', '/api/agents/preview', payload || {}); },
     restoreAgentClient: function (payload) { return call('POST', '/api/agents/restore', payload || {}); },
     importAgentClient: function (payload) { return call('POST', '/api/agents/import', payload || {}); },
+    getLocalDirectStatus: function () { return call('GET', '/api/agents/local-direct'); },
+    saveLocalDirectSettings: function (payload) { return call('PUT', '/api/agents/local-direct', payload || {}); },
+    syncLocalDirect: function (payload) { return call('POST', '/api/agents/local-direct/sync', payload || {}); },
     // 代理池（「网络代理」页；与桌面壳 bridge.rs 的同名方法成对存在，
     // 契约见 api::proxies 的模块头 —— 只加一边时另一形态下的页面会报
     // 「桥接方法缺失」，标题栏那一族有同样的教训）
@@ -1806,33 +2117,21 @@ pub fn shim_js() -> &'static str {
     createProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool', payload || {}); },
     updateProxyPoolItem: function (payload) { return call('POST', '/api/proxies/pool/update', payload || {}); },
     setProxyPoolItemEnabled: function (payload) { return call('POST', '/api/proxies/pool/enable', payload || {}); },
-    removeProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/remove', { id: String(id || '') }); },
+    removeProxyPoolItem: function (id, options) {
+      var body = { id: String(id || '') };
+      if (options && options.resetUpdateProxy === true) body.resetUpdateProxy = true;
+      return call('POST', '/api/proxies/pool/remove', body);
+    },
     testProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/test', { id: String(id || '') }); },
     syncClashToProxyPool: function () { return call('POST', '/api/proxies/pool/sync-clash', {}); },
     // 代理设置（「网络代理」页的设置弹窗；与桌面壳 bridge.rs 的同名方法
     // 成对存在，契约见 api::proxies 的模块头 settings 两条）
     getProxySettings: function () { return call('GET', '/api/proxies/settings'); },
     saveProxySettings: function (payload) { return call('POST', '/api/proxies/settings', payload || {}); },
-    // 订阅（「网络代理」页的订阅区块；与桌面壳 bridge.rs 的同名方法成对存在，
-    // 契约见 api::subscriptions 的模块头 —— 写操作后端投一条内核命令（异步），
-    // 节点数与运行状态由轮询 kernel 看结果）
-    getSubscriptions: function () { return call('GET', '/api/subscriptions'); },
-    addSubscription: function (payload) { return call('POST', '/api/subscriptions/add', payload || {}); },
-    saveSubscription: function (payload) { return call('POST', '/api/subscriptions/save', payload || {}); },
-    refreshSubscription: function (id) { return call('POST', '/api/subscriptions/refresh', { id: String(id || '') }); },
-    removeSubscription: function (id) { return call('POST', '/api/subscriptions/remove', { id: String(id || '') }); },
-    decodeQrImage: function (payload) { return call('POST', '/api/subscriptions/decode-qr', payload || {}); },
-    getKernelStatus: function () { return call('GET', '/api/subscriptions/kernel'); },
-    downloadKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/download', payload || {}); },
-    importKernel: function (payload) { return call('POST', '/api/subscriptions/kernel/import', payload || {}); },
-    cancelKernelDownload: function () { return call('POST', '/api/subscriptions/kernel/download/cancel', {}); },
-    restartKernel: function () { return call('POST', '/api/subscriptions/kernel/restart', {}); },
-    // 手动关闭内核（与桌面壳 bridge.rs 的同名方法成对存在；只停进程，订阅与端口注册表保留）
-    stopKernel: function () { return call('POST', '/api/subscriptions/kernel/stop', {}); },
-    removeKernel: function () { return call('POST', '/api/subscriptions/kernel/remove', {}); },
     // 文件夹选择框是**壳的能力**（web 版没有壳）：回 `unsupported`，界面据此提示
     // 手输路径 —— 只回 `canceled` 的话，点一下按钮什么都不会发生，用户会以为卡了
     pickFolder: function () { return Promise.resolve({ canceled: true, unsupported: true }); },
+    pickAgentConfigFile: function () { return Promise.resolve({ canceled: true, unsupported: true }); },
 
     // ── 积分 / 签到 ──
     getUsage: function () { return call('GET', '/api/usage'); },
@@ -1841,9 +2140,26 @@ pub fn shim_js() -> &'static str {
     getAllBalances: function (id) {
       return call('GET', '/api/accounts/usage' + (id ? '?id=' + encodeURIComponent(id) : ''));
     },
-    getBalancesSnapshot: function () { return call('GET', '/api/accounts/usage/snapshot'); },
+    startBalanceQuery: function (id, replace) { return call('POST', '/api/accounts/usage/start', { id: id || null, replace: replace === true }); },
+    cancelBalanceQuery: function (id, requestId) { return call('POST', '/api/accounts/usage/cancel', { id: id, requestId: requestId }); },
+    getBalancesSnapshot: function (ids) { return Array.isArray(ids) ? call('POST', '/api/accounts/usage/snapshot', { ids: ids }) : call('GET', '/api/accounts/usage/snapshot'); },
     getAccountConnections: function () { return call('GET', '/api/accounts/connections'); },
     checkinAllAccounts: function (id) { return call('POST', '/api/accounts/checkin', id ? { id: id } : {}); },
+    getCampaignRewards: function (id) {
+      return call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns');
+    },
+    claimCampaignReward: function (id, campaignId) {
+      return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns/claim', { campaignId: campaignId });
+    },
+    redeemCampaignBenefit: function (id, code) {
+      return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/campaigns/redeem', { code: code });
+    },
+    getOfficeaceSubscription: function (id) {
+      return call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/officeace-subscription');
+    },
+    activateOfficeaceSubscription: function (id, confirmAgreements) {
+      return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/officeace-subscription/activate', { confirmAgreements: confirmAgreements === true });
+    },
     // ── Loomy 新手任务（查询 / 一键领取）──
     // 与桌面 `bridge.rs` 的同名方法成对维护：签到后界面查询任务状态、有未领取才
     // 弹窗领取（accounts-dialog-onboarding）。
@@ -1902,6 +2218,7 @@ pub fn shim_js() -> &'static str {
         // 沿用同一轮登录（见 api::session::login_tabbit_sms_send 的说明）。
         supportsCaptcha: isObject && input.supportsCaptcha ? true : undefined,
         uuid: isObject && input.uuid ? String(input.uuid) : undefined,
+        proxy: isObject && Object.prototype.hasOwnProperty.call(input, 'proxy') ? input.proxy : undefined,
       });
     },
     // 打开上游给的人机验证页。网页面板没有壳命令可用，直接开新标签：
@@ -1935,6 +2252,7 @@ pub fn shim_js() -> &'static str {
       if (payload.uuid) body.uuid = String(payload.uuid);
       if (payload.name) body.name = String(payload.name);
       if (provider) body.provider = provider;
+      if (Object.prototype.hasOwnProperty.call(payload, 'proxy')) body.proxy = payload.proxy;
       return call('POST', path, body);
     },
 
@@ -1958,8 +2276,10 @@ pub fn shim_js() -> &'static str {
     getTravelSchedule: function () { return call('GET', '/api/travel-schedule'); },
     saveTravelSchedule: function (patch) { return call('POST', '/api/travel-schedule', patch); },
     runTravelScheduleNow: function () { return call('POST', '/api/travel-schedule/run', {}); },
-    // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）
+    // WorkBuddy 国际版日活任务的手动粒度入口（mode: full | claim | keepalive）及详情/重置
     runCheckinActivity: function (id, mode) { return call('POST', '/api/checkin-activity', { id: id, mode: mode }); },
+    getCheckinActivityStatus: function (id) { return call('GET', '/api/checkin-activity/status?id=' + encodeURIComponent(String(id || ''))); },
+    resetCheckinActivity: function (id) { return call('POST', '/api/checkin-activity/reset', { id: id }); },
     // 签到中心的聚合快照（与 bridge.rs 的同名方法同一路径）
     getCheckinCenter: function () { return call('GET', '/api/checkin-center'); },
     // Qoder UMID 组件（设备风控身份）的状态与安装（与 bridge.rs 的同名方法成对）。
@@ -1987,11 +2307,11 @@ pub fn shim_js() -> &'static str {
     },
 
     // ── 间隔型定时任务 ──
+    getMaintenance: function (query) { return call('GET', '/api/maintenance?' + new URLSearchParams(query || {}).toString()); },
+    getMaintenanceRecord: function (id) { return call('GET', '/api/maintenance/records/' + encodeURIComponent(id)); },
+    runMaintenance: function (id) { return call('POST', '/api/maintenance/run/' + encodeURIComponent(id), {}); },
+    retryMaintenance: function (id, itemId) { return call('POST', '/api/maintenance/records/' + encodeURIComponent(id) + '/retry', itemId == null ? {} : { itemId: itemId }); },
     getScheduledTasks: function () { return call('GET', '/api/scheduled-tasks'); },
-    localTaskRequest: function (method, route, payload) {
-      if (!/^task-(jobs|plugins)(\/[a-z0-9-]+){0,2}$/.test(route) || !['GET','POST','PUT','DELETE'].includes(method)) throw Error('Invalid task operation');
-      return call(method, '/api/' + route, payload);
-    },
     saveScheduledTask: function (id, patch) {
       return call('PATCH', '/api/scheduled-tasks/' + encodeURIComponent(String(id || '')), patch);
     },
@@ -2002,6 +2322,7 @@ pub fn shim_js() -> &'static str {
     // ── 软件更新（检查 / 下载 / 容器内更新；只有「跑安装程序」是桌面专有）──
     checkUpdate: function () { return invokeShell('check_update'); },
     getUpdateStatus: function () { return call('GET', '/api/update/status'); },
+    getAdvertisements: function () { return call('GET', '/api/advertisements'); },
     // 设置页「版本信息」：与桌面 bridge 的同名方法成对存在（两边必须一起加，
     // 少一边时那一半形态会报「桥接方法缺失」）。网页端没有壳侧的
     // package_info / WebView 版本，这里补的是**浏览器**那份：
@@ -2022,11 +2343,6 @@ pub fn shim_js() -> &'static str {
     // 「软件更新」的出网线路（null = 直连）：与桌面 bridge 对齐，面板下拉读写
     getUpdateProxy: function () { return call('GET', '/api/update/proxy'); },
     setUpdateProxy: function (payload) { return call('POST', '/api/update/proxy', payload); },
-    getGithubAccess: function () { return call('GET', '/api/update/github'); },
-    setGithubAccess: function (payload) { return call('POST', '/api/update/github', payload); },
-    // GitHub 令牌：读只报 {filled, origin}，写传 {token: '…' | null}
-    getUpdateToken: function () { return call('GET', '/api/update/token'); },
-    setUpdateToken: function (payload) { return call('POST', '/api/update/token', payload); },
     // 「加入 beta 版」：读只报 {enabled}，写传 {enabled: true|false}（与桌面 bridge
     // 逐字同形 —— 两侧接口名与签名必须一致，界面代码零改动地跑在两边）
     getUpdateBeta: function () { return call('GET', '/api/update/beta'); },
@@ -2050,17 +2366,26 @@ pub fn shim_js() -> &'static str {
     startWindowsServiceUpdate: function (payload) { return call('POST', '/api/update/windows-service', payload); },
     restartService: function () { return call('POST', '/api/update/restart', {}); },
 
-    // ── 出站指纹脱敏 ──
+    // ── 关键词替换（原指纹脱敏）──
     getSanitize: function () { return call('GET', '/api/sanitize'); },
     saveSanitize: function (patch) {
       return call('PUT', '/api/sanitize', typeof patch === 'boolean'
         ? { sanitizeBlacklistFingerprints: patch } : patch);
     },
 
+    // ── 隐私脱敏 ──
+    getPrivacy: function () { return call('GET', '/api/privacy'); },
+    savePrivacy: function (patch) { return call('PUT', '/api/privacy', patch || {}); },
+    testPrivacy: function (payload) { return call('POST', '/api/privacy/test', payload || {}); },
+
     // ── 开发者角色兼容 ──
     // 与桌面桥（src/bridge.rs 的 getDeveloperRoleCompat / saveDeveloperRoleCompat）
     // 同一映射：两边接口名与签名必须一致，界面代码零改动地跑在两边
     //（漏一侧的症状见 getClineHeaders 那段）。
+    getWebToolEmulation: function () { return call('GET', '/api/web-tool-emulation'); },
+    saveWebToolEmulation: function (enabled) {
+      return call('PUT', '/api/web-tool-emulation', { enabled: enabled === true });
+    },
     getDeveloperRoleCompat: function () { return call('GET', '/api/developer-role-compat'); },
     saveDeveloperRoleCompat: function (enabled) {
       return call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true });
@@ -2087,8 +2412,7 @@ pub fn shim_js() -> &'static str {
       return call('PUT', '/api/cline/headers', { overrides: overrides || {} });
     },
 
-    // ── ZCode 客户端版本号 ──
-    // 与桌面桥（src/bridge.rs 的 getZcodeVersion / saveZcodeVersion）同一映射。
+    // 兼容尚未刷新的旧设置页；新界面使用通用提供商设置接口。
     getZcodeVersion: function () { return call('GET', '/api/zcode/version'); },
     saveZcodeVersion: function (version) {
       return call('PUT', '/api/zcode/version', { version: version == null ? '' : String(version) });
@@ -2103,8 +2427,8 @@ pub fn shim_js() -> &'static str {
     // ── 系统提示词与内容拦截降级 ──
     getPrompt: function () { return call('GET', '/api/prompt'); },
     getPromptRules: function () { return call('GET', '/api/prompt/rules'); },
-    savePromptRules: function (body) { return call('PUT', '/api/prompt/rules', body); },
-    previewPromptRules: function (body) { return call('POST', '/api/prompt/rules/preview', body); },
+    savePromptRules: function (payload) { return call('PUT', '/api/prompt/rules', payload); },
+    previewPromptRules: function (payload) { return call('POST', '/api/prompt/rules/preview', payload); },
     savePrompt: function (payload) {
       payload = payload || {};
       return call('PUT', '/api/prompt', {
@@ -2134,21 +2458,6 @@ pub fn shim_js() -> &'static str {
     // 「在 WebUI 里隐藏的菜单客户端也跟着隐藏」这条功能等于不存在。
     // 语义见 api::sidebar_layout：读回 `{layout}`（null = 没存过），写整份。
     getSidebarLayout: function () { return call('GET', '/api/sidebar-layout'); },
-    saveBranding: function (patch) { return call('PUT', '/api/branding', patch); },
-    getPrivacy: function () { return call('GET', '/api/privacy'); },
-    getTurnstile: function () { return call('GET', '/api/captcha/turnstile'); },
-    getPanelOauth: function () { return call('GET', '/api/panel-oauth'); },
-    savePanelOauth: function (patch) { return call('PUT', '/api/panel-oauth', patch); },
-    saveTurnstile: function (patch) { return call('PUT', '/api/captcha/turnstile', patch); },
-    savePrivacy: function (patch) { return call('PUT', '/api/privacy', patch); },
-    previewPrivacy: function (payload) { return call('POST', '/api/privacy/test', payload); },
-    getNotifications: function () { return call('GET', '/api/notifications'); },
-    getPricing: function () { return call('GET', '/api/model-pricing'); },
-    savePricing: function (body) { return call('PUT', '/api/model-pricing', body); },
-    refreshPricingFx: function () { return call('POST', '/api/model-pricing/fx'); },
-    repriceRequests: function (body) { return call('POST', '/api/model-pricing/reprice', body); },
-    saveNotifications: function (patch) { return call('PUT', '/api/notifications', patch); },
-    testNotification: function (payload) { return call('POST', '/api/notifications/test', payload); },
     saveSidebarLayout: function (layout) {
       return call('PUT', '/api/sidebar-layout', { layout: layout === undefined ? null : layout });
     },
@@ -2164,14 +2473,19 @@ pub fn shim_js() -> &'static str {
         startDate: dates && dates.start,
         endDate: dates && dates.end,
         apiKey: options && options.apiKey,
+        client: options && options.client,
+        origin: options && options.origin,
       }));
     },
     getStatsRequests: function (query) { return call('GET', '/api/stats/requests' + toQuery(query)); },
+    getStatsRequestDetail: function (query) { return call('GET', '/api/stats/requests/detail' + toQuery(query)); },
     getStatsRequestFilters: function () { return call('GET', '/api/stats/requests/filters'); },
     clearStatsRequests: function (query) { return call('DELETE', '/api/stats/requests' + toQuery(query)); },
     // 按 id 取单条请求的原始正文（详情弹窗「预览对话」的数据源；找不到给 404）
-    getStatsRequestRaw: function (id) {
-      return call('GET', '/api/stats/requests/raw' + toQuery({ id: id }));
+    getStatsRequestRaw: function (id, rowId) {
+      return call('GET', '/api/stats/requests/raw' + toQuery(
+        id && typeof id === 'object' ? id : { id: id, rowId: rowId }
+      ));
     },
     // 掐掉一条在途请求（请求日志的「终止」与模型测试弹窗共用；桌面壳的
     // invoke 没有 abort，这是前端唯一能中止在途请求的手段）。
@@ -2223,6 +2537,8 @@ pub fn shim_js() -> &'static str {
     // ── 机器人校验开关（登录 / 注册的 ALTCHA proof-of-work，分两端）──
     // 与桌面 bridge 的同名方法逐字同形：patch 是 `{captchaDesktop?, captchaWeb?}`
     // （部分更新）；旧签名传布尔值时按「两端一起改」处理（旧界面的调用形态）。
+    getBranding: function () { return call('GET', '/api/branding'); },
+    saveBranding: function (patch) { return call('PUT', '/api/branding', patch || {}); },
     getCaptchaSetting: function () { return call('GET', '/api/captcha'); },
     saveCaptchaSetting: function (patch) {
       return call(
@@ -2381,6 +2697,22 @@ pub fn shim_js() -> &'static str {
     importDatabase: function (password) { return importDatabase(password); },
     // 恢复进度：网页端与桌面端同一条后端端点（见 api::backup_api）
     getBackupProgress: function () { return call('GET', '/api/backup/progress'); },
+
+    // ── 系统通知（设置页「通知」）──
+    getNotifications: function () { return call('GET', '/api/notifications'); },
+    saveNotifications: function (payload) { return call('PUT', '/api/notifications', payload || {}); },
+    testNotification: function (payload) { return call('POST', '/api/notifications/test', payload || {}); },
+
+    // ── 面板 OAuth 第三方登录（设置页「账户」）──
+    getOauthSettings: function () { return call('GET', '/api/panel/oauth/settings'); },
+    saveOauthSettings: function (payload) { return call('PUT', '/api/panel/oauth/settings', payload || {}); },
+    startOauthBind: function (payload) { return call('POST', '/api/panel/oauth/bind-url', payload || {}); },
+    pollOauthState: function (state) { return call('GET', '/api/panel/oauth/poll' + toQuery({ state: state })); },
+
+    // ── 模型计价 ──
+    getModelPricing: function () { return call('GET', '/api/model-pricing'); },
+    saveModelPricing: function (payload) { return call('PUT', '/api/model-pricing', payload || {}); },
+    refreshFxRate: function () { return call('POST', '/api/model-pricing/fx/refresh', {}); },
   };
 
   // 把筛选条件转成查询串（与桌面 bridge 的 toQuery 同语义：空值跳过）
@@ -2404,12 +2736,13 @@ pub fn shim_js() -> &'static str {
     return result ? '?' + result : '';
   }
 
-  // 写类请求成功后重放一次状态（模拟桌面的 accounts:state-changed 推送）：
-  // 拦一层 call，只对管理 API 的非 GET 生效，/v1/* 与登录轮询不受影响。
+  // 查询接口也会使用 POST；只读请求不能触发写后状态通知。
   var rawCall = call;
   call = function (method, path, body) {
     var promise = rawCall(method, path, body);
-    if (method !== 'GET' && path.indexOf('/api/') === 0) {
+    var pathname = path.split('?')[0];
+    var reads = ['/api/accounts/query', '/api/accounts/selection', '/api/accounts/usage/snapshot'];
+    if (method !== 'GET' && method !== 'HEAD' && path.indexOf('/api/') === 0 && reads.indexOf(pathname) < 0) {
       promise.then(function () { emitStateSoon(); }, function () {});
     }
     return promise;

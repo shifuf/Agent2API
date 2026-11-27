@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 use self::context::{ProtocolContext, Variant};
 use super::{loopback::Lease, unavailable, Call, RuntimeBinding, Session, State};
 use crate::server::core::{
-    plugin_host::wasm::fixed_http::FrozenHttpClient,
+    egress::managed::FrozenHttpClient,
     plugin_host::wasm::{managed_policy, manifest::Options},
 };
 use crate::server::errors::GatewayError;
@@ -190,7 +190,8 @@ pub(super) async fn prepare(
         .as_ref()
         .and_then(|context| context.proxy.as_ref())
         .ok_or_else(|| GatewayError::bad_request("请明确选择本次Trae登录的直连或代理出口"))?
-        .selected()?;
+        .selected
+        .clone();
     let reservation = super::nonce()?;
     let runtime = {
         let mut state = call.session.state.lock().map_err(|_| unavailable())?;
@@ -228,7 +229,7 @@ pub(super) async fn prepare(
         biased;
         _ = call.ended() => return Err(unavailable()),
         _ = runtime.stopped.cancelled() => return Err(unavailable()),
-        result = FrozenHttpClient::from_selected(selected) => result.map_err(|_|
+        result = FrozenHttpClient::from_path(selected) => result.map_err(|_|
             GatewayError::with_status(503, "Trae 本次冻结出口不可用，未改道或发起授权"))?,
     };
     call.validate(call.provider())?;
@@ -282,6 +283,7 @@ pub(super) async fn prepare(
                 official_state: None,
                 authorization_url: None,
                 passport: None,
+                kiro: None,
                 consumed: false,
                 queued: false,
                 cancel: call.session.cancel.child_token(),

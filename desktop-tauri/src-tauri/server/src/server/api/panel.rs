@@ -46,6 +46,10 @@ fn body_str<'a>(payload: &'a serde_json::Value, field: &str) -> String {
 ///
 /// `local_panel` 决定读哪一端的开关（桌面壳与 headless 是两套独立的设置）。
 pub(super) async fn check_captcha(payload: &serde_json::Value, state: &ServerState) -> Result<(), Response> {
+    if config::current().raw().contains_key(config::captcha::KEY_PANEL_CAPTCHA) {
+        return crate::server::panel_captcha::verify(payload, state.local_panel).await
+            .map_err(|(status, message)| errors::management_error(status, message));
+    }
     if !config::current().captcha_enabled(state.local_panel) {
         return Ok(());
     }
@@ -67,6 +71,16 @@ pub(super) async fn check_captcha(payload: &serde_json::Value, state: &ServerSta
 /// 开关关闭时回 400 —— 前端据此隐藏验证行。
 pub async fn captcha_challenge(State(state): State<ServerState>) -> Response {
     if !config::current().captcha_enabled(state.local_panel) { return errors::management_error(400, "机器人校验未启用"); }
+    let current = config::current();
+    if current.raw().contains_key(config::captcha::KEY_PANEL_CAPTCHA) {
+        if config::captcha::CaptchaSettings::from_config(&current).provider != "altcha" {
+            return errors::management_error(409, "当前使用 Turnstile，请刷新登录页后完成验证");
+        }
+        return match altcha::challenge(state.local_panel) {
+            Some(challenge) => crate::server::http::raw_json(challenge),
+            None => errors::management_error(400, "机器人校验未启用"),
+        };
+    }
     match panel_turnstile::load(state.db()) {
         Ok(settings) if settings.provider == Provider::Turnstile => return crate::server::http::raw_json(serde_json::json!({"provider":"turnstile","siteKey":settings.site_key,"widgetOrigin":settings.widget_origin})),
         Err(error) => return errors::management_error(503,error),
@@ -274,7 +288,16 @@ fn issue_response(session: access::IssuedSession, tokens_in_body: bool) -> Respo
 ///
 /// 挂 public：打开登录页时用户还没有任何凭证。
 pub async fn panel_status(State(state): State<ServerState>) -> Response {
-    let enabled = config::current().captcha_enabled(state.local_panel);
+    let current = config::current();
+    let enabled = current.captcha_enabled(state.local_panel);
+    let oauth = crate::server::core::panel_oauth::PanelOauthSettings::from_raw(current.raw()).public_status_json();
+    if current.raw().contains_key(config::captcha::KEY_PANEL_CAPTCHA) {
+        let mut status = config::captcha::CaptchaSettings::from_config(&current).public_json(enabled);
+        status["registered"] = serde_json::json!(access::admin_registered());
+        status["oauth"] = oauth;
+        status["oauthProviders"] = super::panel_oauth::providers(&state);
+        return ok_json(status);
+    }
     let settings = match panel_turnstile::load(state.db()) {
         Ok(settings) => settings,
         Err(error) if enabled => return errors::management_error(503,error),
@@ -283,6 +306,8 @@ pub async fn panel_status(State(state): State<ServerState>) -> Response {
     ok_json(serde_json::json!({
         "registered": access::admin_registered(),
         "oauthProviders":super::panel_oauth::providers(&state),
+        "oauth": oauth,
+        "turnstileWidgetOrigin": settings.widget_origin,
         "captchaEnabled":enabled, "captchaProvider":settings.provider, "turnstileSiteKey":if enabled && settings.provider == Provider::Turnstile {Some(settings.site_key)} else {None},
     }))
 }
@@ -350,8 +375,17 @@ pub async fn panel_login(
     if !access::admin_registered() {
         return management_error(400, "尚未注册管理员账号：请先在登录页完成首次注册");
     }
+    let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
+    let username = body_str(&payload, "username");
+    let ip_text = addr.ip().to_string();
     if access::login_locked(addr.ip()) {
         logging::log("[Security]", &format!("❌ 面板登录已锁定（{}）", addr.ip()));
+        crate::server::core::notifications::notify_login_failure(
+            "账号密码",
+            &username,
+            &ip_text,
+            "登录失败次数过多，处于 5 分钟临时锁定中",
+        );
         return management_error(429, "登录失败次数过多，请 5 分钟后再试");
     }
     let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
@@ -359,16 +393,25 @@ pub async fn panel_login(
         crate::server::core::notifications::login(false);
         return response;
     }
-    let username = body_str(&payload, "username");
     let password = payload
         .get("password")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
 
     if !access::verify_login(&username, password) {
-        crate::server::core::notifications::login(false);
         access::record_login_failure(addr.ip());
         logging::log("[Security]", &format!("❌ 面板登录失败（{}）", addr.ip()));
+        let reason = if access::login_locked(addr.ip()) {
+            "账号或密码不正确（连续失败已触发 5 分钟临时锁定）"
+        } else {
+            "账号或密码不正确"
+        };
+        crate::server::core::notifications::notify_login_failure(
+            "账号密码",
+            &username,
+            &ip_text,
+            reason,
+        );
         return management_error(401, "账号或密码不正确");
     }
     access::clear_login_failures(addr.ip());

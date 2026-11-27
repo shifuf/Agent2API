@@ -1,4 +1,7 @@
-//! Daily backup worker: debounce account changes and check the calendar every minute.
+//! 自动同步：变更通知合并、业务内容去重、最小上传间隔与失败退避。
+//! SQLite 回调只发非阻塞信号；kv 由同步范围内的写入点显式通知。
+//! 等待期间只记「有待处理变更」，到期读取最新快照；启动时补查，避免重启丢待办。
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::collections::{BTreeMap, BTreeSet};
@@ -6,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use zeroize::Zeroizing;
 
 use crate::server::core::crypto::{self, SecretScope};
 use crate::server::db::Db;
@@ -15,8 +19,10 @@ use super::{policy, settings, snapshot};
 
 /// 第一个信号之后的等待窗口（合并窗口内到达的信号不再单独上传）
 const DEBOUNCE_MS: u64 = 1_000;
-/// 连续信号下的最长等待：到点必须传一次
+/// 连续变更的合并上限，不替代两次上传之间的最小间隔。
 const MAX_WAIT_MS: u64 = 10_000;
+const RETRY_BASE_MS: i64 = 60_000;
+const RETRY_MAX_MS: i64 = 3_600_000;
 
 static CHANGE_TX: OnceLock<Sender<()>> = OnceLock::new();
 static SUPPRESS_DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -35,9 +41,13 @@ impl SuppressionGuard {
 
 impl Drop for SuppressionGuard {
     fn drop(&mut self) {
-        let _ = SUPPRESS_DEPTH.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+        let previous = SUPPRESS_DEPTH.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
             Some(value.saturating_sub(1))
         });
+        if previous == Ok(1) {
+            // 抑制期间也可能有真正的本地写入，结束后补查一次，不能丢掉这些变更。
+            notify_change();
+        }
     }
 }
 
@@ -95,12 +105,12 @@ pub(crate) fn spawn_worker(db: Db) {
     crate::spawn_task(async move {
         run_worker(db, rx).await;
     });
+    notify_change();
 }
 
 async fn run_worker(db: Db, mut rx: Receiver<()>) {
     let mut timer = tokio::time::interval(Duration::from_secs(60));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut retry: Option<(String, Instant)> = None;
     loop {
         tokio::select! {
             value = rx.recv() => if value.is_none() { return; },
@@ -123,14 +133,16 @@ async fn run_worker(db: Db, mut rx: Receiver<()>) {
                 Err(_) => break,
             }
         }
-        let scope = policy::target_scope(&settings::load());
-        if retry.as_ref().is_some_and(|(target, until)| target == &scope && Instant::now() < *until) { continue; }
-        match run_once(&db).await {
-            Err(error) => {
-                retry = Some((scope, Instant::now() + Duration::from_secs(300)));
-                super::record_failure(&error, "auto");
+        let mut retry = None;
+        loop {
+            if !wait_until_ready(&mut rx, retry.as_ref()).await {
+                break;
             }
-            Ok(_) => retry = None,
+            match run_once(&db).await {
+                RunOutcome::Complete => break,
+                RunOutcome::Deferred => retry = None,
+                RunOutcome::Retry(delay) => retry = Some(delay),
+            }
         }
     }
 }
@@ -155,20 +167,101 @@ fn upload_due(settings: &settings::CloudSyncSettings, ids: &BTreeSet<String>, no
     };
     policy::should_upload(state, &scope, now, ids, &crypto::key_fingerprint(SecretScope::Accounts))
 }
-async fn run_once(db: &Db) -> Result<bool, String> {
+
+struct RetryDelay {
+    at: i64,
+    target_id: String,
+    last_sync_at: Option<i64>,
+}
+
+async fn wait_until_ready(rx: &mut Receiver<()>, retry: Option<&RetryDelay>) -> bool {
+    loop {
+        let settings = settings::load();
+        if !settings.enabled || !settings.auto_sync {
+            return false;
+        }
+        let now = logging::now_ms();
+        let retry_floor = retry.filter(|delay| delay.target_id == settings.target_id()
+            && delay.last_sync_at == settings.status.last_sync_at).map(|delay| delay.at).unwrap_or(0);
+        let due = settings.auto_sync_due_at().max(retry_floor);
+        if due <= now {
+            return true;
+        }
+        let wait_ms = due.saturating_sub(now).clamp(1, 30_000) as u64;
+        match tokio::time::timeout(Duration::from_millis(wait_ms), rx.recv()).await {
+            Ok(Some(())) | Err(_) => {},
+            Ok(None) => return false,
+        }
+    }
+}
+
+enum RunOutcome {
+    Complete,
+    Deferred,
+    Retry(RetryDelay),
+}
+
+async fn run_once(db: &Db) -> RunOutcome {
     let _guard = super::sync_lock().lock().await;
     let settings = settings::load();
-    if !settings.enabled || !settings.auto_sync || is_suppressed() { return Ok(false); }
+    if !settings.enabled || !settings.auto_sync {
+        return RunOutcome::Complete;
+    }
+    if is_suppressed() || settings.auto_sync_due_at() > logging::now_ms() {
+        return RunOutcome::Deferred;
+    }
+    match upload_if_changed(db, &settings).await {
+        Ok(()) => RunOutcome::Complete,
+        Err(error) => {
+            let failures = settings.status.consecutive_failures.saturating_add(1);
+            let backoff = RETRY_BASE_MS.saturating_mul(1i64 << failures.saturating_sub(1).min(6))
+                .min(RETRY_MAX_MS)
+                .max(i64::from(settings.auto_sync_interval_minutes) * 60_000);
+            let now = logging::now_ms();
+            let retry_at = now.saturating_add(backoff);
+            let saved = settings::update_status_for(&settings, |status| {
+                status.last_attempt_at = Some(now);
+                status.retry_at = Some(retry_at);
+                status.consecutive_failures = failures;
+                status.last_error = Some(error.clone());
+                status.last_error_source = Some("auto".to_string());
+            });
+            let detail = saved.err().map(|cause| format!("；同步状态未保存：{cause}")).unwrap_or_default();
+            logging::log_with_level("[CloudSync]", &format!("⚠️ 云同步（自动）失败：{error}{detail}"), "warn");
+            RunOutcome::Retry(RetryDelay {
+                at: retry_at,
+                target_id: settings.target_id(),
+                last_sync_at: settings.status.last_sync_at,
+            })
+        }
+    }
+}
+
+async fn upload_if_changed(db: &Db, settings: &settings::CloudSyncSettings) -> Result<(), String> {
     settings.validate()?;
-    let ids = db.with(|conn| {
-        let mut stmt = conn.prepare("SELECT id FROM accounts ORDER BY id").map_err(|e|e.to_string())?;
-        let rows = stmt.query_map([], |row| row.get::<_,String>(0)).map_err(|e|e.to_string())?;
-        rows.collect::<Result<BTreeSet<_>,_>>().map_err(|e|e.to_string())
-    }).ok_or_else(|| "数据库连接不可用".to_string())??;
-    if !upload_due(&settings, &ids, logging::now_ms()) { return Ok(false); }
-    super::upload_locked(db, &settings).await?;
-    logging::verbose("[CloudSync]", "自动备份：每日或新增账号快照已上传");
-    Ok(true)
+    let snapshot = snapshot::build(db)?;
+    let key = crypto::backup_key(SecretScope::Accounts)?.map(Zeroizing::new);
+    let content_hash = snapshot.content_hash(key.as_deref())?;
+    let key_fingerprint = key.as_deref().map(|bytes| crypto::fingerprint_of(bytes));
+    let target_id = settings.target_id();
+    let due = upload_due(settings, &snapshot.account_ids(), logging::now_ms());
+    let unchanged = settings.status.last_local_hash.as_deref() == Some(content_hash.as_str())
+        && settings.status.last_key_fingerprint == key_fingerprint
+        && settings.status.last_target_id.as_deref() == Some(target_id.as_str());
+    if unchanged && !due {
+        if settings.status.retry_at.is_some() || settings.status.consecutive_failures != 0 {
+            settings::update_status_for(settings, |status| {
+                status.retry_at = None;
+                status.consecutive_failures = 0;
+                status.last_error = None;
+                status.last_error_source = None;
+            })?;
+        }
+        return Ok(());
+    }
+    super::upload_locked(settings, snapshot, content_hash, key).await?;
+    logging::verbose("[CloudSync]", "自动同步：已上传本地变更");
+    Ok(())
 }
 
 #[cfg(test)]

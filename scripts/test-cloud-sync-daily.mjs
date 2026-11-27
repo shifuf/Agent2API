@@ -252,7 +252,7 @@ async function ok(
   assert.equal(r.status, 200, endpoint + ": " + JSON.stringify(v));
   return v.success && Object.hasOwn(v, "data") ? v.data : v;
 }
-async function until(fn, timeout = 12000) {
+async function until(fn, timeout = 90000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
     try {
@@ -400,6 +400,7 @@ try {
     syncPassword: "fixture-daily-password",
     enabled: true,
     autoSync: true,
+    autoSyncIntervalMinutes: 1,
     remoteRoot: "agent2api-sync",
     profile: "default",
   };

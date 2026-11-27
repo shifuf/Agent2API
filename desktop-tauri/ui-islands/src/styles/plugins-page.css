@@ -1,0 +1,139 @@
+@import '../../../ui-shared/plugins-batch.css';
+
+.plugins-page-layout {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: 16px;
+  overflow: hidden;
+  color: var(--text);
+}
+
+.plugins-category-rail {
+  width: 204px;
+  flex: 0 0 204px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 12px;
+  padding-bottom: 16px;
+  border-right: 1px solid var(--hairline);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.plugins-category-heading {
+  padding: 4px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+}
+
+.plugins-rail-mobile {
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+.plugins-main-pane {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.plugins-fixed-area {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+.plugins-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.plugins-toolbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugins-search {
+  width: 196px;
+}
+
+.plugins-scroll-list {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+  padding: 0 4px 20px 0;
+  scrollbar-gutter: stable;
+}
+
+.plugins-list-stack {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.plugins-scroll-list [data-plugin-card] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 168px;
+  contain: layout style paint;
+}
+
+.plugins-scroll-list [data-plugin-row] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+  contain: layout style paint;
+}
+
+@media (max-width: 1280px) {
+  .plugins-search {
+    width: 164px;
+  }
+}
+
+@media (max-width: 960px) {
+  .plugins-page-layout {
+    flex-direction: column;
+    gap: 10px;
+  }
+  .plugins-fixed-area {
+    gap: 8px;
+    padding-bottom: 10px;
+  }
+  .plugins-toolbar {
+    padding-bottom: 10px;
+  }
+  .plugins-search {
+    flex: 1;
+    min-width: 120px;
+    width: auto;
+  }
+}

@@ -48,6 +48,66 @@ impl RowStamp {
         self.compare(&current, &epoch)
     }
 
+    /// 只供固定豆包SQL借用同事务已读取并保留的原始行；不读取第二份大正文或签发来源。
+    /// plugin/public仅是该原行内兼容JSON文本的严格解码借用，调用者必须持到锁外收尾。
+    pub(in crate::server::core::account_store::sql::credential_version) fn verify_doubao_loaded(
+        &self,
+        conn: &Connection,
+        raw: &Value,
+        plugin: Option<&Value>,
+        public: Option<&Value>,
+    ) -> Result<(), Error> {
+        if self.provider != RowProvider::DoubaoWork || conn.is_autocommit() {
+            return Err(Error::UnsupportedProvider);
+        }
+        let epoch = storage::epoch(conn)?.ok_or(Error::Conflict(Conflict::DatabaseEpochChanged))?;
+        if epoch != self.version.epoch {
+            return Err(Error::Conflict(Conflict::DatabaseEpochChanged));
+        }
+        let fields = raw.as_object().ok_or(Error::InvalidRecord)?;
+        if fields.get("id").and_then(Value::as_str) != Some(self.id.as_str())
+            || fields.get("provider").and_then(Value::as_str) != Some(self.provider.id())
+        {
+            return Err(Error::Conflict(Conflict::ProviderChanged));
+        }
+        let version = fields.get(crate::server::core::account_store::credential_version::PRIVATE_FIELD)
+            .and_then(Value::as_object).ok_or(Error::InvalidRecord)?;
+        if version.len() != 4
+            || version.get("schema").and_then(Value::as_u64) != Some(1)
+            || version.get("dbEpoch").and_then(Value::as_str) != Some(self.version.epoch.as_str())
+            || version.get("born").and_then(Value::as_str) != Some(self.version.born.as_str())
+            || version.get("revision").and_then(Value::as_u64) != Some(self.version.revision)
+        {
+            return Err(Error::Conflict(Conflict::VersionChanged));
+        }
+        let (enabled, priority, added_at): (i64, i64, i64) = conn.query_row(
+            "SELECT enabled, priority, added_at FROM main.accounts WHERE id=?1 AND provider=?2",
+            rusqlite::params![self.id, self.provider.id()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|error| storage::sql_error(error, StorageFailure::Read))?;
+        let expected_enabled = match fields.get("enabled") {
+            None | Some(Value::Bool(true)) => 1,
+            Some(Value::Bool(false)) => 0,
+            _ => return Err(Error::InvalidRecord),
+        };
+        let expected_priority = match fields.get("priority") {
+            None => crate::server::core::account_store::priority::DEFAULT_PRIORITY,
+            Some(value) => value.as_i64().ok_or(Error::InvalidRecord)?,
+        };
+        let expected_added = match fields.get("addedAt") {
+            None => 0,
+            Some(value) => value.as_i64().ok_or(Error::InvalidRecord)?,
+        };
+        if enabled != expected_enabled || !self.account_maintenance && expected_enabled != 1
+            || priority != expected_priority || added_at != expected_added {
+            return Err(Error::InvalidRecord);
+        }
+        if !self.projection.matches_doubao_fields(fields, plugin, public)? {
+            return Err(Error::Conflict(Conflict::AuthorizationChanged));
+        }
+        Ok(())
+    }
+
     /// 纯比较只留在本模块；最终检查不得从调用者提供的JSON或epoch签发来源。
     fn compare(&self, current: &StoredAccount, epoch: &str) -> Result<(), Error> {
         if current.id() != self.id || current.provider() != self.provider.id() {

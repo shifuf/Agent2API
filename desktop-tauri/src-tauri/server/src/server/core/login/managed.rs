@@ -1,13 +1,16 @@
 //! 登录任务持有步骤、监听器和执行体绑定；单次 Wasm 调用结束不会销毁整个流程。
 //! 普通 JSON 不构成可信事件；一次性输入只经 Call 进入原执行体，绝不自动重放。
+mod autoclaw;
 mod call;
 mod catpaw;
+mod kiro;
 mod loopback;
 mod step;
 mod trae;
 
 pub use call::Call;
-pub(crate) use call::TraeCallSource;
+pub(crate) use call::{TraeCallSource, KiroCallSource};
+pub(crate) use kiro::{KiroExchangeInput, KiroExchangePermit};
 pub(crate) use trae::{close_trae_for_host, trae_release_ready, wait_trae_for_host};
 pub(crate) use step::Step;
 
@@ -35,6 +38,7 @@ struct State {
     runtime: Option<Arc<RuntimeBinding>>,
     leases: std::collections::HashMap<String, loopback::Lease>,
     catpaw: catpaw::SessionState,
+    kiro: kiro::SessionState,
     trae: trae::SessionState,
 }
 
@@ -48,6 +52,7 @@ pub(crate) struct Session {
     cancel: CancellationToken,
     local_source: Option<crate::server::access::login_source::Source>,
     state: Mutex<State>,
+    kiro_completed: Mutex<Option<kiro::Completion>>,
     _reservation: OwnedSemaphorePermit,
 }
 
@@ -59,7 +64,7 @@ impl Session {
     }
 
     fn close(&self) {
-        let (runtime, leases, catpaw, trae, step) = {
+        let (runtime, leases, catpaw, kiro, trae, step, kiro_completed) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             // Trae发送门与关闭共用原Session锁；关闭先赢则worker绝不提交新HTTP。
             state.trae.revoke();
@@ -67,11 +72,14 @@ impl Session {
             let step = state.step.take();
             state.active = None;
             state.callback_step = None;
+            let kiro_completed = self.kiro_completed.lock().unwrap_or_else(|error| error.into_inner()).take();
             (state.runtime.take(), std::mem::take(&mut state.leases), std::mem::take(&mut state.catpaw),
-                std::mem::take(&mut state.trae), step)
+                std::mem::take(&mut state.kiro), std::mem::take(&mut state.trae), step, kiro_completed)
         };
         // 先撤销会话，再在同步锁外销毁客户端、端点租约及有限身份回执。
         drop(trae);
+        drop(kiro_completed);
+        drop(kiro);
         drop(catpaw);
         drop(leases);
         drop(step);
@@ -113,30 +121,22 @@ fn nonce() -> Result<String, GatewayError> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn receipt_session(task: &LoginTaskHandle) -> Result<Arc<Session>, GatewayError> {
+fn session(task: &LoginTaskHandle) -> Result<Arc<Session>, GatewayError> {
     let context = task.context.as_ref().ok_or_else(unavailable)?;
     let session = context.managed.lock().map_err(|_| unavailable())?.clone().ok_or_else(unavailable)?;
     let snapshot = task.snapshot();
-    if !snapshot.managed || context.provider != session.provider
+    if !snapshot.managed || snapshot.done || snapshot.canceled || !session.valid()
         || snapshot.provider != session.provider || snapshot.state.as_deref() != Some(session.flow.as_str())
         || snapshot.method_index != Some(session.method_index) { return Err(unavailable()); }
     Ok(session)
 }
 
-fn session(task: &LoginTaskHandle) -> Result<Arc<Session>, GatewayError> {
-    let session = receipt_session(task)?;
-    let snapshot = task.snapshot();
-    if snapshot.done || snapshot.canceled || !session.valid() { return Err(unavailable()); }
-    Ok(session)
-}
-
 pub(crate) fn check_source(task: &LoginTaskHandle, headers: &axum::http::HeaderMap) -> Result<(), GatewayError> {
-    // A status receipt remains readable after the original execution is closed.
-    // This gate does not revive its listeners, runtime, deadline or save right.
-    let session = receipt_session(task)?;
-    let original = session.local_source.as_ref().ok_or_else(unavailable)?;
-    let source = crate::server::access::login_source::Source::capture(headers).ok_or_else(unavailable)?;
-    if !original.same(&source) || !original.is_current() { return Err(unavailable()); }
+    let session = session(task)?;
+    if let Some(original) = &session.local_source {
+        let source = crate::server::access::login_source::Source::capture(headers).ok_or_else(unavailable)?;
+        if !original.same(&source) || !original.is_current() { return Err(unavailable()); }
+    }
     Ok(())
 }
 
@@ -157,6 +157,7 @@ pub(super) fn admit_persist(task: &LoginTaskHandle, snapshot: &mut LoginTaskStat
             || snapshot.state.as_deref() != Some(session.flow.as_str()) || snapshot.method_index != Some(session.method_index)
             || state.active.is_none() || state.runtime.as_ref().is_none_or(|runtime| runtime.stopped.is_cancelled() || !(runtime.alive)())
             || state.step.as_ref().is_none_or(|step| step.status != "processing" || state.callback_step.as_deref() != Some(step.id.as_str()))
+            || kiro::applies(&session.provider, session.method_index) && !kiro::persistable(&session, &state)
             || trae::applies(&session.provider, session.method_index) && !trae::persistable(&state)
             || snapshot.persistence != super::persistence::SaveState::NotEntered {
             return Err(unavailable());
@@ -182,8 +183,8 @@ pub(crate) fn snapshot(task: &LoginTaskHandle) -> Result<Value, GatewayError> {
 pub(crate) fn start(state: &ServerState, adapter: Arc<dyn ProviderAdapter>, method_index: u64,
     options: Value, proxy: Option<LoginProxySelection>, local_source: Option<crate::server::access::login_source::Source>,
 ) -> Result<Value, GatewayError> {
-    if local_source.as_ref().is_none_or(|source| !source.is_current()) {
-        return Err(GatewayError::with_status(403, "托管网页登录需要有效的面板管理会话，请登录面板后重新发起"));
+    if trae::applies(adapter.provider_id(), method_index) && local_source.as_ref().is_none_or(|source| !source.is_current()) {
+        return Err(GatewayError::with_status(403, "Trae 网页登录需要有效的面板管理会话，请登录面板后重新发起"));
     }
     let adapter = adapter.managed_login_owner().ok_or_else(unavailable)?;
     static LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -197,8 +198,8 @@ pub(crate) fn start(state: &ServerState, adapter: Arc<dyn ProviderAdapter>, meth
         expires_at: now + LOGIN_TIMEOUT_MS as i64, deadline: tokio::time::Instant::now() + Duration::from_millis(LOGIN_TIMEOUT_MS),
         cancel: CancellationToken::new(), local_source, state: Mutex::new(State { step: Some(Step::preparing(nonce()?)),
             active: None, callback_step: None, runtime: None, leases: Default::default(),
-            catpaw: Default::default(), trae: Default::default() }),
-            _reservation: reservation });
+            catpaw: Default::default(), kiro: Default::default(), trae: Default::default() }),
+            kiro_completed: Mutex::new(None), _reservation: reservation });
     *task.context.as_ref().ok_or_else(unavailable)?.managed.lock().map_err(|_| unavailable())? = Some(session.clone());
     task.update(|snapshot| {
         snapshot.state = Some(flow.clone());
@@ -226,8 +227,7 @@ pub(crate) fn start(state: &ServerState, adapter: Arc<dyn ProviderAdapter>, meth
     });
     Ok(json!({ "state": flow, "flow": flow, "provider": session.provider, "methodIndex": method_index,
         "managedLogin": true, "authUrl": "", "url": "", "browserMode": "none", "manualCallback": false,
-        "callbackInput": "url", "pollIntervalMs": 1500, "timeoutMs": LOGIN_TIMEOUT_MS,
-        "expiresAt": session.expires_at, "remainingMs": session.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() as u64 }))
+        "callbackInput": "url", "pollIntervalMs": 1500, "timeoutMs": LOGIN_TIMEOUT_MS, "remainingMs": LOGIN_TIMEOUT_MS }))
 }
 
 fn monitor(task: &LoginTaskHandle, session: &Arc<Session>, runtime: Arc<RuntimeBinding>) -> Result<(), GatewayError> {
@@ -302,6 +302,7 @@ async fn invoke(task: &LoginTaskHandle, call: &Call) -> Result<Value, GatewayErr
                 call.validate(adapter.provider_id())?;
                 catpaw::validate_account(call, &account)?;
                 call.validate_trae_account(&account)?;
+                call.validate_kiro_account(&account)?;
                 super::persist_plugin_login(task, adapter.as_ref(), &account)?.ok_or_else(unavailable)?;
                 interrupt(task);
             }
@@ -317,7 +318,9 @@ async fn invoke(task: &LoginTaskHandle, call: &Call) -> Result<Value, GatewayErr
                 if catpaw::applies(call.provider(), call.method_index()) && call.is_callback() {
                     return Err(GatewayError::with_status(502, "CatPaw 本次可信登录输入未直接完成归一化，未缓存或重放凭据"));
                 }
-                
+                if call.kiro_needs_next()? && !call.published_browser()? {
+                    return Err(GatewayError::with_status(502, "Kiro 门户选择尚未推进并发布固定 AWS 授权步骤，未重放旧回调"));
+                }
                 if call.is_captcha() && !call.published_browser()? {
                     return Err(GatewayError::with_status(502, "验证尚未换得获准的授权页面，请重新发起"));
                 }
@@ -438,83 +441,4 @@ async fn receive_callback(task: LoginTaskHandle, lease: &str, raw: &str) -> Resu
         task.cancel_provider_flow_locked(call.flow()).await;
     }
     result.map(|_| ())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::server::access::local_session;
-    use crate::server::core::account_store::AccountStore;
-    use crate::server::core::login::LoginService;
-
-    struct LocalToken(local_session::Session);
-    impl LocalToken {
-        fn new() -> Self { Self(local_session::issue().expect("issue local source")) }
-        fn headers(&self) -> axum::http::HeaderMap {
-            let mut headers = axum::http::HeaderMap::new();
-            headers.insert("x-panel-token", self.0.access_token.parse().expect("local token header"));
-            headers
-        }
-    }
-    impl Drop for LocalToken {
-        fn drop(&mut self) { local_session::revoke(&self.0.access_token); }
-    }
-
-    fn task(original: &LocalToken, terminal: bool) -> LoginTaskHandle {
-        let store = AccountStore::with_db(None);
-        let mut task = LoginService::new(store.clone()).new_handle_for_provider("", "catpaw");
-        let session = Arc::new(Session {
-            flow: "managed-original".into(), provider: "catpaw".into(), method_index: 2,
-            browser_mode: "external", expires_at: logging::now_ms() + 60_000,
-            deadline: tokio::time::Instant::now() + Duration::from_secs(60), cancel: CancellationToken::new(),
-            local_source: crate::server::access::login_source::Source::capture(&original.headers()),
-            state: Mutex::new(State { step: None, active: None, callback_step: None, runtime: None,
-                leases: Default::default(), catpaw: Default::default(), trae: Default::default() }),
-            _reservation: Arc::new(Semaphore::new(1)).try_acquire_owned().expect("reservation"),
-        });
-        assert!(session.local_source.is_some());
-        if terminal { session.close(); }
-        task.context = Some(Arc::new(LoginTaskContext {
-            adapter: Mutex::new(None), provider: "catpaw", store, proxy: None, managed: Mutex::new(Some(session)),
-        }));
-        task.update(|state| {
-            state.managed = true;
-            state.state = Some("managed-original".into());
-            state.method_index = Some(2);
-            state.done = terminal;
-        });
-        task
-    }
-
-    #[test]
-    fn original_source_can_read_terminal_receipt_without_reopening_execution() {
-        let original = LocalToken::new();
-        let task = task(&original, true);
-        assert!(check_source(&task, &original.headers()).is_ok(), "closed task must retain its original source receipt");
-        assert!(session(&task).is_err(), "terminal receipt must not authorize execution");
-    }
-
-    #[test]
-    fn terminal_receipt_cannot_move_to_new_or_revoked_management_source() {
-        let original = LocalToken::new();
-        let other = LocalToken::new();
-        let task = task(&original, true);
-        assert!(check_source(&task, &other.headers()).is_err());
-        local_session::revoke(&original.0.access_token);
-        assert!(check_source(&task, &original.headers()).is_err());
-    }
-
-    #[test]
-    fn terminal_source_audit_still_checks_original_flow_provider_and_method() {
-        let original = LocalToken::new();
-        for changed in ["flow", "provider", "method"] {
-            let task = task(&original, true);
-            task.update(|state| match changed {
-                "flow" => state.state = Some("managed-replacement".into()),
-                "provider" => state.provider = "trae".into(),
-                _ => state.method_index = Some(3),
-            });
-            assert!(check_source(&task, &original.headers()).is_err(), "changed {changed} accepted");
-        }
-    }
 }

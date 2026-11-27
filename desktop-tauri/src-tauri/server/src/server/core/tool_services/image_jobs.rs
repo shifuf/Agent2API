@@ -116,8 +116,8 @@ pub fn create(db: &Db, config: &ImageConfig, input: NewJob<'_>) -> Result<(Image
             return Err(GatewayError::with_status(507, "图片存储剩余空间不足，尚未请求生图；请清理旧结果或增加存储上限").with_code("image_storage_full"));
         }
         tx.execute("INSERT INTO tool_image_jobs (id,owner,request_id,request_hash,operation,provider,model,account_id,state,created_at,updated_at,deadline_at,expires_at,reserved_bytes) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'running',?9,?9,?10,?11,?12)",
-            params![id, input.owner, input.request_id, input.request_hash, input.operation, "routing-group",
-                input.target.model, "", now, deadline, expires, reserve]).map_err(storage_error)?;
+            params![id, input.owner, input.request_id, input.request_hash, input.operation, input.target.provider,
+                input.target.model, input.target.account_id, now, deadline, expires, reserve]).map_err(storage_error)?;
         let job = tx.query_row(&format!("SELECT {JOB_COLUMNS} FROM tool_image_jobs WHERE id=?1"), [&id], from_row).map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;
         Ok((job, true))

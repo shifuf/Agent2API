@@ -10,7 +10,6 @@ pub const RATE_WINDOWS_MAX: usize = 8;
 
 /// 阶梯计价档位（按单次请求总输入 token 数 `uncached + cacheRead + cacheWrite` 触发整次计价）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PriceTier {
     pub above: i64,
     #[serde(default)]
@@ -43,7 +42,6 @@ pub fn normalize_price_currency(value: &str) -> String {
 
 /// 模型单价（每百万 Token；默认美元，可为人民币 `"cny"`）。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ModelPrice {
     #[serde(default)]
     pub input: f64,
@@ -196,12 +194,6 @@ impl ModelPrice {
     }
 
     pub fn normalized(&self) -> Result<Self, String> {
-        if !matches!(self.currency.trim().to_ascii_lowercase().as_str(), "" | "usd" | "cny") {
-            return Err("单价币种须为 USD 或 CNY".into());
-        }
-        if !matches!(self.peak.as_str(), "" | "deepseek" | "weekdays" | "ollama") {
-            return Err("未知的峰谷时段".into());
-        }
         let check_num = |name: &str, value: f64| -> Result<f64, String> {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!("{name} 单价不能为负数"));
@@ -348,7 +340,6 @@ fn parse_tier_object(
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RateWindow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub days: Vec<u8>,
@@ -358,7 +349,6 @@ pub struct RateWindow {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProviderPricingRule {
     #[serde(rename = "priceRate", default, skip_serializing_if = "Option::is_none")]
     pub price_rate: Option<f64>,

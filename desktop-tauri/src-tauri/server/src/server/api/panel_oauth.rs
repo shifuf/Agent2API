@@ -1,222 +1,376 @@
-use axum::{
-    body::Bytes,
-    extract::{ConnectInfo, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
-};
-use serde::Deserialize;
-use serde_json::{json, Value};
-use std::{collections::HashMap, net::SocketAddr};
+//! 管理面板 OAuth 第三方登录与账号绑定接口（`/api/panel/oauth/*`）。
 
-use crate::server::{
-    access,
-    core::panel_oauth::{self as oauth, flow, Error, Provider},
-    errors::management_error,
-    http::{ok_json, parse_body},
-    ServerState,
-};
+use std::collections::HashMap;
+use std::net::SocketAddr;
 
-fn error((status, message): Error) -> Response {
-    management_error(status, message)
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, Query};
+use axum::http::{
+    header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION, SET_COOKIE},
+    HeaderMap, HeaderValue, StatusCode,
+};
+use axum::response::{IntoResponse, Response};
+use serde_json::json;
+
+use crate::server::core::panel_oauth::{
+    self,
+    flow::{self, OauthMode, OauthProvider},
+    PanelOauthSettings,
+};
+use crate::server::errors;
+use crate::server::http::{ok_json, parse_body};
+use crate::server::logging;
+
+fn infer_request_origin(headers: &HeaderMap, query_origin: Option<&str>) -> String {
+    if let Some(origin) = query_origin.map(str::trim).filter(|s| !s.is_empty()) {
+        if origin.starts_with("http://") || origin.starts_with("https://") {
+            return origin.trim_end_matches('/').to_string();
+        }
+    }
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .filter(|s| matches!(*s, "http" | "https"))
+        .unwrap_or("http");
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get("host"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .unwrap_or("127.0.0.1:3065");
+    format!("{proto}://{host}")
 }
-fn sensitive(mut response: Response) -> Response {
-    let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+
+fn url_encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '~') {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn redirect_to(location: &str, cookie: Option<&str>) -> Response {
+    let mut resp = (StatusCode::FOUND, "").into_response();
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(val) = HeaderValue::from_str(location) {
+        resp.headers_mut().insert(LOCATION, val);
+    }
+    if let Some(cookie_str) = cookie {
+        if let Ok(val) = HeaderValue::from_str(cookie_str) {
+            resp.headers_mut().append(SET_COOKIE, val);
+        }
+    }
+    resp
+}
+
+fn html_popup_result(success: bool, title: &str, detail: &str) -> Response {
+    let color = if success { "#22c55e" } else { "#ef4444" };
+    let icon = if success { "✓" } else { "✕" };
+    let escaped_title = title
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let escaped_detail = detail
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let html = format!(
+        r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{escaped_title}</title>
+  <style>
+    body {{
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #0f1115; color: #e5e7eb;
+      font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }}
+    .card {{
+      background: #181b22; border: 1px solid #262a34; border-radius: 12px;
+      padding: 28px 32px; max-width: 380px; width: calc(100% - 40px); text-align: center;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+    }}
+    .badge {{
+      width: 44px; height: 44px; border-radius: 999px; margin: 0 auto 14px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; font-weight: bold; color: #fff; background: {color};
+    }}
+    h1 {{ font-size: 17px; margin: 0 0 8px; }}
+    p {{ font-size: 13px; color: #9ca3af; margin: 0; word-break: break-word; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">{icon}</div>
+    <h1>{escaped_title}</h1>
+    <p>{escaped_detail}</p>
+  </div>
+  <script>
+    (function() {{
+      try {{
+        if (window.opener && !window.opener.closed) {{
+          window.opener.postMessage({{ type: 'agent2api-oauth-done', success: {success} }}, '*');
+        }}
+      }} catch (e) {{}}
+      if ({success}) {{
+        setTimeout(function() {{ try {{ window.close(); }} catch (e) {{}} }}, 1200);
+      }}
+    }})();
+  </script>
+</body>
+</html>"#
     );
-    response
-}
-fn registered_origin(headers: &HeaderMap, expected: &str, initiate: bool) -> bool {
-    let actual = headers
-        .get(header::HOST)
-        .and_then(|host| host.to_str().ok());
-    let Some(host) = actual else { return false };
-    let Ok(candidate) = oauth::canonical_origin(&format!("https://{host}")) else {
-        return false;
-    };
-    candidate == expected
-        && (!initiate
-            || headers
-                .get(header::ORIGIN)
-                .and_then(|value| value.to_str().ok())
-                == Some(expected))
+    let mut resp = (StatusCode::OK, html).into_response();
+    resp.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
 }
 
-pub async fn get(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !access::session_valid(&headers) {
-        return management_error(403, "OAuth 设置需要管理员会话");
-    }
-    match oauth::load(state.db()) {
-        Ok(settings) => sensitive(ok_json(settings.admin())),
-        Err(err) => error(err),
-    }
+/// `GET /api/panel/oauth/settings`（需鉴权）
+pub async fn get_oauth_settings(headers: HeaderMap) -> Response {
+    if !crate::server::access::session_valid(&headers) { return errors::management_error(403, "第三方登录设置需要管理员会话"); }
+    ok_json(PanelOauthSettings::current().management_json())
 }
 
-pub async fn put(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !access::session_valid(&headers) {
-        return management_error(403, "OAuth 设置需要管理员会话");
-    }
-    let Some(db) = state.db() else {
-        return management_error(503, oauth::UNAVAILABLE);
-    };
-    let Ok(body) = parse_body(&body) else {
-        return management_error(400, "OAuth 设置无效");
-    };
-    match oauth::save(db, body) {
-        Ok(settings) => sensitive(ok_json(settings.admin())),
-        Err(err) => error(err),
-    }
-}
-
-pub async fn start(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    body: Bytes,
-) -> Response {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Request {
-        provider: Provider,
-        mode: String,
-        captcha: Option<String>,
-    }
-    let Ok(input) = serde_json::from_slice::<Request>(&body) else {
-        return management_error(400, "OAuth 请求无效");
-    };
-    let session = match input.mode.as_str() {
-        "bind" => match access::oauth_cookie_session(&headers) {
-            Some(session) => Some(session),
-            None => return management_error(403, "绑定身份需要当前网页管理员会话"),
-        },
-        "login" => None,
-        _ => return management_error(400, "OAuth 请求无效"),
-    };
-    let Some(admin) = access::oauth_admin_stamp() else {
-        return management_error(403, oauth::DENIED);
-    };
-    let settings = match oauth::load(state.db()) {
+/// `PUT /api/panel/oauth/settings`（需鉴权）
+pub async fn put_oauth_settings(headers: HeaderMap, body: Bytes) -> Response {
+    if !crate::server::access::session_valid(&headers) { return errors::management_error(403, "第三方登录设置需要管理员会话"); }
+    let payload = match parse_body(&body) {
         Ok(value) => value,
-        Err(err) => return error(err),
+        Err(error) => return errors::management_error(400, error.message),
     };
-    if !registered_origin(&headers, &settings.origin, true) {
-        return management_error(403, "请从预设 HTTPS 面板站点发起 OAuth");
+    let Some(object) = payload.as_object() else {
+        return errors::management_error(400, "请求体必须是 JSON 对象");
+    };
+    let settings = match panel_oauth::save(object) {
+        Ok(settings) => settings,
+        Err((status, message)) => return errors::management_error(status, message),
+    };
+    logging::log(
+        "[Security]",
+        &format!(
+            "第三方登录设置已更新：Google={}，GitHub={}",
+            if settings.google.enabled { "开启" } else { "关闭" },
+            if settings.github.enabled { "开启" } else { "关闭" },
+        ),
+    );
+    ok_json(settings.management_json())
+}
+
+/// `POST /api/panel/oauth/bind-url`（需鉴权：在设置页点击「跳转绑定当前账号」）
+pub async fn post_oauth_bind_url(headers: HeaderMap, body: Bytes) -> Response {
+    if !crate::server::access::session_valid(&headers) { return errors::management_error(403, "第三方登录绑定需要管理员会话"); }
+    let payload = match parse_body(&body) {
+        Ok(value) => value,
+        Err(error) => return errors::management_error(400, error.message),
+    };
+    let Some(object) = payload.as_object() else {
+        return errors::management_error(400, "请求体必须是 JSON 对象");
+    };
+    // 若前端携带了当前未保存的 Client ID / Secret 草稿，先一并落盘
+    if let Some(patch) = object.get("patch").and_then(|v| v.as_object()) {
+        if let Err((status, message)) = panel_oauth::save(patch) {
+            return errors::management_error(status, message);
+        }
     }
-    if session.is_none() {
-        if access::login_locked(addr.ip()) {
-            return management_error(429, "登录尝试过多");
-        }
-        if let Err(response) =
-            super::panel::check_captcha(&json!({"captcha":input.captcha}), &state).await
-        {
-            return response;
-        }
-    }
-    match flow::start(&settings, input.provider, admin, session) {
-        Ok(started) => {
-            let Ok(cookie) = HeaderValue::from_str(&started.cookie) else {
-                return management_error(503, oauth::UNAVAILABLE);
-            };
-            let mut response = sensitive(ok_json(json!({"url":started.url})));
-            response.headers_mut().insert(header::SET_COOKIE, cookie);
-            response
-        }
-        Err(err) => error(err),
+    let provider_raw = object
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let Some(provider) = OauthProvider::parse(provider_raw) else {
+        return errors::management_error(400, "请选择 google 或 github");
+    };
+    let origin = infer_request_origin(&headers, object.get("origin").and_then(|v| v.as_str()));
+    let Some(source) = crate::server::access::login_source::Source::capture(&headers) else {
+        return errors::management_error(403, "第三方登录绑定需要有效管理员会话");
+    };
+    match flow::start_bind_flow(provider, &origin, source) {
+        Ok((state, authorize_url)) => ok_json(json!({
+            "state": state,
+            "authorizeUrl": authorize_url,
+        })),
+        Err(msg) => errors::management_error(400, msg),
     }
 }
 
-pub async fn callback(
-    State(state): State<ServerState>,
-    Path(provider): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
+/// `POST /api/panel/oauth/start-url`（免鉴权：供桌面端 / 移动端弹出系统浏览器并轮询登录结果）
+pub async fn post_oauth_start_url(headers: HeaderMap, body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(value) => value,
+        Err(error) => return errors::management_error(400, error.message),
+    };
+    let Some(object) = payload.as_object() else {
+        return errors::management_error(400, "请求体必须是 JSON 对象");
+    };
+    let provider_raw = object
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let Some(provider) = OauthProvider::parse(provider_raw) else {
+        return errors::management_error(400, "请选择 google 或 github");
+    };
+    let next = object.get("next").and_then(|v| v.as_str()).unwrap_or("");
+    let origin = infer_request_origin(&headers, object.get("origin").and_then(|v| v.as_str()));
+    match flow::start_flow(provider, OauthMode::Login, true, next, &origin) {
+        Ok((state, authorize_url)) => ok_json(json!({
+            "state": state,
+            "authorizeUrl": authorize_url,
+        })),
+        Err(msg) => errors::management_error(400, msg),
+    }
+}
+
+/// `GET /api/panel/oauth/start`（免鉴权：网页端同标签页跳转登录）
+pub async fn get_oauth_start(
     headers: HeaderMap,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    let result = complete(&state, &provider, &query, &headers, addr).await;
-    sensitive(result.unwrap_or_else(error))
-}
+    let provider_raw = query.get("provider").map(String::as_str).unwrap_or("");
+    let next = query.get("next").map(String::as_str).unwrap_or("");
+    let popup = query
+        .get("popup")
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let next_suffix = if next == "/m" { "&next=%2Fm" } else { "" };
 
-async fn complete(
-    state: &ServerState,
-    provider: &str,
-    query: &HashMap<String, String>,
-    headers: &HeaderMap,
-    addr: SocketAddr,
-) -> Result<Response, Error> {
-    let denied = (403, oauth::DENIED);
-    let provider = Provider::parse(provider)?;
-    let settings = oauth::load(state.db())?;
-    if !registered_origin(headers, &settings.origin, false) {
-        return Err(denied);
-    }
-    let state_key = query.get("state").ok_or(denied)?;
-    let cookies = access::cookie_values(headers, flow::COOKIE);
-    if cookies.len() != 1 {
-        return Err(denied);
-    }
-    let session = access::oauth_cookie_session(headers);
-    let flow = flow::take(
-        provider,
-        state_key,
-        &cookies[0],
-        &settings.origin,
-        session.as_deref(),
-    )?;
-    if query.contains_key("error") {
-        return Err((400, "OAuth 授权已取消，请返回登录页重试"));
-    }
-    if flow.revision != settings.revision || settings.client(provider).enabled == false {
-        return Err(denied);
-    }
-    if access::login_locked(addr.ip()) && flow.bind_session.is_none() {
-        return Err((429, "登录尝试过多"));
-    }
-    let subject = flow::identity(
-        &flow,
-        settings.client(provider),
-        query.get("code").map(String::as_str).unwrap_or_default(),
-    )
-    .await?;
-    let admin = access::oauth_admin_stamp().ok_or(denied)?;
-    if flow.bind_session.is_some() && flow.bind_session != access::oauth_cookie_session(headers) {
-        return Err(denied);
-    }
-    if let Err(err) = oauth::authorize(
-        state.db().ok_or((503, oauth::UNAVAILABLE))?,
-        &flow,
-        &subject,
-        &admin,
-    ) {
-        if err.0 == 403 && flow.bind_session.is_none() {
-            access::record_login_failure(addr.ip());
-            crate::server::core::notifications::login(false);
+    let Some(provider) = OauthProvider::parse(provider_raw) else {
+        return redirect_to(
+            &format!("/login?oauth_error={}{next_suffix}", url_encode_query("不支持的第三方登录提供商")),
+            None,
+        );
+    };
+    let origin = infer_request_origin(&headers, query.get("origin").map(String::as_str));
+    match flow::start_flow(provider, OauthMode::Login, popup, next, &origin) {
+        Ok((_, authorize_url)) => redirect_to(&authorize_url, None),
+        Err(msg) => {
+            if popup {
+                html_popup_result(false, "无法发起授权", &msg)
+            } else {
+                redirect_to(
+                    &format!("/login?oauth_error={}{next_suffix}", url_encode_query(&msg)),
+                    None,
+                )
+            }
         }
-        return Err(err);
     }
-    let mut response = StatusCode::SEE_OTHER.into_response();
-    response
-        .headers_mut()
-        .insert(header::LOCATION, HeaderValue::from_static("/"));
-    if flow.bind_session.is_none() {
-        access::clear_login_failures(addr.ip());
-        crate::server::core::notifications::login(true);
-        let session = access::IssuedSession::new_session();
-        let cookie = HeaderValue::from_str(&format!("{}; Secure", session.session_cookie))
-            .map_err(|_| (503, oauth::UNAVAILABLE))?;
-        response.headers_mut().insert(header::SET_COOKIE, cookie);
-    }
-    Ok(response)
 }
 
-pub fn providers(state: &ServerState) -> Value {
-    let available = access::oauth_admin_stamp()
-        .and_then(|admin| {
-            oauth::load(state.db())
-                .ok()
-                .map(|settings| settings.public(&admin))
-        })
-        .unwrap_or_default();
-    json!(available)
+/// `GET /api/panel/oauth/poll?state=...`（免鉴权：查询弹窗 / 外部浏览器授权状态）
+pub async fn get_oauth_poll(Query(query): Query<HashMap<String, String>>) -> Response {
+    let state = query.get("state").map(String::as_str).unwrap_or("").trim();
+    if state.is_empty() {
+        return errors::management_error(400, "缺少 state 参数");
+    }
+    ok_json(flow::poll_state(state))
 }
+
+/// `GET /api/panel/oauth/callback`（免鉴权：Google / GitHub 授权回调）
+pub async fn get_oauth_callback(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let state = query.get("state").map(String::as_str).unwrap_or("").trim();
+    let code = query.get("code").map(String::as_str);
+    let error = query
+        .get("error_description")
+        .or_else(|| query.get("error"))
+        .map(String::as_str);
+    let ip = addr.ip().to_string();
+    let result = flow::complete_callback(state, code, error, &ip).await;
+    let next_suffix = if result.next == "/m" { "&next=%2Fm" } else { "" };
+
+    if result.mode == OauthMode::Bind {
+        return match result.error {
+            None => html_popup_result(
+                true,
+                &format!("{} 账号绑定成功", result.provider_label),
+                &format!(
+                    "已绑定账号：{}，此窗口即将自动关闭。",
+                    result.identity.as_deref().unwrap_or("已授权账号")
+                ),
+            ),
+            Some(err) => html_popup_result(
+                false,
+                &format!("{} 账号绑定失败", result.provider_label),
+                &err,
+            ),
+        };
+    }
+
+    if result.popup {
+        return match result.error {
+            None => html_popup_result(
+                true,
+                &format!("{} 登录成功", result.provider_label),
+                "授权已完成，请返回 Agent2API 窗口，此页面即将自动关闭。",
+            ),
+            Some(err) => html_popup_result(
+                false,
+                &format!("{} 登录失败", result.provider_label),
+                &err,
+            ),
+        };
+    }
+
+    match (result.session, result.ticket, result.error) {
+        (Some(session), Some(ticket), None) => redirect_to(
+            &format!("/login?oauth_ticket={}{next_suffix}", url_encode_query(&ticket)),
+            Some(&session.session_cookie),
+        ),
+        (_, _, Some(err)) => redirect_to(
+            &format!("/login?oauth_error={}{next_suffix}", url_encode_query(&err)),
+            None,
+        ),
+        _ => redirect_to(
+            &format!("/login?oauth_error={}{next_suffix}", url_encode_query("登录验证未完成")),
+            None,
+        ),
+    }
+}
+
+/// `POST /api/panel/oauth/exchange`（免鉴权：用一次性票据换取会话 Cookie 与双令牌）
+pub async fn post_oauth_exchange(body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(value) => value,
+        Err(error) => return errors::management_error(400, error.message),
+    };
+    let ticket = payload
+        .get("ticket")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if ticket.is_empty() {
+        return errors::management_error(400, "缺少登录票据");
+    }
+    let Some(session) = flow::take_ticket(ticket) else {
+        return errors::management_error(401, "登录票据已过期或已使用，请重新登录");
+    };
+    let mut response = ok_json(json!({
+        "loggedIn": true,
+        "accessToken": session.access_token,
+        "refreshToken": session.refresh_token,
+        "expiresIn": session.expires_in,
+    }));
+    if let Ok(value) = HeaderValue::from_str(&session.session_cookie) {
+        response.headers_mut().append(SET_COOKIE, value);
+    }
+    response
+}
+
+#[path = "panel_oauth_fork.rs"]
+mod fork_api;
+pub use fork_api::{get, put, start, callback, providers};

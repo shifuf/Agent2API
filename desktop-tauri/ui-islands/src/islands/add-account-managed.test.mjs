@@ -5,9 +5,13 @@ import { fileURLToPath } from 'node:url'
 
 const require = createRequire(new URL('../../package.json', import.meta.url))
 const { buildSync } = require('esbuild')
+const nodeModules = fileURLToPath(new URL('../../node_modules', import.meta.url))
 const load = async name => {
   const source = buildSync({ entryPoints: [fileURLToPath(new URL(name, import.meta.url))], bundle: true,
-    platform: 'node', format: 'esm', write: false }).outputFiles[0].text
+    platform: 'node', format: 'esm', write: false, nodePaths: [nodeModules],
+    alias: { '@ui': fileURLToPath(new URL('../../../ui-kit/src/index.ts', import.meta.url)),
+      react: fileURLToPath(new URL('../../node_modules/react', import.meta.url)) },
+    tsconfigRaw: { compilerOptions: { jsx: 'automatic' } } }).outputFiles[0].text
   return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
 }
 const bridge = await load('./add-account-bridge.ts')

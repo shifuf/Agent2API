@@ -44,7 +44,7 @@ pub const CLIENTS: &[(&str, &str)] = &[
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Fallback {
-    #[serde(alias = "original")]
+    Original,
     #[default]
     Error,
 }
@@ -233,4 +233,49 @@ pub fn save(settings: TitleRoutes, expected: &str) -> Result<(), GatewayError> {
         *raw = value;
         Ok(())
     }, || GatewayError::new("标题生成路由保存失败，未应用本次修改"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn saved_title_rules_are_effective_without_a_restart() {
+        crate::test_support::isolated(concat!(module_path!(), "::saved_title_rules_are_effective_without_a_restart"), || {
+            let (db, _file) = crate::server::db::test_temp::TempDb::open("title-live-snapshot");
+            crate::server::config::init(Some(db));
+            let revision = current().revision.clone();
+            let settings: TitleRoutes = serde_json::from_value(json!({"enabled":true,"rules":[{
+                "enabled":true,"clients":["codex"],"model":"Saved-Title","fallback":"original"
+            }]})).unwrap();
+            save(settings.clone(), &revision).unwrap();
+            assert_eq!(active(), Some(settings.clone()));
+            assert_eq!(current().settings.as_ref().unwrap(), &settings);
+        });
+    }
+
+    #[test]
+    fn fallback_defaults_to_error_in_both_configuration_formats() {
+        for value in [
+            json!({"enabled":true,"clients":["codex"],"model":"Title"}),
+            json!({"enabled":true,"rules":[{"enabled":true,"clients":["codex"],"model":"Title"}]}),
+        ] {
+            let config: TitleRoutes = serde_json::from_value(value).unwrap();
+            assert_eq!(config.rules[0].fallback, Fallback::Error);
+            assert!(validate(&config).is_ok());
+        }
+    }
+
+    #[test]
+    fn explicit_original_fallback_survives_legacy_migration_and_save_shape() {
+        let config: TitleRoutes = serde_json::from_value(json!({
+            "enabled":true,"clients":["codex"],"model":"Title","fallback":"original"
+        })).unwrap();
+        assert_eq!(config.rules[0].fallback, Fallback::Original);
+        let encoded = serde_json::to_value(&config).unwrap();
+        assert_eq!(encoded["rules"][0]["fallback"], "original");
+        let reloaded: TitleRoutes = serde_json::from_value(encoded).unwrap();
+        assert_eq!(reloaded, config);
+    }
 }

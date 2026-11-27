@@ -238,6 +238,7 @@ pub async fn test(input: &Value) -> Result<Value, String> {
             let proxy = crate::server::core::proxies::ResolvedProxy {
                 source:"pool".into(), protocol:"http".into(), host:"127.0.0.1".into(),
                 port:Some(test_port as u16), username:String::new(), password:String::new(), label:node.clone(),
+                non_direct: false,
             };
             return Ok(crate::server::core::egress::test_proxy(Some(&proxy)).await.to_json());
         }

@@ -140,8 +140,7 @@ pub async fn duplicate(Path(id): Path<String>) -> Response {
 
 pub async fn run_now(Path(id): Path<String>) -> Response {
     let job_id = id.clone();
-    let Ok(admitted) = crate::server::core::task_plugins::running_guard() else { return management_error(409, "正在恢复整库"); };
-    let run = tokio::spawn(async move { let _admitted = admitted; scheduler::execute_job(&job_id, "manual").await });
+    let run = tokio::spawn(async move { scheduler::execute_job(&job_id, "manual").await });
     match run.await.unwrap_or_else(|_| Err("任务执行异常结束".into())) {
         Ok(outcome) => {
             let job = store::get_job_record(&id).ok().flatten().map(|r| r.view);
@@ -180,8 +179,7 @@ pub async fn trigger_action(Path(id): Path<String>, body: Bytes) -> Response {
 
     let job_id = id.clone();
     let action_id = action_id.to_owned();
-    let Ok(admitted) = crate::server::core::task_plugins::running_guard() else { return management_error(409, "正在恢复整库"); };
-    let run = tokio::spawn(async move { let _admitted = admitted; scheduler::execute_action(&job_id, &action_id, draft_values, draft_proxy_id).await });
+    let run = tokio::spawn(async move { scheduler::execute_action(&job_id, &action_id, draft_values, draft_proxy_id).await });
     match run.await.unwrap_or_else(|_| Err("任务执行异常结束".into())) {
         Ok(outcome) => {
             let job = store::get_job_record(&id).ok().flatten().map(|r| r.view);
@@ -257,7 +255,7 @@ fn parse_job_input(id: Option<String>, payload: &Value) -> Result<store::JobUpse
     let enabled = payload
         .get("enabled")
         .and_then(Value::as_bool)
-        .unwrap_or(false);
+        .unwrap_or(true);
     let values: BTreeMap<String, Value> = payload
         .get("values")
         .and_then(|v| serde_json::from_value(v.clone()).ok())

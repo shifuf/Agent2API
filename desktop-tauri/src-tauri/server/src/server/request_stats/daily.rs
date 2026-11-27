@@ -26,7 +26,7 @@ use super::source::{ApiKeyAccum, ClientAccum};
 /// 依赖它；不写 `SELECT *` 的理由同 `sql::REQUEST_COLUMNS`）
 const DAILY_COLUMNS: &str = "date, requests, successful, tokens, cache_hit_tokens, \
      cache_input_tokens, model_tokens, provider_stats, account_stats, client_stats, api_key_stats, \
-     source_stats_version, cost_usd, priced_requests, cost_cny, auxiliary_requests";
+     source_stats_version, cost_usd, unpriced_requests, cost_cny, priced_requests, auxiliary_requests";
 
 /// JSON 数组列 → `Vec<T>`。解析失败或内容不是数组时退化成空表。
 ///
@@ -61,10 +61,11 @@ fn decode_daily(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyEntry> {
         client_stats: decode_accum::<ClientAccum>(&row.get::<_, String>(9)?),
         api_key_stats: decode_accum::<ApiKeyAccum>(&row.get::<_, String>(10)?),
         source_stats_version: row.get(11)?,
-        cost_usd: row.get(12)?,
-        priced_requests: row.get(13)?,
-        cost_cny: row.get(14)?,
-        auxiliary_requests: row.get(15)?,
+        cost_usd: row.get::<_, Option<f64>>(12)?.unwrap_or(0.0),
+        unpriced_requests: row.get::<_, Option<i64>>(13)?.unwrap_or(0),
+        cost_cny: row.get::<_, Option<f64>>(14)?.unwrap_or(0.0),
+        priced_requests: row.get::<_, Option<i64>>(15)?.unwrap_or(0),
+        auxiliary_requests: row.get::<_, Option<i64>>(16)?.unwrap_or(0),
     })
 }
 
@@ -98,6 +99,12 @@ pub(super) fn select_daily_row(
     }
 }
 
+pub(super) fn request_count(conn: &Connection, date: &str) -> rusqlite::Result<i64> {
+    use rusqlite::OptionalExtension;
+    conn.query_row("SELECT requests FROM request_daily WHERE date = ?1", [date], |row| row.get(0))
+        .optional().map(|count| count.unwrap_or(0))
+}
+
 /// 整行写入（存在即覆盖）。
 ///
 /// `date` 是主键，所以「同一天重复记账」天然是覆盖而不是插入两行 ——
@@ -107,8 +114,8 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
     conn.execute(
         "INSERT INTO request_daily (date, requests, successful, tokens, cache_hit_tokens, \
          cache_input_tokens, model_tokens, provider_stats, account_stats, client_stats, api_key_stats, \
-         source_stats_version, cost_usd, priced_requests, cost_cny, auxiliary_requests) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+         source_stats_version, cost_usd, unpriced_requests, cost_cny, priced_requests, auxiliary_requests) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
          ON CONFLICT(date) DO UPDATE SET requests = excluded.requests, \
          successful = excluded.successful, tokens = excluded.tokens, \
          cache_hit_tokens = excluded.cache_hit_tokens, \
@@ -116,7 +123,8 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
          model_tokens = excluded.model_tokens, provider_stats = excluded.provider_stats, \
          account_stats = excluded.account_stats, client_stats = excluded.client_stats, \
          api_key_stats = excluded.api_key_stats, source_stats_version = excluded.source_stats_version, \
-         cost_usd = excluded.cost_usd, priced_requests = excluded.priced_requests, cost_cny = excluded.cost_cny, auxiliary_requests = excluded.auxiliary_requests",
+         cost_usd = excluded.cost_usd, unpriced_requests = excluded.unpriced_requests, \
+         cost_cny = excluded.cost_cny, priced_requests = excluded.priced_requests, auxiliary_requests = excluded.auxiliary_requests",
         params![
             day.date,
             day.requests,
@@ -131,8 +139,9 @@ pub(super) fn upsert_daily(conn: &Connection, day: &DailyEntry) -> rusqlite::Res
             encode_accum(&day.api_key_stats),
             day.source_stats_version,
             day.cost_usd,
-            day.priced_requests,
+            day.unpriced_requests,
             day.cost_cny,
+            day.priced_requests,
             day.auxiliary_requests,
         ],
     )?;

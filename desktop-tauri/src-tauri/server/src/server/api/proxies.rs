@@ -1,6 +1,6 @@
 //! 出网代理路由（对照 workbuddy-account-routes.mjs 的 `tryHandleProxies`）。
 //!
-//!   GET  /api/proxies            可选项（Clash Verge 实时快照）+ 各账号当前出口
+//!   GET  /api/proxies            可选项（EasyClash 实时快照）+ 各账号当前出口
 //!   POST /api/proxies/test       测试出口连通性并返回出口 IP
 //!   GET  /api/proxies/pool       代理池列表（进来时自动同步一次 Clash 出口）
 //!   POST /api/proxies/pool       新建池条目（只收手动条目）
@@ -13,7 +13,7 @@
 //!   POST /api/proxies/pool/test  测试池条目并把结果记进条目（订阅节点走内核的
 //!                                统一测试口：切 select 组到目标节点再测，
 //!                                不为被测节点开专用端口）
-//!   POST /api/proxies/pool/sync-clash 手动同步 Clash Verge 出口
+//!   POST /api/proxies/pool/sync-clash 手动同步 EasyClash 出口
 //!   GET  /api/proxies/settings   代理设置（节点端口范围 + 测试网址 + 默认值）
 //!   POST /api/proxies/settings   保存代理设置（整份表单；非法形状 400）
 //!
@@ -53,8 +53,8 @@ pub use bindings::{list as bindings_list, save as bindings_save};
 
 /// 出网代理可选项。
 ///
-/// `clash_proxy_options()` 实时读 Clash Verge 配置（三个候选目录 + 3 秒 TTL 缓存）：
-/// 未安装 Clash 时 `clash.available=false` + `error="未找到 Clash Verge 配置"` +
+/// `clash_proxy_options()` 实时读 EasyClash 配置（三个候选目录 + 3 秒 TTL 缓存）：
+/// 未安装 Clash 时 `clash.available=false` + `error="未找到 EasyClash 配置"` +
 /// `options=[]`；装了则给出「混合端口 + 各监听器」两份可选项
 /// （前端 proxy-form.js 直接读 `.options.length`，所以空态也必须是数组）。
 /// accounts 里每个账号带上 priority/enabled/proxy（proxy 已由 store 描述过，
@@ -91,7 +91,7 @@ pub async fn list_proxies(state: &ServerState) -> Response {
     ok_json(json!({
         "clash": clash,
         "accounts": accounts,
-        "note": "账号默认无代理（直连）；选择 Clash 项后端口由 Clash Verge 管理，这里实时读取",
+        "note": "账号默认无代理（直连）；选择 Clash 项后端口由 EasyClash 管理，这里实时读取",
     }))
 }
 
@@ -280,14 +280,14 @@ fn pool_payload_for_accounts(accounts: &[Value]) -> Value {
 }
 
 /// 先同步 Clash 再取列表；`with_report = true` 时把本次同步的变更数 / 失败原因
-/// 一并带上（「同步 Clash Verge」按钮要报「更新了 N 项」或「Clash 不可用」，
+/// 一并带上（「同步 EasyClash」按钮要报「更新了 N 项」或「Clash 不可用」，
 /// 而自动同步那次不必刷提示 —— 用户没点任何东西）。
 ///
 /// 为什么列接口也同步：OmniProxy 的 `router.get('/proxies')` 就是这么做的 ——
 /// 「在 Clash 里加了出口，打开页面就能看到」，不必先点一次同步。同步是幂等的，
 /// 没有变更时一个字段都不写（见 `proxy_pool::sync_clash`）。
 fn synced_payload(state: &ServerState, with_report: bool) -> Value {
-    let report = proxy_pool::sync_clash();
+    let report = proxy_pool::sync_clash(with_report);
     let mut data = pool_payload(state);
     if with_report {
         if let Some(object) = data.as_object_mut() {
@@ -317,6 +317,16 @@ pub async fn pool_create(state: &ServerState, body: &Bytes) -> Response {
         Ok(value) => value,
         Err(_) => return management_error(400, "请求内容不是有效 JSON"),
     };
+    if payload.get("items").is_some() {
+        return match proxy_pool::create_batch(&payload) {
+            Ok(report) => {
+                let mut data = pool_payload(state);
+                data["imported"] = report;
+                ok_json(data)
+            }
+            Err(message) => management_error(400, message),
+        };
+    }
     match proxy_pool::create(&payload) {
         Ok(_) => ok_json(pool_payload(state)),
         Err(message) => management_error(400, message),
@@ -365,6 +375,7 @@ pub async fn pool_remove(state: &ServerState, body: &Bytes) -> Response {
         .and_then(|item| item.get("providerId").and_then(Value::as_str))
         .map(|provider_id| !crate::server::core::subscriptions::ids().contains(provider_id))
         .unwrap_or(false);
+    let reset_update_proxy = payload.get("resetUpdateProxy").and_then(Value::as_bool) == Some(true);
     let result = if orphan {
         proxy_pool::remove_subscription_orphan(id)
     } else {
@@ -372,9 +383,26 @@ pub async fn pool_remove(state: &ServerState, body: &Bytes) -> Response {
     };
     match result {
         Ok((_, name)) => {
+            let mut update_proxy_reset = false;
+            let mut update_proxy_reset_saved = true;
+            if reset_update_proxy {
+                if let Some(current) = crate::server::config::update_proxy() {
+                    if proxy_pool::usage::pool_reference_id(&current) == Some(id) {
+                        update_proxy_reset_saved = crate::server::config::set_update_proxy(None);
+                        update_proxy_reset = true;
+                        state.update().clear_check_cooldown();
+                        state.update().reset_policy_cache();
+                        crate::server::core::plugin_host::update::clear_cooldown();
+                    }
+                }
+            }
             let mut data = pool_payload(state);
             if let Some(object) = data.as_object_mut() {
                 object.insert("removed".to_string(), Value::String(name));
+                if update_proxy_reset {
+                    object.insert("updateProxyReset".to_string(), json!(true));
+                    object.insert("updateProxyResetSaved".to_string(), json!(update_proxy_reset_saved));
+                }
             }
             ok_json(data)
         }
@@ -440,7 +468,7 @@ pub async fn pool_enable(state: &ServerState, body: &Bytes) -> Response {
 
 /// 开关之后的内核联动，返回响应里的 `listener`（`none` / `closing` / `opening`）。
 ///
-/// 只对订阅节点有事可做：manual 没有本机端口，clash 的端口在 Clash Verge 手里
+/// 只对订阅节点有事可做：manual 没有本机端口，clash 的端口在 EasyClash 手里
 /// （那是别人家的进程，本服务能做的只是「本端别用它」）。
 fn listener_flow(
     state: &ServerState,
@@ -495,7 +523,7 @@ fn listener_flow(
 /// ── 订阅节点走统一测试口（不为它开端口）─────────────────────
 /// 内核里有一个固定的「测试口」监听器，背后是 select 策略组（成员 = 全部
 /// 节点）：先通过控制器把组切到目标节点，再从测试口发测试（见
-/// `sub_kernel::runtime::select_test_node`）。这是 Clash Verge 的形态 ——
+/// `sub_kernel::runtime::select_test_node`）。这是 EasyClash 的形态 ——
 /// 「测试」不再需要为被测节点开专用端口 + 等内核重建（曾经的 pinned +
 /// provision + 45 秒等待那一整套就是为这件事存在的，统一测试口上线后退役）。
 /// 专用端口只服务真正在用的节点（账号引用，lazy listeners）。
@@ -535,6 +563,7 @@ pub async fn pool_test(state: &ServerState, body: &Bytes) -> Response {
                     username: String::new(),
                     password: String::new(),
                     label: target.name.clone(),
+                    non_direct: false,
                 },
                 Err(message) => return management_error(400, message),
             };
@@ -679,4 +708,14 @@ pub fn reconcile_listeners(state: &ServerState) -> bool {
         &format!("🔄 监听器对账：{missing} 个待补建 / {stale} 个待回收，已请求内核重建"),
     );
     true
+}
+
+pub async fn system_proxy() -> Response {
+    let mut response = match tokio::task::spawn_blocking(crate::server::core::proxies::system::snapshot).await {
+        Ok(Ok(value)) => ok_json(value),
+        Ok(Err(message)) => management_error(400, message),
+        Err(_) => management_error(500, "读取系统代理失败"),
+    };
+    response.headers_mut().insert("cache-control", axum::http::HeaderValue::from_static("no-store"));
+    response
 }

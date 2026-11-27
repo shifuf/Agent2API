@@ -28,13 +28,7 @@
 //! 对 prompt/completion/total 同一口径：`total_tokens: 0` 是废值，
 //! 该回落到 prompt + completion，而不是把总量记成 0。
 //!
-//! ── 为什么计价用的缓存写入不能算作命中 ────────────
-//! `usage.cache_read` 唯一的落点是请求日志的 `cache_read_tokens` 列
-//! （`db/schema.rs:354`），而它进的是**命中率**的分子
-//! （`request_stats::report::safe_rate` = hit / input，`aggregate.rs:216` 的日聚合
-//! 也叫 `cache_hit_tokens`）。「写入缓存」与「命中缓存」是两笔不同的计费，
-//! 折进同一列会把命中率抬高，并错误地按缓存读价计算写入。
-//! 两种写入时长单独保存在计价证据中，不进入命中率分子。
+//! 「写入缓存」不计入命中率；协议层单独回传这项，不改变请求日志的存储契约。
 //!
 //! ── 为什么回调语义是「每次都上报、由读取侧覆盖」────────────────
 //! usage 通常只在流的最后一个 chunk 出现（也有实现会在中途补发增量帧），
@@ -51,9 +45,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::{Map, Value};
 
 mod attempt;
-mod catpaw_output;
 mod host_defaults;
 mod model_key_source;
+mod vision;
+mod model_key;
+mod prompt;
+mod catpaw_output;
 pub use attempt::{
     AttemptDetail, RetryEvent, MAX_ATTEMPT_DETAILS, MAX_ATTEMPT_ERROR_CHARS,
     MAX_ATTEMPT_ACCOUNT_CHARS, MAX_ATTEMPT_RETRY_REASON_CHARS, MAX_ATTEMPT_NOTICE_CHARS,
@@ -74,51 +71,11 @@ pub struct UsageTokens {
     pub completion: i64,
     pub total: i64,
     pub cache_read: i64,
-    pub cache_write: i64,
-    pub cache_write_1h: i64,
+    pub cache_creation: i64,
+    pub cache_creation_1h: i64,
     pub credit: Option<f64>,
 }
 
-/// 「输入 token 数」的别名表（含驼峰形态）。**表序就是优先序**：多项都命中时按表序
-/// 取第一个**正数**（见 [`first_positive`]），不是求和、也不是取末位。
-const PROMPT_KEYS: &[&str] = &["prompt_tokens", "input_tokens", "promptTokens", "inputTokens"];
-/// 「输出 token 数」的别名表。
-const COMPLETION_KEYS: &[&str] = &[
-    "completion_tokens",
-    "output_tokens",
-    "completionTokens",
-    "outputTokens",
-];
-/// 「总量」的别名表；全缺（或全为废值 0）时由 prompt + completion 补。
-const TOTAL_KEYS: &[&str] = &["total_tokens", "totalTokens"];
-/// 「缓存命中 token 数」的**顶层**别名表。
-///
-/// `cache_read_input_tokens` 是 Anthropic 系的写法（本仓的入站/出站两侧都在读它，
-/// 见 `protocol::anthropic.rs` 与 `protocol::responses_outbound.rs`）；驼峰两项是
-/// Command Code 一族上游的原样形态（`protocol::commandcode_outbound.rs` 归一前读的
-/// 就是这一族键）；`cached_*` 是部分兼容实现把它当顶层字段直接给的做法。
-///
-/// **表序就是优先序**（与 [`PROMPT_KEYS`] 同一条规矩）：`cached_tokens` 排在最前，
-/// 因为它是 OpenAI 标准形态；排它的理由不是「更权威」而是「更常见」，多项都为正数时
-/// 按表序取第一项。真正要挡的是**这一族里某一项恒为 0 时的短路**：取第一个**正数**
-/// 而不是第一个「存在的」，否则嵌套容器里那个恒 0 的 `cached_tokens` 会把顶层真有
-/// 值的 `cache_read_input_tokens` 挡掉（0 在前端不是缺值，是「这家的缓存没生效」的
-/// 读数，比少记一项更难查）。
-const CACHE_READ_KEYS: &[&str] = &[
-    "cached_tokens",
-    "cached_input_tokens",
-    "cache_read_tokens",
-    "cache_read_input_tokens",
-    "cacheReadTokens",
-    "cacheReadInputTokens",
-    "cachedInputTokens",
-];
-/// 「缓存命中 token 数」的**嵌套容器**（容器里再找 [`CACHE_READ_KEYS`]）。
-///
-/// `prompt_tokens_details` 是 OpenAI 标准（里面放 `cached_tokens`）；
-/// `input_tokens_details` 是 Responses 系把 prompt 改叫 input 之后的同名容器。
-/// 两个容器都查：上游同时给两份、其中一份是废值的情况已经出现过（模块头部）。
-const CACHE_READ_CONTAINERS: &[&str] = &["prompt_tokens_details", "input_tokens_details"];
 /// 「积分消耗」的别名表（顺序即优先序）。
 ///
 /// WorkBuddy 的 `usage.credit` 是已实测的一手形态；其余是兼容实现常见的
@@ -152,23 +109,16 @@ const CREDIT_KEYS: &[&str] = &[
 /// 对象内单个字段缺失**或为非正数**按「这项没说话」处理，交给别名表的下一项；
 /// 全部落空才按 0 算。`total` 的兜底是 prompt + completion。
 pub fn extract_usage(usage: &Value) -> Option<UsageTokens> {
-    let object = usage.as_object()?;
-    let prompt = first_positive(object, PROMPT_KEYS).unwrap_or(0);
-    let completion = first_positive(object, COMPLETION_KEYS).unwrap_or(0);
-    let total = first_positive(object, TOTAL_KEYS).unwrap_or_else(|| prompt.saturating_add(completion));
-    // 嵌套容器先查（标准写法优先），再查顶层别名；两边都只认正数。
-    let cache_read = CACHE_READ_CONTAINERS
-        .iter()
-        .filter_map(|container| object.get(*container).and_then(Value::as_object))
-        .find_map(|details| first_positive(details, CACHE_READ_KEYS))
-        .or_else(|| first_positive(object, CACHE_READ_KEYS))
-        .unwrap_or(0);
-    let credit = first_amount(object, CREDIT_KEYS);
-    let creation = object.get("cache_creation").and_then(Value::as_object);
-    let cache_write_1h = creation.and_then(|map| first_positive(map, &["ephemeral_1h_input_tokens"])).unwrap_or(0);
-    let split_write = cache_write_1h.saturating_add(creation.and_then(|map| first_positive(map, &["ephemeral_5m_input_tokens"])).unwrap_or(0));
-    let cache_write = first_positive(object, &["cache_creation_input_tokens", "cache_write_tokens"]).unwrap_or(split_write).max(cache_write_1h);
-    Some(UsageTokens { prompt, completion, total, cache_read, cache_write, cache_write_1h, credit })
+    let tokens = crate::server::core::protocol::usage::TokenUsage::from_chat(usage)?;
+    Some(UsageTokens {
+        prompt: tokens.prompt.unwrap_or(0).saturating_add(tokens.deferred_prompt.unwrap_or(0)),
+        completion: tokens.completion.unwrap_or(0).saturating_add(tokens.deferred_completion.unwrap_or(0)),
+        total: tokens.total_tokens().saturating_add(tokens.deferred_prompt.unwrap_or(0)).saturating_add(tokens.deferred_completion.unwrap_or(0)),
+        cache_read: tokens.cache_read.unwrap_or(0).saturating_add(tokens.deferred_cache_read.unwrap_or(0)),
+        cache_creation: tokens.cache_creation.unwrap_or(0).saturating_add(tokens.deferred_cache_write.unwrap_or(0)),
+        cache_creation_1h: tokens.cache_creation_1h.unwrap_or(0),
+        credit: usage.as_object().and_then(|object| first_amount(object, CREDIT_KEYS)),
+    })
 }
 
 /// 从一个 JSON 对象里按积分别名取读数。
@@ -180,48 +130,9 @@ pub fn credit_from_object(object: &Map<String, Value>) -> Option<f64> {
     first_amount(object, CREDIT_KEYS)
 }
 
-/// 按别名表依次取**第一个正数**（口径见模块头部）。
-fn first_positive(object: &Map<String, Value>, keys: &[&str]) -> Option<i64> {
-    keys.iter().find_map(|key| positive_field(object.get(*key)))
-}
-
-/// 取数值字段，**只认正数**。
-///
-/// 三种上游形态都要认：
-///   - 整数（`as_i64`）；
-///   - `1.0` 这类浮点形态（`as_i64` 对它失败，所以补一次 f64 转换再截断；
-///     上游不同实现给整数/浮点都有先例）；
-///   - **字符串**数字（`"34"`，部分兼容实现把 usage 里的数当文本吐出；
-///     走 f64 解析所以 `"12.0"` 也认）。
-///
-/// 0 与负数一律返回 None（= 「这一项没说话」，交给别名表的下一项）：
-///   - 0 是上游最常给的废值，按「有值」用掉就会把真值挡在后面那个别名上
-///     （模块头部那条嵌套 `cached_tokens` 恒 0 就是这一条）；
-///   - 负数多半是手改的库或上游溢出。这个值会进日聚合的**加数**
-///     （`request_stats::aggregate` 的 `cache_hit_tokens += …`），一条负值能把
-///     整天的读数压低，而读侧的 `report::safe_rate` 只挡比率、挡不住聚合和。
-///     夹成 0 同样能防住压低，但那会让这条负值继续扮演「有值」而埋掉后面的真值，
-///     所以按 None 处理。
-///
-/// 非数值（bool / null / 数组 / 解析不出的字符串）同样 None，交给别名表兜底。
-fn positive_field(value: Option<&Value>) -> Option<i64> {
-    let raw = match value? {
-        Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_f64().map(|number| number as i64)),
-        Value::String(text) => text
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|number| number as i64),
-        _ => None,
-    };
-    raw.filter(|number| *number > 0)
-}
-
 /// 按别名表取**第一个正数**；全是 0 时返回显式的 0（「上报了 0」）。
 ///
-/// 与 [`first_positive`] 的差别只有两处，都是为了计费读数：
+/// 积分读数与 token 计数不同：
 ///   - **不截断小数**（`0.06` 必须原样保留，不能变成 0）；
 ///   - 0 不再是废值：所有别名都显式给 0 时，这条请求确实「零积分」，
 ///     与「一个别名都没有」（None = 这一家不提供该读数）必须分开。
@@ -240,8 +151,7 @@ fn first_amount(object: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
     zero
 }
 
-/// 取非负有限浮点数：认数字与「数字字符串」（与 [`positive_field`] 同一兼容面，
-/// 但不做 i64 截断）。
+/// 取非负有限浮点数：认数字与「数字字符串」，不截断小数。
 fn amount_field(value: Option<&Value>) -> Option<f64> {
     let raw = match value? {
         Value::Number(number) => number.as_f64(),
@@ -363,9 +273,8 @@ pub struct TelemetrySnapshot {
     pub completion_tokens: i64,
     pub total_tokens: i64,
     pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
-    pub cache_write_1h_tokens: i64,
-    pub pricing_prompt_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
     /// 上游按请求上报的**积分消耗**（WorkBuddy 的 `usage.credit`；`None` = 这一家
     /// 不提供该读数，落库为 NULL，前端显示「—」而不是 0）。
     ///
@@ -425,6 +334,8 @@ pub struct TelemetrySnapshot {
     /// 见 `payload::send_body` 的说明：跨家降级时每个在范围内的家各处理一次，
     /// 合并计数才是「这次请求命中了什么」的正确读数。
     pub sensitive_hits: Vec<SensitiveHit>,
+    pub privacy_hits: Vec<PrivacyHit>,
+    pub privacy_reversible: bool,
     /// **每一次上游尝试的明细**（按发生顺序，与账号轮换链一一对应）。
     ///
     /// ── 为什么需要它（Agent2API 请求日志改造）───────────────────
@@ -449,6 +360,7 @@ pub struct TelemetrySnapshot {
     /// 落库时序列化成 JSON 文本，必须有上界。
     pub attempts_detail: Vec<AttemptDetail>,
     pub route: Option<Value>,
+    pub(crate) vision_calls: Vec<super::vision_compat::VisionCall>,
     route_revision: u64,
 }
 
@@ -464,6 +376,15 @@ pub struct SensitiveHit {
     pub word: String,
     /// 本次请求里命中的次数
     pub count: i64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PrivacyHit {
+    pub kind: String,
+    pub count: i64,
+    pub action: String,
+    #[serde(default)]
+    pub restored: i64,
 }
 
 /// 按字符截断（超出部分用 `…` 收尾）。
@@ -518,7 +439,6 @@ pub type LiveSink = Arc<dyn Fn(&TelemetrySnapshot) + Send + Sync>;
 /// 即可，计时读侧自己算。
 #[derive(Default, PartialEq)]
 struct LiveStamp {
-    response_models: usize,
     provider: String,
     account_id: String,
     account_name: String,
@@ -540,13 +460,13 @@ struct LiveStamp {
     last_finished_at: Option<i64>,
     route_revision: u64,
     sensitive: usize,
+    privacy: usize,
 }
 
 impl LiveStamp {
     fn of(snapshot: &TelemetrySnapshot) -> Self {
         let last = snapshot.attempts_detail.last();
         Self {
-            response_models: last.map(|item| item.response_models.len()).unwrap_or(0),
             provider: snapshot.provider.clone().unwrap_or_default(),
             account_id: snapshot.account_id.clone(),
             account_name: snapshot.account_name.clone(),
@@ -564,6 +484,7 @@ impl LiveStamp {
             last_finished_at: last.and_then(|item| item.finished_at),
             route_revision: snapshot.route_revision,
             sensitive: snapshot.sensitive_hits.len(),
+            privacy: snapshot.privacy_hits.len(),
         }
     }
 }
@@ -600,21 +521,22 @@ impl DispatchTracker {
 /// **handler 返回之后**（由响应流自己被 axum 拉取），那时转发函数早已返回，
 /// 只能靠一个双方都能拿到的句柄传话。槽位只在一条请求内共享，不存在争用。
 pub struct RequestTelemetry {
-    pub(crate) vision_child: Mutex<Option<super::vision_compat::Child>>,
     pub(crate) ephemeral_image: bool,
-    inner: Mutex<TelemetrySnapshot>,
-    pub(crate) privacy: Option<Arc<crate::server::core::privacy::Vault>>,
-    /// Shared by every real call belonging to this inbound request.
-    replay_guard: Arc<super::replay_guard::ReplayGuard>,
     model_key_source: std::sync::OnceLock<model_key_source::Captured>,
     host_request_defaults: std::sync::OnceLock<host_defaults::HostRequestDefaults>,
+    active_attempt: Mutex<Option<ActiveAttempt>>,
+    upstream_stream_end: std::sync::atomic::AtomicU8,
+    inner: Mutex<TelemetrySnapshot>,
+    /// 请求安全状态独立于统计快照；attempt、首响及用量清理均不能替换或解除它。
+    replay_guard: Arc<super::replay_guard::ReplayGuard>,
+    privacy_vault: Arc<crate::server::core::privacy::PrivacyVault>,
+    privacy_active: bool,
+    model_key: Option<Arc<crate::server::config::model_key_source::Source>>,
+    prompt_request: Mutex<Option<crate::server::core::prompt::rules::Request>>,
     catpaw_output: Mutex<Option<Arc<crate::server::core::plugin_host::wasm::CatPawOutputSlot>>>,
     catpaw_output_taken: std::sync::atomic::AtomicBool,
-    /// Attempt identity and dispatch are independent of bounded public history.
-    active_attempt: Mutex<Option<ActiveAttempt>>,
-    /// 0 = unknown, 1 = raw EOF without terminal, 2 = raw terminal observed.
-    /// Kept outside the public snapshot and read before committing channel health.
-    upstream_stream_end: std::sync::atomic::AtomicU8,
+    vision_enabled: std::sync::atomic::AtomicBool,
+    vision_continuation: Mutex<Option<Arc<super::vision_compat::VisionContinuation>>>,
     /// 调试模式的原始报文采集器（`core::debug_traffic`；None = 未开启调试模式）。
     ///
     /// 挂在这里而不是层层传参：流式路径的采集发生在 `ForwardStream::poll_next`
@@ -642,12 +564,11 @@ impl Default for RequestTelemetry {
 }
 
 impl RequestTelemetry {
-    /// Only upstream declarations, never a requested-model fallback or translated frame.
     pub fn observe_response_model(&self, value: &Value, source: &str) {
         let mut models = Vec::new();
         for path in ["/model", "/response/model", "/message/model", "/modelVersion", "/response/modelVersion"] {
             if let Some(model) = value.pointer(path).and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty() && m.len() <= 512) {
-                if !models.contains(&model) && !self.privacy.as_ref().is_some_and(|vault| vault.matches(model)) { models.push(model); }
+                if !models.contains(&model) { models.push(model); }
             }
         }
         if models.is_empty() { return; }
@@ -660,34 +581,6 @@ impl RequestTelemetry {
         }
         last.response_model_source = source.to_string();
         self.flush_live(&guard);
-    }
-
-    pub fn new() -> Self {
-        Self {
-            ephemeral_image: false,
-            vision_child: Mutex::new(None),
-            inner: Mutex::new(TelemetrySnapshot::default()),
-            privacy: crate::server::core::privacy::ACTIVE.try_with(Arc::clone).ok(),
-            replay_guard: Arc::new(super::replay_guard::ReplayGuard::new()),
-            model_key_source: std::sync::OnceLock::new(),
-            host_request_defaults: std::sync::OnceLock::new(),
-            catpaw_output: Mutex::new(None),
-            catpaw_output_taken: std::sync::atomic::AtomicBool::new(false),
-            active_attempt: Mutex::new(None),
-            upstream_stream_end: std::sync::atomic::AtomicU8::new(0),
-            capture: Mutex::new(None),
-            live: Mutex::new(LiveWrite::default()),
-            cancel: Mutex::new(None),
-        }
-    }
-
-    pub(crate) fn replay_guard(&self) -> Arc<super::replay_guard::ReplayGuard> {
-        Arc::clone(&self.replay_guard)
-    }
-
-    pub(crate) fn mask_private_body(&self, body: &mut Value) -> Result<(), crate::server::errors::GatewayError> {
-        if let Some(vault) = &self.privacy { vault.mask_json(body).map_err(crate::server::errors::GatewayError::bad_request)?; }
-        Ok(())
     }
 
     pub(crate) fn note_upstream_stream_end(&self, complete: bool) {
@@ -712,6 +605,45 @@ impl RequestTelemetry {
         }
     }
 
+    pub(super) fn clear_uncommitted_error(&self) {
+        let mut guard = self.lock();
+        guard.error = None;
+        guard.first_response_at = None;
+        guard.prompt_tokens = 0;
+        guard.completion_tokens = 0;
+        guard.total_tokens = 0;
+        guard.cache_read_tokens = 0;
+        guard.cache_creation_tokens = 0;
+        guard.cache_creation_1h_tokens = 0;
+    }
+
+    pub fn new() -> Self {
+        Self::with_replay_guard(Arc::new(super::replay_guard::ReplayGuard::new()))
+    }
+
+    fn with_replay_guard(replay_guard: Arc<super::replay_guard::ReplayGuard>) -> Self {
+        Self {
+            ephemeral_image: false,
+            model_key_source: std::sync::OnceLock::new(),
+            host_request_defaults: std::sync::OnceLock::new(),
+            active_attempt: Mutex::new(None),
+            upstream_stream_end: std::sync::atomic::AtomicU8::new(0),
+            inner: Mutex::new(TelemetrySnapshot::default()),
+            replay_guard,
+            privacy_vault: Arc::new(crate::server::core::privacy::PrivacyVault::ephemeral()),
+            privacy_active: crate::server::core::privacy::private_log(),
+            model_key: None,
+            prompt_request: Mutex::new(None),
+            catpaw_output: Mutex::new(None),
+            catpaw_output_taken: std::sync::atomic::AtomicBool::new(false),
+            vision_enabled: std::sync::atomic::AtomicBool::new(false),
+            vision_continuation: Mutex::new(None),
+            capture: Mutex::new(None),
+            live: Mutex::new(LiveWrite::default()),
+            cancel: Mutex::new(None),
+        }
+    }
+
     /// 建一个已带关联 id 的槽位（三个对话入口都走这条：转发开始前生成一次）。
     ///
     /// 为什么不把 id 生成塞进 `new()`：`RequestTelemetry::new()` 还被
@@ -721,6 +653,36 @@ impl RequestTelemetry {
         let telemetry = Self::new();
         telemetry.ensure_id(&super::request::new_request_id());
         telemetry
+    }
+
+    /// 子调用只继承请求安全对象，关联 id、用量、首响和取消令牌仍各自独立。
+    /// 仅供构造新子遥测，不能把一份已在使用的遥测改绑到另一请求。
+    pub(crate) fn child_with_id(&self) -> Self {
+        let mut telemetry = Self::with_replay_guard(Arc::clone(&self.replay_guard));
+        telemetry.privacy_vault = Arc::clone(&self.privacy_vault);
+        telemetry.privacy_active = self.privacy_active;
+        telemetry.model_key = self.model_key.clone();
+        if let Some(source) = self.model_key_source.get() { let _ = telemetry.model_key_source.set(source.clone()); }
+        telemetry.prompt_request = Mutex::new(self.prompt_request());
+        telemetry.ensure_id(&super::request::new_request_id());
+        telemetry
+    }
+
+    /// 不进入统计快照或插件参数；调用方只能借用现有对象，不能替换它。
+    pub(crate) fn replay_guard(&self) -> &Arc<super::replay_guard::ReplayGuard> {
+        &self.replay_guard
+    }
+
+    pub(crate) fn privacy_vault(&self) -> &Arc<crate::server::core::privacy::PrivacyVault> {
+        &self.privacy_vault
+    }
+
+    pub(crate) fn privacy_active(&self) -> bool {
+        self.privacy_active || crate::server::core::privacy::private_log()
+    }
+
+    fn private_diagnostic<'a>(&self, text: &'a str) -> &'a str {
+        if self.privacy_active() && !text.trim().is_empty() { "隐私保护已省略诊断详情" } else { text }
     }
 
     /// 装入调试模式的采集器（转发层即将发送前调一次）。
@@ -761,6 +723,10 @@ impl RequestTelemetry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    pub(super) fn response_started(&self) -> bool {
+        self.lock().first_response_at.is_some()
     }
 
     /// 本条请求是否已被手动终止（循环顶的同步判据；令牌缺省时恒 false）
@@ -843,7 +809,13 @@ impl RequestTelemetry {
             live.stamp = next;
             sink
         };
-        sink(snapshot);
+        if self.privacy_active() {
+            let mut private = snapshot.clone();
+            Self::hide_private_diagnostics(&mut private);
+            sink(&private);
+        } else {
+            sink(snapshot);
+        }
     }
 
     /// 切换转发阶段（同阶段重复调用是**无操作**）。
@@ -925,7 +897,7 @@ impl RequestTelemetry {
     /// 空 `reason` 直接丢弃：明细里出现一条「重试了，但不知道为什么」，
     /// 对排障没有任何价值，还会让弹层多一行噪音。
     pub fn note_attempt_retry(&self, reason: &str, status: Option<i64>, delay_ms: u64) {
-        let reason = if self.ephemeral_image { "图片请求已省略诊断详情" } else if self.privacy.is_some() { "隐私模式已省略诊断详情" } else { reason };
+        let reason = self.private_diagnostic(reason);
         let debug = self.capture().is_some();
         let reason = reason.trim();
         if reason.is_empty() {
@@ -963,6 +935,7 @@ impl RequestTelemetry {
         wait_number: usize,
         max_waits: usize,
     ) {
+        let reason = self.private_diagnostic(reason);
         let debug = self.capture().is_some();
         let reason = reason.trim();
         if reason.is_empty() {
@@ -994,7 +967,7 @@ impl RequestTelemetry {
     /// 后来的（例如重试时又算了一次）不该覆盖先到的那条根因。
     /// 空串不写，理由同 [`Self::note_attempt_retry`]。
     pub fn note_attempt_notice(&self, notice: &str) {
-        let notice = if self.ephemeral_image { "图片请求已省略诊断详情" } else if self.privacy.is_some() { "隐私模式已省略诊断详情" } else { notice };
+        let notice = self.private_diagnostic(notice);
         let debug = self.capture().is_some();
         let notice = notice.trim();
         if notice.is_empty() {
@@ -1025,7 +998,7 @@ impl RequestTelemetry {
     ///
     /// 调试请求保留完整错误，普通请求按列表摘要上限保存。
     pub fn finish_last_attempt(&self, status: Option<i64>, error: Option<&str>) {
-        let error = if self.ephemeral_image { error.map(|_| "图片请求已省略诊断详情") } else if self.privacy.is_some() { error.map(|_| "隐私模式已省略诊断详情") } else { error };
+        let error = error.map(|text| self.private_diagnostic(text));
         let debug = self.capture().is_some();
         let mut guard = self.lock();
         let Some(last) = guard.current_attempt_mut() else {
@@ -1103,11 +1076,8 @@ impl RequestTelemetry {
         guard.completion_tokens = tokens.completion;
         guard.total_tokens = tokens.total;
         guard.cache_read_tokens = tokens.cache_read;
-        guard.cache_write_tokens = tokens.cache_write;
-        guard.cache_write_1h_tokens = tokens.cache_write_1h;
-        guard.pricing_prompt_tokens = if usage.get("prompt_tokens").is_none() && usage.get("input_tokens").is_some() && (usage.get("cache_read_input_tokens").is_some() || usage.get("cache_creation_input_tokens").is_some()) {
-            tokens.prompt.saturating_add(tokens.cache_read).saturating_add(tokens.cache_write)
-        } else { tokens.prompt };
+        guard.cache_creation_tokens = tokens.cache_creation;
+        guard.cache_creation_1h_tokens = tokens.cache_creation_1h;
         guard.credit = tokens.credit;
     }
 
@@ -1145,24 +1115,11 @@ impl RequestTelemetry {
     /// **不做在途回写**：error 列一旦有值，前端就不再把这一行当「进行中」
     /// （判据见 `ui/requests-panel.js` 的 `isRunning`），而转发中途的失败往往只是
     /// 换号前的一次尝试失败 —— 那次失败由尝试明细如实带出，整行仍应是「进行中」。
-    pub(super) fn clear_uncommitted_error(&self) {
-        let mut guard = self.lock();
-        guard.error = None;
-        guard.first_response_at = None;
-        guard.prompt_tokens = 0;
-        guard.completion_tokens = 0;
-        guard.total_tokens = 0;
-        guard.cache_read_tokens = 0;
-        guard.cache_write_tokens = 0;
-        guard.cache_write_1h_tokens = 0;
-        guard.pricing_prompt_tokens = 0;
-    }
-
     pub fn note_error(&self, message: &str) {
-        let message = if self.ephemeral_image { "图片请求已省略诊断详情" } else if self.privacy.is_some() { "隐私模式已省略诊断详情" } else { message };
         if message.is_empty() {
             return;
         }
+        let message = self.private_diagnostic(message);
         let mut guard = self.lock();
         if guard.error.is_none() {
             guard.error = Some(message.to_string());
@@ -1189,7 +1146,6 @@ impl RequestTelemetry {
         }
         let mut guard = self.lock();
         for (term, count) in term_counts {
-            if self.privacy.as_ref().is_some_and(|vault| vault.matches(term)) { continue; }
             let count = *count as i64;
             match guard
                 .sensitive_hits
@@ -1204,13 +1160,94 @@ impl RequestTelemetry {
             }
         }
         // 在途回写：脱敏命中在发送体处理那一刻就有值，不必等收尾
-        // （「敏」那枚标签因此能在转发期间就出现）
+        // （「替换」那枚标签因此能在转发期间就出现）
+        self.flush_live(&guard);
+    }
+
+    pub fn note_privacy_hits(&self, records: &[crate::server::core::privacy::PrivacyHitRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let mut guard = self.lock();
+        for rec in records {
+            let action = rec.action.as_str();
+            let count = rec.count as i64;
+            match guard
+                .privacy_hits
+                .iter_mut()
+                .find(|hit| hit.kind == rec.kind && hit.action == action)
+            {
+                Some(hit) => hit.count += count,
+                None => guard.privacy_hits.push(PrivacyHit {
+                    kind: rec.kind.clone(),
+                    count,
+                    action: action.to_string(),
+                    restored: 0,
+                }),
+            }
+        }
+        self.flush_live(&guard);
+    }
+
+    pub fn mark_privacy_reversible(&self) {
+        let mut guard = self.lock();
+        guard.privacy_reversible = true;
+    }
+
+    pub fn needs_privacy_restore(&self) -> bool {
+        self.lock().privacy_reversible
+    }
+
+    pub fn note_privacy_restored(&self, restored: &[(String, usize)]) {
+        if restored.is_empty() {
+            return;
+        }
+        let mut guard = self.lock();
+        for (kind, count) in restored {
+            let add = *count as i64;
+            let idx = guard
+                .privacy_hits
+                .iter()
+                .position(|hit| hit.kind == *kind && hit.action == "mask")
+                .or_else(|| guard.privacy_hits.iter().position(|hit| hit.kind == *kind));
+            if let Some(idx) = idx {
+                guard.privacy_hits[idx].restored += add;
+            } else {
+                guard.privacy_hits.push(PrivacyHit {
+                    kind: kind.clone(),
+                    count: 0,
+                    action: "mask".to_string(),
+                    restored: add,
+                });
+            }
+        }
         self.flush_live(&guard);
     }
 
     /// 取当前快照（记账点收尾时调一次）
     pub fn snapshot(&self) -> TelemetrySnapshot {
-        self.lock().clone()
+        let mut snapshot = self.lock().clone();
+        if self.privacy_active() {
+            Self::hide_private_diagnostics(&mut snapshot);
+        }
+        snapshot
+    }
+
+    fn hide_private_diagnostics(snapshot: &mut TelemetrySnapshot) {
+        let hidden = "隐私保护已省略诊断详情";
+        if !snapshot.upstream_reasoning.is_empty() { snapshot.upstream_reasoning = hidden.into(); }
+        if snapshot.error.is_some() { snapshot.error = Some(hidden.into()); }
+        snapshot.sensitive_hits.clear();
+        for attempt in &mut snapshot.attempts_detail {
+            if !attempt.reasoning.is_empty() { attempt.reasoning = hidden.into(); }
+            if attempt.error.is_some() { attempt.error = Some(hidden.into()); }
+            if attempt.notice.is_some() { attempt.notice = Some(hidden.into()); }
+            if !attempt.reason.is_empty() { attempt.reason = hidden.into(); }
+            attempt.error_policy = None;
+            attempt.response_models.clear();
+            attempt.response_model_source.clear();
+            for retry in &mut attempt.retries { retry.reason = hidden.into(); }
+        }
     }
 
     /// 取锁；中毒时继续用内部值 —— 统计数据的完整性远不如「转发不因统计而崩」
@@ -1230,6 +1267,51 @@ mod usage_extraction {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn privacy_mappings_are_shared_by_children_and_isolated_between_requests() {
+        let original = RequestTelemetry::new();
+        let child = original.child_with_id();
+        let unrelated = RequestTelemetry::new();
+        let token = original.privacy_vault().mint("PRIVATE", "request-specific-value");
+        assert!(Arc::ptr_eq(original.privacy_vault(), child.privacy_vault()));
+        assert_eq!(child.privacy_vault().restore_text(&token, false).0, "request-specific-value");
+        assert_eq!(unrelated.privacy_vault().restore_text(&token, false).0, token);
+        assert_ne!(unrelated.privacy_vault().mint("PRIVATE", "request-specific-value"), token);
+    }
+
+    #[tokio::test]
+    async fn privacy_diagnostics_stay_hidden_after_the_handler_scope_ends() {
+        let telemetry = crate::server::core::privacy::ACTIVE.scope(Arc::new(()), async {
+            RequestTelemetry::new()
+        }).await;
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let recorded = live.clone();
+        telemetry.set_live_sink(move |snapshot| recorded.lock().unwrap().push(snapshot.clone()));
+        telemetry.note_attempt_started("fixture", "account");
+        telemetry.note_upstream_reasoning(Some("sensitive fixture".into()));
+        telemetry.note_attempt_retry("sensitive fixture", Some(503), 0);
+        telemetry.note_attempt_notice("sensitive fixture");
+        telemetry.finish_last_attempt(Some(503), Some("sensitive fixture"));
+        telemetry.note_error("sensitive fixture");
+        telemetry.note_error_policy(json!({"message":"sensitive fixture"}));
+        telemetry.note_sensitive_hits(&[("sensitive fixture".into(), 1)]);
+        let snapshot = telemetry.snapshot();
+        let attempt = &snapshot.attempts_detail[0];
+        assert!(!snapshot.upstream_reasoning.contains("sensitive fixture"));
+        assert!(!attempt.reasoning.contains("sensitive fixture"));
+        assert!(!snapshot.error.unwrap().contains("sensitive fixture"));
+        assert!(!attempt.error.as_ref().unwrap().contains("sensitive fixture"));
+        assert!(!attempt.notice.as_ref().unwrap().contains("sensitive fixture"));
+        assert!(!attempt.retries[0].reason.contains("sensitive fixture"));
+        assert!(attempt.error_policy.is_none());
+        assert!(snapshot.sensitive_hits.is_empty());
+        let live = live.lock().unwrap();
+        assert!(!live.is_empty());
+        assert!(live.iter().all(|snapshot| snapshot.sensitive_hits.is_empty()
+            && !snapshot.upstream_reasoning.contains("sensitive fixture")
+            && snapshot.attempts_detail.iter().all(|attempt| attempt.error_policy.is_none() && !attempt.reasoning.contains("sensitive fixture"))));
+    }
 
     /// 废值必须让位给下一个别名 —— **旧实现在这条上会红**。
     ///

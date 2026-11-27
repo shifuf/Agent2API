@@ -60,6 +60,10 @@
 
 use rusqlite::Connection;
 
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod tests;
+
 /// `kv` 表里**不属于网关配置**的固定键名（模块头「两类键名绝不能相撞」讲的
 /// 就是它与配置顶层键的关系）。
 ///
@@ -77,11 +81,21 @@ use rusqlite::Connection;
 /// 清单里可能有**没有使用方常量**的项（如遗留的 `desensitize`）：那些是
 /// 「功能已删、数据留着」的键，登记它们的唯一目的就是让配置写入别去动它。
 pub const RESERVED_KV_KEYS: &[&str] = &[
+    "assistantCoding",
+    "assistantCodexLocal",
+    "routingProviderCooldowns",
+    "panelBranding",
+    "advertisementCache",
+    "pluginDesktopClients",
+    "modelsDevProviderPrices",
+    "modelPricingBackfilled",
+    "upstreamVersionCache",
+    "scriptPluginIdentities",
+    "localDirectAgents",
     "fxRateCache",
     crate::server::core::branding::KEY,
     crate::server::core::panel_turnstile::KEY,
     crate::server::core::panel_oauth::KEY,
-    crate::server::core::privacy::KEY,
     // 账号优先级的全局作用域（core::account_store::sql）
     // 「Agent」页的用户配置：{ clientId: [Profile] } 整份 JSON 一个键
     // （core::agents）。零散状态，与 desktopSettings 同一类。
@@ -343,7 +357,10 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 29;
+pub const SCHEMA_VERSION: i64 = 37;
+
+#[path = "schema_local_direct_v36.rs"]
+mod local_direct_v36;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -957,6 +974,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // v13 清掉的历史正文行数（0 = 这一轮什么都没删）：循环后据此决定是否
     // VACUUM（见本函数尾部那段）。放循环外是因为 VACUUM 不能在事务里跑。
     let mut cleaned_raw_rows = 0usize;
+    let upstream_lineage = current >= 25 && !has_column(conn, "requests", "pricing_evidence")?;
     for version in (current + 1)..=SCHEMA_VERSION {
         // 每个版本一个独立事务：DDL 与版本号必须一起生效或一起不生效，
         // 否则中断后会出现「表已建、版本号还是旧的」（下次启动重跑 DDL，
@@ -973,7 +991,13 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // 写事务的独占性由 SQLite 自己保证（同一连接上不允许第二条语句并发），
         // 不是靠 Rust 的独占借用。
         let tx = conn.unchecked_transaction()?;
-        apply_version(&tx, version, &mut cleaned_raw_rows)?;
+        if upstream_lineage && (25..=36).contains(&version) {
+            apply_upstream_version(&tx, version)?;
+        } else if version == 37 {
+            unify_lineages(&tx, upstream_lineage)?;
+        } else {
+            apply_version(&tx, version, &mut cleaned_raw_rows)?;
+        }
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
@@ -996,6 +1020,67 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         let _ = conn.execute_batch("VACUUM;");
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        [table, column],
+        |row| row.get(0),
+    )
+}
+
+fn apply_upstream_version(conn: &Connection, version: i64) -> rusqlite::Result<()> {
+    let sql = match version {
+        25 => include_str!("schema_tool_images.sql"),
+        26 => include_str!("schema_maintenance.sql"),
+        27 => include_str!("schema_coding.sql"),
+        28 => include_str!("schema_model_recency.sql"),
+        29 => include_str!("schema_usage_query.sql"),
+        30 => include_str!("schema_usage_diagnostics.sql"),
+        31 => include_str!("schema_checkin_records_index.sql"),
+        32 => "ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+               ALTER TABLE requests ADD COLUMN cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0;
+               ALTER TABLE requests ADD COLUMN cost_usd REAL;
+               ALTER TABLE request_daily ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
+               ALTER TABLE request_daily ADD COLUMN unpriced_requests INTEGER NOT NULL DEFAULT 0;",
+        33 => include_str!("schema_task_plugins.sql"),
+        34 => include_str!("schema_privacy_redaction.sql"),
+        35 => include_str!("schema_local_direct.sql"),
+        36 => return local_direct_v36::migrate_local_direct_antigravity(conn),
+        _ => return Ok(()),
+    };
+    conn.execute_batch(&sql.replace("IF NOT EXISTS ", ""))
+}
+
+fn unify_lineages(conn: &Connection, upstream_lineage: bool) -> rusqlite::Result<()> {
+    if upstream_lineage {
+        conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN pricing_evidence TEXT;
+             ALTER TABLE request_daily ADD COLUMN cost_cny REAL NOT NULL DEFAULT 0;
+             ALTER TABLE request_daily ADD COLUMN priced_requests INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE request_daily ADD COLUMN auxiliary_requests INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE task_plugins ADD COLUMN network_grants_json TEXT NOT NULL DEFAULT '{}';",
+        )?;
+    } else {
+        for version in [26, 27, 28, 29, 30, 31] {
+            apply_upstream_version(conn, version)?;
+        }
+        conn.execute_batch(
+            "ALTER TABLE requests ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE requests ADD COLUMN cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE request_daily ADD COLUMN unpriced_requests INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        for (legacy, current) in [("cache_write_tokens", "cache_creation_tokens"), ("cache_write_1h_tokens", "cache_creation_1h_tokens")] {
+            if has_column(conn, "requests", legacy)? {
+                conn.execute_batch(&format!("UPDATE requests SET {current}=MAX(0,COALESCE({legacy},0));"))?;
+            }
+        }
+        for version in [34, 35, 36] {
+            apply_upstream_version(conn, version)?;
+        }
     }
     Ok(())
 }
@@ -1163,6 +1248,53 @@ mod version_24_upgrades {
         conn.prepare("SELECT name, coalesce(sql,'') FROM sqlite_schema ORDER BY name").unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
             .collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn fork_and_upstream_databases_converge_without_losing_records() {
+        for (version, upstream) in [(24, false), (29, false), (25, true), (29, true), (36, true)] {
+            let conn = if upstream {
+                let conn = before(24);
+                for step in 25..=version {
+                    apply_upstream_version(&conn, step).unwrap();
+                }
+                conn.pragma_update(None, "user_version", version).unwrap();
+                conn
+            } else {
+                before(version)
+            };
+            conn.execute("INSERT INTO requests (id,ts,model,credit) VALUES ('preserved',123,'model',4.25)", []).unwrap();
+            migrate(&conn).unwrap();
+            let schema = objects(&conn);
+            migrate(&conn).unwrap();
+            assert_eq!(objects(&conn), schema);
+            assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+            assert_eq!(conn.query_row("SELECT credit FROM requests WHERE id='preserved'", [], |row| row.get::<_, f64>(0)).unwrap(), 4.25);
+            for (table, column) in [
+                ("requests", "pricing_evidence"), ("requests", "cache_creation_tokens"),
+                ("requests", "cache_creation_1h_tokens"), ("requests", "privacy_hits"),
+                ("requests", "origin"), ("request_daily", "cost_cny"),
+                ("request_daily", "priced_requests"), ("request_daily", "unpriced_requests"),
+                ("request_daily", "auxiliary_requests"), ("account_usage_records", "diagnostics"),
+                ("account_usage_records", "query_config"), ("task_plugins", "network_grants_json"),
+                ("local_direct_refs", "request_id"), ("coding_submissions", "scope"),
+                ("maintenance_runs", "id"), ("model_usage_recency", "model"),
+            ] {
+                assert!(has_column(&conn, table, column).unwrap(), "{version}/{upstream}: {table}.{column}");
+            }
+        }
+    }
+
+    #[test]
+    fn lineage_bridge_collision_rolls_back_all_changes() {
+        let conn = before(29);
+        conn.execute_batch("CREATE TABLE coding_submissions (original TEXT); INSERT INTO coding_submissions VALUES ('kept');").unwrap();
+        conn.pragma_update(None, "user_version", 36).unwrap();
+        let schema = objects(&conn);
+        assert!(migrate(&conn).is_err());
+        assert_eq!(objects(&conn), schema);
+        assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 36);
+        assert_eq!(conn.query_row("SELECT original FROM coding_submissions", [], |row| row.get::<_, String>(0)).unwrap(), "kept");
     }
 
     #[test]

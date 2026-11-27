@@ -270,6 +270,7 @@ export function ModelsPage() {
                           ) : null}
                           {caps.context ? <UiBadge variant='secondary' shape='tag' className='m-pill'>{caps.context}</UiBadge> : null}
                           <UiBadge variant='secondary' shape='tag' className='m-pill'>{sourceLabel(model.source)}</UiBadge>
+                          <UiBadge variant='secondary' shape='tag'>{model.credits == null || model.credits === '' ? t('倍率未知') : String(model.credits)}</UiBadge>
                           {hidden ? (
                             <UiBadge variant='secondary' shape='tag' className='m-pill' style={{ color: 'var(--m-warn)' }}>
                               {t('不展示')}

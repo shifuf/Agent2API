@@ -1,5 +1,11 @@
 mod trae_execution;
+pub(super) mod kiro_execution;
+mod kiro_network;
+mod kiro_response;
+mod kiro_worker;
+pub(crate) use kiro_worker::Completed as KiroCompleted;
 pub(crate) use trae_execution::TraeExecution;
+pub(super) use kiro_worker::{close_for_host as close_kiro_for_host, release_ready as kiro_release_ready, wait_for_host as wait_kiro_for_host};
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -26,19 +32,16 @@ pub(super) fn guard_ordinary(options: &Options, method: &str, params: &Value) ->
         || params["payload"]["flow"].as_str().is_some_and(|flow| flow.starts_with("managed_"));
     let managed_start = method == "login.start" && options.manifest.managed_login.as_ref().is_some_and(|declaration|
         declaration.methods.contains(&params["payload"]["methodIndex"].as_u64().unwrap_or(0)));
-    if managed_flow || managed_start || method.starts_with("login.loopback.")
-        || method.starts_with("login.trae.") || method == "login.step.publish"
+    if managed_flow || managed_start || method.starts_with("login.loopback.") || method.starts_with("login.trae.") || method.starts_with("login.kiro.") || method == "login.step.publish"
         || method == "admin.action" && matches!(params["action"].as_str(),
-            Some("login.step.publish" | "login.loopback.open" | "login.loopback.close"
-                | "login.input.take" | "login.trae.context.prepare" | "login.trae.exchange")) {
+            Some("login.step.publish" | "login.loopback.open" | "login.loopback.close" | "login.loopback.kiro.advance" | "login.input.take" | "login.trae.context.prepare" | "login.trae.exchange" | "login.kiro.exchange")) {
         return Err(proto::WireError::with_code("托管登录只接受当前主程序任务签发的调用", "forbidden"));
     }
     Ok(())
 }
 
 fn current(host: &Arc<Host>, provider: &str, generation: u64) -> bool {
-    host.ready() && !host.closing.load(Ordering::Acquire)
-        && host.generation.load(Ordering::Acquire) == generation && !host.activity.retired()
+    host.ready() && host.generation.load(Ordering::Acquire) == generation && !host.activity.retired()
         && !super::super::registry::is_switching(provider) && host.callbacks.provider_allowed(provider)
         && super::super::serves_provider(provider)
         && super::super::host_for_provider(provider).is_some_and(|owner| Arc::ptr_eq(&owner, host))
@@ -86,11 +89,14 @@ impl Host {
             self.embedded.active.fetch_add(1, Ordering::AcqRel);
         }
         let _active = Active(self.clone());
+        let kiro_execution = if call.provider() == "kiro" && call.method_index() == 0 {
+            Some(kiro_execution::KiroExecution::capture(self, &runtime, call).map_err(wire)?)
+        } else { None };
         let params = call.params().map_err(wire)?;
         let result = tokio::select! {
             biased;
             _ = call.ended() => Err(wire(unavailable())),
-            result = runtime.invoke_managed(call.clone(), params, timeout) => result,
+            result = runtime.invoke_managed(call.clone(), params, timeout, kiro_execution) => result,
         };
         call.runtime_matches(Arc::as_ptr(&runtime.shared) as usize, generation).map_err(wire)?;
         let value = super::errors::decode(result?)?;
@@ -126,19 +132,55 @@ impl Context {
                 trae_execution::validate_context(self, &call).map_err(wire)?;
                 call.prepare_trae_context(params, &self.shared.options).await.map_err(wire)
             }
-
+            "login.kiro.exchange" => {
+                self.permission("login.loopback.v1")?;
+                if call.provider() != "kiro" || call.method_index() != 0 {
+                    return Err(proto::WireError::with_code("Kiro兑换只接受原本次托管回调", "forbidden"));
+                }
+                let execution = self.kiro_execution.as_ref().cloned().ok_or_else(|| wire(unavailable()))?;
+                kiro_worker::exchange(&call, execution, params).await.map_err(wire)
+            }
             "login.trae.exchange" => {
                 self.permission("login.loopback.v1")?;
                 let execution = TraeExecution::capture(self, &call).map_err(wire)?;
                 call.retain_trae_execution(execution.clone()).map_err(wire)?;
                 call.exchange_trae(params, &self.shared.options).await.map_err(wire)
             }
-
+            "login.autoclaw.authorization" => {
+                self.permission("login.loopback.v1")?;
+                call.authorize_autoclaw(params, &self.shared.options).await.map_err(wire)
+            }
             "login.loopback.open" => {
                 self.permission("login.loopback.v1")?;
                 call.open_loopback(params, &self.shared.options).await.map_err(wire)
             }
-
+            "login.loopback.kiro.advance" => {
+                self.permission("login.loopback.v1")?;
+                if call.provider() != "kiro" || call.method_index() != 0 {
+                    return Err(proto::WireError::with_code("Kiro 阶段推进只能用于原 method0 托管调用", "forbidden"));
+                }
+                // 仅Kiro推进核对当前Context实际Shared来源，不能借同provider另一运行实例。
+                call.runtime_matches(Arc::as_ptr(&self.shared) as usize,
+                    super::super::host_for_provider(call.provider()).map(|host| host.generation.load(Ordering::Acquire))
+                        .ok_or_else(|| wire(unavailable()))?).map_err(wire)?;
+                // 与state写者一致：原Shared登录状态锁 → Session → 原Call Material。
+                // 只毁宿主持有的旧 kiro.oauth；不声称擦除已经交付WASM栈的材料副本。
+                let mut state = self.shared.login_state.lock().map_err(|_| wire(unavailable()))?;
+                let result = match call.advance_kiro(params, &self.shared.options) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        drop(state);
+                        call.invalidate_kiro();
+                        return Err(wire(error));
+                    }
+                };
+                if let Err(error) = state.clear_kiro_oauth(call.flow()) {
+                    drop(state);
+                    call.invalidate_kiro();
+                    return Err(error);
+                }
+                Ok(result)
+            }
             "login.loopback.close" => {
                 self.permission("login.loopback.v1")?;
                 call.close_loopback(params).map_err(wire)

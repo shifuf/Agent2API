@@ -27,13 +27,13 @@ impl InstallPolicy {
         match self {
             Self::Automatic(channels) => {
                 let settings = settings::current();
-                let allowed = match installed {
-                    Some(pack) => settings.auto_update && pack.enabled && pack.signed
-                        && compare_versions(&asset.version, &pack.version) == Some(1),
-                    None => settings.auto_install_official,
-                };
+                let allowed = settings.auto_update && installed.is_some_and(|pack| {
+                    super::super::support::installed_state(&pack) == super::super::PackSupportState::Supported
+                        && pack.enabled && pack.signed
+                        && compare_versions(&asset.version, &pack.version) == Some(1)
+                });
                 if !allowed || !settings.auto_check || settings.channels() != channels {
-                    return Err("自动安装已关闭或通道已改变，本次下载未安装".to_string());
+                    return Err("插件不再满足自动更新条件或通道已改变，本次下载未安装".to_string());
                 }
             }
             Self::Manual => {}

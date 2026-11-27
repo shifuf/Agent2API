@@ -5,15 +5,23 @@ import {
 } from '@ui'
 import { PageIntro, IconButton, Badge, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
-import { apiCall } from '../api/client'
+import { apiCall as requestJson } from '../api/client'
 import { store } from '../state/store'
 import { usePolling } from '../lib/usePolling'
 import { t } from '../i18n'
 import { providerKeyDrafts, providerKeysPayload, providerReady, type SearchProviderRow as ProviderRow } from '../../../ui-shared/tools-provider-keys'
 import { ProviderKeyList, ProviderKeysEditor } from '../../../ui-shared/tools-provider-keys-view'
-import { ToolImageConfig, type ImageConfigApi } from '../../../ui-islands/src/islands/tools-image-config'
+import { ImageGenerationPanel } from '../../../ui-shared/tools-image-config'
+import { imageToolApi } from '../core/api-images'
+import { serverIdentity } from '../core/servers'
 
-const imageConfigApi: ImageConfigApi = (method, path, body) => apiCall(path, { method, body })
+function useToolsRequest() {
+  const identity = serverIdentity()
+  return useMemo(() => <Result,>(path: string, init?: Parameters<typeof requestJson>[1]) => {
+    if (serverIdentity() !== identity) return Promise.reject(new DOMException('服务器已切换', 'AbortError'))
+    return requestJson<Result>(path, { ...init, noAuthReplay: Boolean(init?.method && init.method !== 'GET') || init?.noAuthReplay })
+  }, [identity])
+}
 
 /**
  * 工具服务（手机端）。
@@ -57,6 +65,9 @@ function providerFailure(result: { code?: string; error?: string; reset_at?: num
 }
 
 export function ToolsPage() {
+  const apiCall = useToolsRequest()
+  const identity = serverIdentity()
+  const imageApi = useMemo(() => imageToolApi(identity), [identity])
   const [services, setServices] = useState<ToolService[]>([])
   const [providers, setProviders] = useState<ProviderRow[]>([])
   const [selection, setSelection] = useState<Selection>({ search_providers: [], fetch_provider: 'tavily' })
@@ -251,7 +262,7 @@ export function ToolsPage() {
           </div>
         </Card>
       </div>
-      {services.some(service => service.id === 'image-generation') ? <div className='m-section'><ToolImageConfig api={imageConfigApi} /></div> : null}
+      {services.some(service => service.id === 'image-generation') ? <div className='m-section'><ImageGenerationPanel api={imageApi} /></div> : null}
     </> : null}
 
     {editing ? <ProviderDialog provider={providers.find(provider => provider.provider === editing.provider) || editing}
@@ -277,6 +288,7 @@ export function ToolsPage() {
 function ProviderDialog({ provider, onClose, onSaved, onRefresh }: {
   provider: ProviderRow; onClose: () => void; onSaved: () => void; onRefresh: () => Promise<void>
 }) {
+  const apiCall = useToolsRequest()
   const [keyDrafts, setKeyDrafts] = useState(() => providerKeyDrafts(provider))
   const [checking, setChecking] = useState('')
   const [accountId, setAccountId] = useState(provider.account_id || '')
@@ -348,6 +360,7 @@ function SelectionDialog({ providers, fetchProviders, value, onClose, onSaved }:
   providers: Array<{ value: string; label: string }>; fetchProviders: Array<{ value: string; label: string }>; value: Selection
   onClose: () => void; onSaved: (value: Selection) => void
 }) {
+  const apiCall = useToolsRequest()
   const [draft, setDraft] = useState(value)
   const [busy, setBusy] = useState(false)
   const save = async () => {
@@ -391,6 +404,7 @@ function VisionDialog({ config, keys, providers, models, onClose, onSaved }: {
   providers: ManageProvider[]; models: ManageModel[]
   onClose: () => void; onSaved: () => void
 }) {
+  const apiCall = useToolsRequest()
   const [provider, setProvider] = useState(config?.provider || '')
   const [model, setModel] = useState(config?.upstream_model || '')
   const [reasoning, setReasoning] = useState(config?.reasoning || '')

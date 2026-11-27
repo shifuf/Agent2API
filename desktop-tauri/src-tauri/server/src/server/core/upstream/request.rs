@@ -108,9 +108,7 @@ impl UpstreamErrorDetail {
 pub async fn read_upstream_error(
     response: reqwest::Response,
     capture: Option<&crate::server::core::debug_traffic::TrafficCapture>,
-    private: bool,
 ) -> UpstreamErrorDetail {
-    if private { return UpstreamErrorDetail { code: None, message: "上游请求失败；隐私模式已省略错误详情".into(), payload: None }; }
     if let Some(capture) = capture {
         capture.attach_response(response.status().as_u16(), response.headers());
     }
@@ -286,7 +284,8 @@ pub struct UpstreamRequestError {
 
 impl UpstreamRequestError {
     pub fn to_gateway_error(&self) -> GatewayError {
-        GatewayError::with_status(502, self.message.clone())
+        let error = GatewayError::with_status(502, self.message.clone());
+        if self.safe_to_retry { error } else { error.with_code("upstream_submission_unconfirmed") }
     }
 }
 

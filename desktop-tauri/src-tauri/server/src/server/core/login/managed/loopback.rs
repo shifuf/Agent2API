@@ -23,6 +23,7 @@ pub(super) struct Lease {
     pub(super) official_state: Option<String>,
     pub(super) authorization_url: Option<String>,
     pub(super) passport: Option<super::catpaw::Passport>,
+    pub(super) kiro: Option<super::kiro::Binding>,
     pub(super) consumed: bool,
     pub(super) queued: bool,
     pub(super) cancel: CancellationToken,
@@ -55,6 +56,9 @@ pub(super) async fn open(call: &Call, params: &Value, options: &Options) -> Resu
         .ok_or_else(|| GatewayError::with_status(403, "当前提供商、登录方式或回调地址尚未获准"))?;
     if profile.callback == CallbackKind::TraeCode {
         return Err(GatewayError::with_status(403, "Trae 固定PKCE准备必须经本次context.prepare，不能借通用loopback重绑"));
+    }
+    if matches!(profile.callback, CallbackKind::KiroPortal | CallbackKind::KiroAws) {
+        return super::kiro::open(call, profile).await;
     }
     if profile.callback == CallbackKind::CatpawPassport {
         if ["http.v1", "http.timeout.v1"].iter().any(|capability| !options.allows(capability)) {
@@ -108,7 +112,7 @@ pub(super) async fn open(call: &Call, params: &Value, options: &Options) -> Resu
             || state.step.as_ref().is_none_or(|step| step.id != call.expected()) { return Err(unavailable()); }
         let passport = opened.map(|opened| opened.install(&mut state));
         state.leases.insert(id.clone(), Lease { profile: profile.id, expected: call.expected().into(), uri: uri.clone(),
-            step: None, official_state: None, authorization_url: None, passport, consumed: false, queued: false, cancel: cancel.clone() });
+            step: None, official_state: None, authorization_url: None, passport, kiro: None, consumed: false, queued: false, cancel: cancel.clone() });
     }
     let slots = Arc::new(Semaphore::new(4));
     if profile.callback == CallbackKind::CatpawPassport {
@@ -126,7 +130,9 @@ pub(super) fn close(call: &Call, params: &Value) -> Result<Value, GatewayError> 
     if super::trae::applies(call.provider(), call.method_index()) {
         return super::trae::close(call, id);
     }
-    
+    if super::kiro::applies(call.provider(), call.method_index()) {
+        return super::kiro::close(call, id);
+    }
     let mut state = call.session.state.lock().map_err(|_| unavailable())?;
     let lease = state.leases.remove(id);
     let closed = lease.is_some();
@@ -199,12 +205,14 @@ fn check(lease: &Lease, step: &str, raw: &str) -> Result<(), GatewayError> {
     Ok(())
 }
 
-pub(super) fn claim(state: &mut State, id: &str, step: &str, raw: &str, manual: bool) -> Result<(), GatewayError> {
+pub(super) fn claim(state: &mut State, id: &str, step: &str, raw: &str, manual: bool) -> Result<Option<super::kiro::Receipt>, GatewayError> {
     if state.leases.get(id).is_some_and(|lease|
         lease.profile == crate::server::core::plugin_host::wasm::managed_policy::TRAE_PROFILE) {
         return Err(GatewayError::with_status(403, "Trae 无state授权码只接受真实IPv4监听对象的私有收据"));
     }
-    
+    if state.leases.get(id).is_some_and(|lease| lease.kiro.is_some()) {
+        return super::kiro::claim(state, id, step, raw, manual).map(Some);
+ }
     let current = state.step.as_ref().ok_or_else(unavailable)?;
     if current.id != step || current.lease.as_deref() != Some(id) || current.status != "ready" || current.browser.is_none() {
         return Err(unavailable());
@@ -218,7 +226,7 @@ pub(super) fn claim(state: &mut State, id: &str, step: &str, raw: &str, manual: 
     lease.cancel.cancel();
     lease.official_state.take();
     state.callback_step = Some(step.to_string());
-    Ok(())
+    Ok(None)
 }
 
 fn spawn(listener: TcpListener, task: &WeakTask, session: &Arc<Session>, id: &str, uri: &str,

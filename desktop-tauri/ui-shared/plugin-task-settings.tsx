@@ -35,19 +35,16 @@ export function PluginTaskSettings({ rows, request, refresh, t, disabled = false
     setError('')
     setNotice('')
     try {
-      const result = await latest.current.request<{ started?: boolean; saved?: boolean }>(settings ? 'PATCH' : 'POST',
+      const result = await latest.current.request<{ accepted?: boolean }>(settings ? 'PATCH' : 'POST',
         settings ? '/api/plugins/tasks' : '/api/plugins/tasks/run', {
           provider: row.provider, task: row.task.id, ...(settings ? { settings } : { background: true }),
         })
       if (!alive.current) return
-      if (settings && result?.saved !== true) {
-        setError(t(result?.saved === false ? '设置已生效，但写入磁盘失败（重启后会恢复原设置）' : '结果未确认'))
-      }
-      if (settings?.times && result?.saved === true) setTimes(previous => { const next = { ...previous }; delete next[key]; return next })
-      if (result?.started === true) setNotice(t('任务已交给网关，结果会自动更新；请勿重复执行。'))
+      if (settings?.times) setTimes(previous => { const next = { ...previous }; delete next[key]; return next })
+      if (result?.accepted === true) setNotice(t('任务已交给网关，结果会自动更新；请勿重复执行。'))
       try { await latest.current.refresh() }
       catch (cause) {
-        if (alive.current) setError(previous => [previous, t('状态刷新失败，请手动刷新；不要重复提交执行。'), cause instanceof Error ? cause.message : String(cause)].filter(Boolean).join(' '))
+        if (alive.current) setError(t('状态刷新失败，请手动刷新；不要重复提交执行。') + ' ' + (cause instanceof Error ? cause.message : String(cause)))
       }
     } catch (cause) {
       if (alive.current) setError(cause instanceof Error ? cause.message : String(cause))
@@ -83,7 +80,7 @@ export function PluginTaskSettings({ rows, request, refresh, t, disabled = false
               const key = `${row.provider}:${row.task.id}`
               const running = pluginTaskRunning(row)
               const blocked = disabled || Boolean(busy) || Boolean(row.unavailable)
-              const last = row.runs.reduce((at, run) => Math.max(at, run.lastRunAt || 0), row.operation?.finishedAt || row.operation?.startedAt || 0)
+              const last = row.runs.reduce((at, run) => Math.max(at, run.lastRunAt || 0), row.operation?.at || 0)
               return <Card key={key} className='min-w-0 p-3'>
                 <div className='flex flex-wrap items-center gap-3'>
                   <Label className='flex min-w-0 flex-1 items-center gap-2 text-[13px]'>

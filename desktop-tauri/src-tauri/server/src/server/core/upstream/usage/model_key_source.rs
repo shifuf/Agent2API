@@ -71,6 +71,7 @@ mod tests {
         synthetic.insert("x-api-key", "replacement-fixture-key".parse().unwrap());
         assert!(classifier.capture_model_key_source(&synthetic).is_none());
         assert!(original.capture_model_key_source(&synthetic).is_none());
+        assert!(classifier.model_key_source().is_none());
     }
 
     #[test]
@@ -83,6 +84,7 @@ mod tests {
             Some(Err(error)) => { assert_eq!(error.status_code, 401); assert_eq!(error.message, "original failure"); }
             _ => panic!("the original failure must be inherited"),
         }
+        assert!(classifier.model_key_source().is_none());
         let call = classifier.replay_guard().open_call().unwrap();
         call.preparation().freeze().unwrap();
         call.preparation().lock_permanent_replay_block();

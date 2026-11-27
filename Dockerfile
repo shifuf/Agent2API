@@ -95,6 +95,8 @@ RUN { echo '#!/bin/sh -e'; \
     } > /build/cargo-build.sh && chmod +x /build/cargo-build.sh
 
 COPY desktop-tauri/src-tauri/Cargo.toml desktop-tauri/src-tauri/Cargo.lock src-tauri/
+# 与桌面端共用 CPU 基线，配置变化也必须使依赖缓存失效。
+COPY desktop-tauri/src-tauri/.cargo/config.toml src-tauri/.cargo/config.toml
 COPY desktop-tauri/src-tauri/server/Cargo.toml src-tauri/server/
 RUN mkdir -p src-tauri/server/src/bin src-tauri/src \
     && echo "" > src-tauri/server/src/lib.rs \

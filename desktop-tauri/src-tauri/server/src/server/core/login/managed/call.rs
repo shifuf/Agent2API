@@ -1,3 +1,5 @@
+mod kiro_exchange;
+pub(crate) use kiro_exchange::KiroCallSource;
 
 use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +17,10 @@ struct Material {
     taken: AtomicBool,
     catpaw_verifying: AtomicBool,
     catpaw_ready: AtomicBool,
+    // 只由真实 Kiro callback claim 签发，绝不从 params/状态串构造。
+    kiro_receipt: Mutex<Option<Arc<super::kiro::Receipt>>>,
+    kiro_advanced: AtomicBool,
+    kiro_exchange: kiro_exchange::Slot,
     // 只由Trae真实IPv4监听器的queue/claim签发，不从任何JSON code/state恢复。
     trae_receipt: Mutex<Option<super::trae::AuthCodeReceipt>>,
     trae_taken: AtomicBool,
@@ -83,6 +89,8 @@ impl Call {
         Ok(Self { task: weak, session, owner: Arc::downgrade(&owner), action, id, expected,
             options, material: Arc::new(Material { value: Mutex::new(None), taken: AtomicBool::new(false),
                 catpaw_verifying: AtomicBool::new(false), catpaw_ready: AtomicBool::new(false),
+                kiro_receipt: Mutex::new(None), kiro_advanced: AtomicBool::new(false),
+                kiro_exchange: Default::default(),
                 trae_receipt: Mutex::new(None), trae_taken: AtomicBool::new(false),
                 trae_execution: Mutex::new(None), trae_execution_retained: AtomicBool::new(false) }),
             published: Arc::new(AtomicBool::new(false)), execution: Arc::new(Mutex::new(None)) })
@@ -115,8 +123,11 @@ impl Call {
             if action == Action::Callback {
                 let lease_id = step.lease.as_ref().ok_or_else(unavailable)?.clone();
                 let raw = input.inputs["callbackUrl"].as_str().ok_or_else(unavailable)?;
-                super::loopback::claim(&mut state, &lease_id, &input.interaction, raw, true)?;
-                
+                let receipt = super::loopback::claim(&mut state, &lease_id, &input.interaction, raw, true)?;
+                if let Some(mut receipt) = receipt {
+                    receipt.bind_call(&call)?;
+                    *call.material.kiro_receipt.lock().map_err(|_| unavailable())? = Some(Arc::new(receipt));
+                }
             }
             state.step.as_mut().ok_or_else(unavailable)?.status = "processing";
             let material = if action == Action::Captcha {
@@ -138,8 +149,11 @@ impl Call {
         let claimed = (|| {
             let mut state = call.session.state.lock().map_err(|_| unavailable())?;
             if !call.session.valid() || state.active.as_deref() != Some(call.id.as_str()) { return Err(unavailable()); }
-            super::loopback::claim(&mut state, lease, &call.expected, raw, false)?;
-            
+            let receipt = super::loopback::claim(&mut state, lease, &call.expected, raw, false)?;
+            if let Some(mut receipt) = receipt {
+                receipt.bind_call(&call)?;
+                *call.material.kiro_receipt.lock().map_err(|_| unavailable())? = Some(Arc::new(receipt));
+            }
             state.step.as_mut().ok_or_else(unavailable)?.status = "processing";
             *call.material.value.lock().map_err(|_| unavailable())? = Some(json!({ "url": raw }));
             Ok(())
@@ -426,12 +440,15 @@ impl Call {
             super::trae::finish_call(self, &mut state);
             if state.active.as_deref() == Some(self.id.as_str()) { state.active = None; }
         }
+        kiro_exchange::finish(self);
         let material = self.material.value.lock().ok().and_then(|mut material| material.take());
+        let receipt = self.material.kiro_receipt.lock().ok().and_then(|mut receipt| receipt.take());
         let trae_receipt = self.material.trae_receipt.lock().ok().and_then(|mut receipt| receipt.take());
         let trae_execution = self.material.trae_execution.lock().ok().and_then(|mut execution| execution.take());
         let execution = self.execution.lock().ok().and_then(|mut execution| execution.take());
         drop(trae_receipt);
         drop(trae_execution);
+        drop(receipt);
         drop(material);
         drop(execution);
     }
@@ -440,7 +457,9 @@ impl Call {
         if super::trae::applies(self.provider(), self.method_index()) {
             return super::trae::can_complete(self);
         }
-        
+        if super::kiro::applies(self.provider(), self.method_index()) {
+            return self.kiro_can_complete();
+        }
         let state = self.session.state.lock().map_err(|_| unavailable())?;
         let preparing = state.step.as_ref().is_some_and(|step| step.status == "processing"
             && state.callback_step.as_deref() == Some(step.id.as_str()));
@@ -454,9 +473,44 @@ impl Call {
     }
 
     /// 仅固定 Kiro 门户 choice：持同一会话锁时消费原Call收据一次，不接受外部收据。
+    pub(super) fn with_kiro_advance<T>(&self,
+        action: impl FnOnce(&mut super::State, &super::kiro::Receipt) -> Result<T, GatewayError>,
+    ) -> Result<T, GatewayError> {
+        self.validate(self.provider())?;
+        if self.material.kiro_advanced.load(Ordering::Acquire) {
+            return Err(GatewayError::with_status(409, "Kiro 本次阶段推进已使用，未返回旧回执或再次推进"));
+        }
+        if !super::kiro::applies(self.provider(), self.method_index()) || !self.is_callback()
+            || self.published() || !self.material.taken.load(Ordering::Acquire)
+        { return Err(unavailable()); }
+        let mut state = self.session.state.lock().map_err(|_| unavailable())?;
+        if !self.session.valid() || state.active.as_deref() != Some(self.id())
+            || state.step.as_ref().is_none_or(|step| step.id != self.expected() || step.status != "processing")
+            || state.callback_step.as_deref() != Some(self.expected())
+            || state.runtime.as_ref().is_none_or(|runtime| runtime.stopped.is_cancelled() || !(runtime.alive)())
+        { return Err(unavailable()); }
+        let mut receipt = self.material.kiro_receipt.lock().map_err(|_| unavailable())?;
+        let mut material = self.material.value.lock().map_err(|_| unavailable())?;
+        if material.is_some() { return Err(unavailable()); }
+        if receipt.as_ref().is_none_or(|receipt| !receipt.choice()) || self.material.kiro_advanced.load(Ordering::Acquire) {
+            return Err(unavailable());
+        }
+        // 验证失败也不复活一次资格：本Call之后只能失败退出，不缓存成功回包。
+        self.material.kiro_advanced.store(true, Ordering::Release);
+        let result = action(&mut state, receipt.as_ref().ok_or_else(unavailable)?);
+        if result.is_ok() { receipt.take(); }
+        material.take();
+        result
+    }
 
-
-
+    pub(super) fn kiro_needs_next(&self) -> Result<bool, GatewayError> {
+        let state = self.session.state.lock().map_err(|_| unavailable())?;
+        let receipt = self.material.kiro_receipt.lock().map_err(|_| unavailable())?;
+        Ok(super::kiro::applies(self.provider(), self.method_index()) && self.is_callback()
+            && (self.material.kiro_advanced.load(Ordering::Acquire)
+                || receipt.as_ref().is_some_and(|receipt| receipt.choice())
+                || super::kiro::choice_needs_next(&state)))
+    }
 
     pub(crate) fn publish(&self, params: &Value,
         options: &crate::server::core::plugin_host::wasm::manifest::Options) -> Result<Value, GatewayError> {
@@ -469,8 +523,13 @@ impl Call {
             || matches!(self.action, Action::Captcha | Action::Callback) && !self.material.taken.load(Ordering::Acquire) {
             return Err(GatewayError::with_status(409, "登录步骤已变化或不允许重复发布"));
         }
-        
-        
+        if super::kiro::applies(self.provider(), self.method_index()) && !self.is_start() && !self.is_callback() {
+            return Err(GatewayError::with_status(403, "Kiro 托管登录不接受验证码或普通轮询发布浏览器步骤"));
+        }
+        if super::kiro::applies(self.provider(), self.method_index()) && self.is_callback()
+            && !self.material.kiro_advanced.load(Ordering::Acquire) {
+            return Err(GatewayError::with_status(403, "Kiro 只有原门户选择一次推进后才能发布 AWS 新步骤"));
+        }
         let mut state = self.session.state.lock().map_err(|_| unavailable())?;
         if !self.session.valid() || state.active.as_deref() != Some(self.id.as_str())
             || state.step.as_ref().is_none_or(|step| step.id != self.expected) { return Err(unavailable()); }
@@ -482,30 +541,77 @@ impl Call {
         Ok(public)
     }
 
-
+    pub(crate) async fn authorize_autoclaw(&self, params: &Value,
+        options: &crate::server::core::plugin_host::wasm::manifest::Options) -> Result<Value, GatewayError> {
+        super::autoclaw::authorize(self, params, options).await
+    }
 
     pub(crate) async fn open_loopback(&self, params: &Value,
         options: &crate::server::core::plugin_host::wasm::manifest::Options) -> Result<Value, GatewayError> {
         self.validate(self.provider())?;
         if self.published() || !matches!(self.action, Action::Start | Action::Captcha)
-            || self.action == Action::Captcha && !self.material.taken.load(Ordering::Acquire) {
+            || self.action == Action::Captcha && !self.material.taken.load(Ordering::Acquire)
+                && !(self.provider() == "autoclaw-intl" && self.method_index() == 0
+                    && params["profile"] == "autoclaw-intl.zai.v1") {
             return Err(GatewayError::with_status(403, "当前登录步骤不能申请回调监听"));
         }
         super::loopback::open(self, params, options).await
     }
 
     /// 只捕获原任务已选择的完整Rust路径；缺失选择不猜直连或重读系统代理。
-
+    pub(crate) fn kiro_selected_path(&self) -> Result<crate::server::core::proxies::chain::SelectedPath, GatewayError> {
+        self.validate("kiro")?;
+        if !super::kiro::applies(self.provider(), self.method_index()) || !self.is_callback() { return Err(unavailable()); }
+        let task = self.task.upgrade().ok_or_else(unavailable)?;
+        let path = task.context.as_ref().and_then(|context| context.proxy.as_ref())
+            .ok_or_else(|| GatewayError::with_status(409,
+                "Kiro本次未捕获明确的登录出口，请重新选择直连或代理；未回退默认系统出口"))?
+            .selected.clone();
+        self.validate("kiro")?;
+        Ok(path)
+    }
 
     /// 固定Kiro首次表单只用于选择Portal/AWS profile，不接受插件另传登录方式。
+    pub(super) fn kiro_start_choice(&self) -> Result<&str, GatewayError> {
+        if !super::kiro::applies(self.provider(), self.method_index()) || !self.is_start() { return Err(unavailable()); }
+        let choice = match self.options.pointer("/inputs/loginMethod") {
+            None => "portal",
+            Some(value) => value.as_str().ok_or_else(|| GatewayError::bad_request("Kiro 首次登录方式必须是文字"))?,
+        };
+        if !["portal", "builderid", "enterprise"].contains(&choice) {
+            return Err(GatewayError::bad_request("Kiro 首次登录方式无效"));
+        }
+        Ok(choice)
+    }
 
+    pub(super) fn kiro_start_region(&self) -> Result<&str, GatewayError> {
+        self.kiro_start_choice()?;
+        let region = match self.options.pointer("/inputs/region") {
+            None => "us-east-1",
+            Some(value) => value.as_str().ok_or_else(|| GatewayError::bad_request("Kiro 目录地区必须是文字"))?,
+        };
+        let region = region.trim();
+        let region = if region.is_empty() { "us-east-1" } else { region };
+        if crate::server::core::plugin_host::wasm::aws_oidc::origin(region).is_none() {
+            return Err(GatewayError::bad_request("Kiro 目录地区尚未获得固定来源授权，未替换地区"));
+        }
+        Ok(region)
+    }
 
-
-
-
+    pub(crate) fn advance_kiro(&self, params: &Value,
+        options: &crate::server::core::plugin_host::wasm::manifest::Options,
+    ) -> Result<Value, GatewayError> {
+        self.validate(self.provider())?;
+        if options.provider != self.provider() || !options.allows("login.managed.v1") || !options.allows("login.loopback.v1") {
+            return Err(unavailable());
+        }
+        super::kiro::advance(self, params, options)
+    }
 
     /// 内部推进收尾异常只能关闭原会话，不返回可能复用的成功材料。
-
+    pub(crate) fn invalidate_kiro(&self) {
+        if super::kiro::applies(self.provider(), self.method_index()) { self.session.close(); }
+    }
 
     pub(crate) fn close_loopback(&self, params: &Value) -> Result<Value, GatewayError> {
         self.validate(self.provider())?;

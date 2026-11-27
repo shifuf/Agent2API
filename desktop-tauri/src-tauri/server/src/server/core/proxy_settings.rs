@@ -14,7 +14,7 @@
 //!     端口（状态文件里的注册表）即使超出新范围也沿用 —— 注册表是「账号
 //!     引用不漂移」的承诺，改范围不该把既有端口作废，新分配才受范围约束。
 //!   · `testUrl`：「网络代理」页出口连通性测试的目标网址（`core::egress`
-//!     的 `test_proxy`）。默认打 WorkBuddy 上游（copilot.tencent.com），
+//!     的 `test_proxy`）。默认使用 Google 首页，
 //!     判据是「能否连上**上游**」；自定义上游的用户换到这里测自家的上游
 //!     才与实际链路一致。空串 = 用默认。
 //!
@@ -48,7 +48,7 @@ pub const DEFAULT_LISTENER_PORT_END: u16 = 19200;
 /// 连通性测试的默认目标（与 `core::egress::DEFAULT_TEST_URL` 同值；
 /// 两处共用一份默认会引入循环依赖（egress 认识本模块，本模块不认识
 /// egress），所以这里复制字面量、注释互指 —— 改一处要同步另一处）
-pub const DEFAULT_TEST_URL: &str = "https://copilot.tencent.com/v2/config";
+pub const DEFAULT_TEST_URL: &str = "https://www.google.com/";
 
 /// 网址长度上限（要进内核配置与请求行的，超长多半是粘错了）
 const MAX_URL_LENGTH: usize = 2048;

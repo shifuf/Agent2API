@@ -225,8 +225,12 @@ impl OfficialCatPaw {
     pub(crate) async fn forward_for(&self, account: &str, body: &Value, stream: bool,
         telemetry: &Arc<RequestTelemetry>) -> Result<ForwardOutcome, GatewayError> {
         let source = config::model_key_source::capture(&self.headers)?;
-        config::model_key_source::scope(source, self.adapter.as_ref().expect("fixture adapter retained")
-            .forward_conversation(&self.store, account, body, &self.headers, None, stream, telemetry)).await
+        telemetry.install_model_key_source(Ok(source));
+        super::super::account_egress::scope(telemetry, async {
+            super::super::account_egress::select("catpaw", account, None, true);
+            self.adapter.as_ref().expect("fixture adapter retained")
+                .forward_conversation(&self.store, account, body, &self.headers, None, stream, telemetry).await
+        }).await
     }
 
     pub(crate) fn requests(&self) -> Vec<RecordedRequest> {
@@ -240,7 +244,7 @@ impl OfficialCatPaw {
     pub(crate) async fn close(mut self) -> bool {
         self.adapter.take();
         super::super::shutdown_all().await;
-        let released = self.host.wasm_shutdown_complete();
+        let released = self.host.local_shutdown_complete();
         if released { registry::remove("catpaw"); }
         self.cancel.cancel();
         if let Some(server) = self.server.take() {

@@ -36,8 +36,8 @@
  * 假读数（后端 module 头那条纪律，前端这边是它的最后一站）。
  *
  * ── 时间显示分两级 ──────────────────────────────────────────
- * 行上一律 `MM-DD HH:mm`（弹层要一眼扫完，年份是噪音），完整时刻（含年）只在悬停
- * 的 title 里 —— 与 `pendingPlansTitle` 同一处置。已过期的包不给"到期倒计时"，
+ * 行上统一 `YYYY-MM-DD HH:mm`，保留年份以区分跨年度积分包；精确到秒的完整时刻
+ * 放在悬停的 title 里。已过期的包不给"到期倒计时"，
  * 直接标「已过期」并压成灰字：一个负数天数和一句「已过期」是同一件事，后者好读。
  *
  * ── 花不出去的收在末尾，且默认折叠 ──────────────────────────
@@ -53,7 +53,10 @@ import { Meter, Popover, PopoverContent, PopoverTrigger, Button } from '@ui'
 import { t } from '../i18n'
 import { formatTime, numberText, type UsageEntry } from './accounts-shared'
 import { creditPacksOf, snapshotReadingOf, usageUnitLabel, type UsageAggregate } from '../../../ui-shared/usage-readings'
-import { creditExpiryLabel, creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf, expiringCreditOf, type ExpiringCredit } from '../../../ui-shared/credit-expiry'
+import {
+  creditExpiryLabel, creditExpiryRatioOf, creditExpirySummaryOf, creditExpiryText, creditExpiryUnitOf,
+  expiringCreditOf, isCreditExpiringToday, type ExpiringCredit,
+} from '../../../ui-shared/credit-expiry'
 
 /** 明细里的一行（`creditRowsOf` 的产物；渲染输入与 `usageDetailOf` 的行同形） */
 export type CreditRow = {
@@ -106,12 +109,11 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-/** 毫秒时间戳 → `MM-DD HH:mm`（年份在悬停的完整时刻里；取不出来给空串） */
-function shortTime(value: number): string {
+function detailTime(value: number): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
   const pad = (part: number): string => String(part).padStart(2, '0')
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 /**
@@ -168,9 +170,9 @@ export function creditRowsOf(entry: UsageEntry, now = Date.now()): CreditRow[] {
       const value = amount === null ? '—' : `${amount > 0 ? '+' : ''}${numberText(amount)}`
       const view = unit && value !== '—' ? `${value} ${unitLabel(unit)}` : value
       const parts: string[] = []
-      if (at !== null && at > 0) parts.push(shortTime(at))
+      if (at !== null && at > 0) parts.push(detailTime(at))
       if (expireAt !== null && expireAt > 0) {
-        parts.push(expireAt <= now ? t('已过期') : t('{time} 到期', { time: shortTime(expireAt) }))
+        parts.push(expireAt <= now ? t('已过期') : t('{time} 到期', { time: detailTime(expireAt) }))
       }
       const remark = String(pack?.remark || '').trim()
       return {
@@ -248,18 +250,18 @@ export function creditRowsOf(entry: UsageEntry, now = Date.now()): CreditRow[] {
     // 缺了发放时刻就标成「领取」等于替上游编一个到手时间。
     const parts: string[] = []
     if (grantAt !== null && grantAt > 0) {
-      parts.push(t('{time} 领取', { time: shortTime(grantAt) }))
+      parts.push(t('{time} 领取', { time: detailTime(grantAt) }))
     } else if (startAt !== null && startAt > 0) {
-      parts.push(t('{time} 生效', { time: shortTime(startAt) }))
+      parts.push(t('{time} 生效', { time: detailTime(startAt) }))
     }
     if (daily) {
       // 日额度包的「到期」是今天 24 点（周期边界），不是这笔钱作废 ——
       // 照「到期」写会让人以为额度明天就没了（实际是重置回满）
       parts.push(t('每日重置'))
     } else if (rolling && resetAt !== null && resetAt > 0) {
-      parts.push(t('重置 {date}', { date: shortTime(resetAt) }))
+      parts.push(t('重置 {date}', { date: detailTime(resetAt) }))
     } else if (expireAt !== null && expireAt > 0) {
-      parts.push(expired ? t('已过期') : t('{time} 到期', { time: shortTime(expireAt) }))
+      parts.push(expired ? t('已过期') : t('{time} 到期', { time: detailTime(expireAt) }))
     }
     if (reason) parts.push(reason)
 
@@ -298,11 +300,16 @@ export function creditRowsOf(entry: UsageEntry, now = Date.now()): CreditRow[] {
 
 /** 明细弹层里的一行（视觉与 CodeArts 那份明细同一套类名，观感一致） */
 function CreditRowView({ row, now }: { row: CreditRow; now: number }) {
+  const soonToday = row.expiry ? isCreditExpiringToday(row.expiry.expireAt, now) : false
   return (
     <div className='usage-pop-row' title={row.title}>
       <div className='usage-pop-line'>
         <span className='usage-pop-name'>{row.name}</span>
-        {row.expiry ? <span className='usage-pop-soon-tag'>{creditExpiryLabel(row.expiry.expireAt, t, now)}</span> : null}
+        {row.expiry ? (
+          <span className={`usage-pop-soon-tag${soonToday ? ' is-today' : ''}`}>
+            {creditExpiryLabel(row.expiry.expireAt, t, now)}
+          </span>
+        ) : null}
         <span className={`usage-pop-view ${row.tone}`}>{row.view}</span>
       </div>
       {row.window ? <div className='usage-pop-window'>{row.window}</div> : null}
@@ -354,7 +361,19 @@ export function CreditDetailButton({ rows, now, expiryUnit, subscriptionLine, ag
   const restRows = liveRows.filter(row => row.expiry === null)
   const expiring = creditExpirySummaryOf(soonRows.flatMap(row => row.expiry ? [row.expiry] : []), now)
   const expiryText = creditExpiryText(expiring, t, numberText, expiryUnit)
-  const className = variant === 'pool' ? `usage-toggle usage-pool-line ${kind}` : `usage-toggle ${kind}`
+  const hasSumSoon = variant === 'sum' && Boolean(expiryText.badge)
+  const soonRatio = hasSumSoon
+    ? creditExpiryRatioOf(expiring, aggregate && !aggregate.unlimited ? aggregate.remaining : null, expiryUnit)
+    : null
+  const soonToday = expiring.todayCount > 0
+  // 细条至少保留 6% 可见暖色段，避免小额快到期在 3px 轨道上肉眼消失；无法算真比例时不画条。
+  const visualSoonPercent = soonRatio === null ? null : Math.max(6, Math.min(100, soonRatio))
+  const safePercent = visualSoonPercent === null ? null : Math.max(0, 100 - visualSoonPercent)
+  const className = variant === 'pool'
+    ? `usage-toggle usage-pool-line ${kind}`
+    : hasSumSoon
+      ? `usage-toggle usage-toggle-has-soon${visualSoonPercent !== null ? ' has-ratio' : ''} ${kind}`
+      : `usage-toggle ${kind}`
 
   /**
    * 滚动容器本身（挂载时归零、当初始焦点，见下面两段注释）。
@@ -408,8 +427,25 @@ export function CreditDetailButton({ rows, now, expiryUnit, subscriptionLine, ag
         render={<Button size='default' variant='ghost' type='button' className={className} title={title}
           aria-label={detailLabel} />}
       >
-        {variant === 'pool' ? children : <span className='val'>{children}</span>}
-        {variant === 'sum' && expiryText.badge ? <span className='usage-toggle-soon'>{expiryText.badge}</span> : null}
+        {variant === 'pool' ? children : hasSumSoon ? (
+          <span className='usage-soon-body'>
+            <span className='usage-soon-head'>
+              <span className='val'>{children}</span>
+              <span className={`usage-toggle-soon${soonToday ? ' is-today' : ''}`}>{expiryText.badge}</span>
+            </span>
+            {visualSoonPercent !== null ? (
+              <span className='usage-soon-track' aria-hidden='true'>
+                {safePercent !== null && safePercent > 0 ? (
+                  <span className='usage-soon-safe' style={{ width: `${safePercent}%` }} />
+                ) : null}
+                <span
+                  className={`usage-soon-risk${soonToday ? ' is-today' : ''}${safePercent === 0 ? ' is-full' : ''}`}
+                  style={{ width: `${visualSoonPercent}%` }}
+                />
+              </span>
+            ) : null}
+          </span>
+        ) : <span className='val'>{children}</span>}
         <span className='caret' aria-hidden>▾</span>
       </PopoverTrigger>
       {/* `align='center'`：浮层以读数按钮为中心展开。原来是 'end'（右缘对齐），

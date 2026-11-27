@@ -115,6 +115,24 @@ pub fn operation_providers(model: &str, operation: ImageOperation) -> Vec<String
         .collect()
 }
 
+/// Only server-created image target scopes can select an enabled raw model.
+/// Their provider, model and account restrictions remain those of the original Key.
+pub fn operation_providers_for_scope(model: &str, scope: Option<&super::super::key_scope::KeyScope>,
+    operation: ImageOperation) -> Vec<String> {
+    let Some(scope) = scope.filter(|scope| scope.requires_account()) else {
+        return operation_providers(model, operation);
+    };
+    if !scope.allows_model(model) { return Vec::new(); }
+    scope.allowed_provider_ids().into_iter().filter(|provider| {
+        super::super::routing_groups::catalog_model(provider, model).is_some_and(|item| {
+            item.get("enabled").and_then(Value::as_bool) != Some(false) && match operation {
+                ImageOperation::Generate => provider_model_supports_generation(provider, &item),
+                ImageOperation::Edit => provider_model_supports_editing(provider, &item),
+            }
+        })
+    }).collect()
+}
+
 pub fn provider_model_supports_generation(provider: &str, model: &Value) -> bool {
     model_is_image(model) && model.get("supports_image_generation").and_then(Value::as_bool) != Some(false)
         && super::adapter::adapter_by_id(provider).is_some_and(|adapter| adapter.supports_image_generation())
@@ -141,6 +159,9 @@ pub fn candidate_supports_operation(account: &Value, operation: ImageOperation) 
 
 pub fn operation_available(store: &super::super::account_store::AccountStore, model: &str,
     scope: Option<&super::super::key_scope::KeyScope>, operation: ImageOperation) -> bool {
+    if scope.is_some_and(|scope| scope.requires_account()) {
+        return !operation_providers_for_scope(model, scope, operation).is_empty();
+    }
     let profiles = super::super::routing_discovery::snapshot(store);
     if let Some(group) = profiles.group_for_model(model) {
         if !group.kind.is_image() { return false; }

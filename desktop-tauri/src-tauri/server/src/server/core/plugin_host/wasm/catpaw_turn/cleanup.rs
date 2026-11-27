@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::{error, network::{self, RoundReceipt, Route}, registry::Record, settlement};
 use crate::server::core::plugin_host::wasm::conversation::SourceRef;
-use super::super::fixed_http::FrozenHttpClient;
+use crate::server::core::egress::managed::FrozenHttpClient;
 use super::super::catpaw_account::Account as RowSource;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,7 +73,7 @@ impl CleanupOwner {
             Ok(())
         }).await.map_err(|_| settlement::unconfirmed())?;
         // 已占完成动作后不select来源取消；只本次固定请求，绝不补另一终态。
-        let receipt = network::short(client, request, Route::Terminal, &record.ids.conversation, Some(source.deadline()), Some(source.dispatch_tracker())).await?;
+        let receipt = network::short(client, request, Route::Terminal, &record.ids.conversation, Some(source.deadline())).await?;
         self.completion_receipt = Some(receipt);
         self.completion_accepted = true;
         record.note_completion_accepted(sequence)?;
@@ -147,6 +147,6 @@ impl CleanupOwner {
             match route { Route::Stop => *stop_attempted = true, Route::Terminal => *event_attempted = true, _ => return Err(error::cleanup()) }
             Ok(())
         }).await.map_err(|_| error::cleanup())?;
-        network::short(client, request, route, &record.ids.conversation, None, None).await.map(|_| ())
+        network::short(client, request, route, &record.ids.conversation, None).await.map(|_| ())
     }
 }

@@ -49,11 +49,25 @@ fn resolve_chat_model(
             let catalog = crate::server::core::providers::catalog::models_response(state.store(), scope);
             let available = |name: &str| catalog["data"].as_array().is_some_and(|rows| rows.iter().any(|row|
                 row["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(name)) && row["kind"] != "image"));
-            if !available(&source) || !available(&rule.model) {
+            if !available(&source) {
+                return Err(GatewayError::with_status(404, "标题路由来源或目标不在网关 Key 可用的对话路由组内；未回退原模型").with_code("model_not_found"));
+            }
+            if !available(&rule.model) {
+                if rule.fallback == crate::server::config::title_routes::Fallback::Original {
+                    crate::server::logging::log("[Title]", &format!("标题模型 {} 不可用，按配置保留来源模型 {source}", rule.model));
+                    return Ok(source);
+                }
                 return Err(GatewayError::with_status(404, "标题路由来源或目标不在网关 Key 可用的对话路由组内；未回退原模型").with_code("model_not_found"));
             }
             let mut target_body = serde_json::json!({"model": rule.model});
-            let target = super::pipeline::resolve_model(state, &mut target_body, scope)?;
+            let target = match super::pipeline::resolve_model(state, &mut target_body, scope) {
+                Ok(target) => target,
+                Err(error) if rule.fallback == crate::server::config::title_routes::Fallback::Original => {
+                    crate::server::logging::log("[Title]", &format!("标题模型 {} 不可用（{}），按配置保留来源模型 {source}", rule.model, error.message));
+                    return Ok(source);
+                }
+                Err(error) => return Err(error),
+            };
             if !body["_wb_route_group_id"].is_string() || !target_body["_wb_route_group_id"].is_string() {
                 return Err(GatewayError::with_status(404, "标题路由需要已发布的对话路由组").with_code("model_not_found"));
             }

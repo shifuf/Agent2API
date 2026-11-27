@@ -79,25 +79,108 @@
 //! 可读的错误页面与日志。各 store 的接线点要按「数据库可能不存在」写。
 
 pub mod backup;
+mod codearts_slot;
+mod durable;
+mod credential_epoch;
 pub mod migrate;
 mod revisions;
-mod credential_source;
-mod task_guard;
 pub mod schema;
+mod task_guard;
 
+pub(crate) use codearts_slot::{CodeArtsStorageError, CodeArtsTransaction};
+pub(crate) use durable::Durable;
+pub(crate) use credential_epoch::{AccountChange, CredentialSource, CredentialSourceError};
 pub(crate) use revisions::AccountChanges;
-pub(crate) use credential_source::{CredentialSource, CredentialSourceError};
 pub(crate) use task_guard::{TaskTransaction, TaskTransactionError};
-
-#[cfg(test)]
-mod tests;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 use rusqlite::Connection;
+
+thread_local! {
+    /// 当前线程正在持有的 `DbInner` 指针地址栈，用于拦截同一线程对同一数据库连接锁的嵌套重入。
+    static HELD_DB_INNERS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// 测试环境下默认开启严格重入断言（一旦出现锁内套锁立即 panic 暴露调用栈）；
+    /// 可在专门验证「生产环境安全降级不死锁」的用例中临时关闭。
+    #[cfg(test)]
+    static STRICT_REENTRANCY_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+pub(in crate::server::db) struct ThreadLockGuard {
+    inner_addr: usize,
+}
+
+impl ThreadLockGuard {
+    #[track_caller]
+    pub(in crate::server::db) fn enter(inner: &Arc<DbInner>) -> Option<Self> {
+        let addr = Arc::as_ptr(inner) as usize;
+        let already_held = HELD_DB_INNERS.with(|stack| {
+            let mut s = stack.borrow_mut();
+            if s.contains(&addr) {
+                true
+            } else {
+                s.push(addr);
+                false
+            }
+        });
+        if already_held {
+            let caller = std::panic::Location::caller();
+            #[cfg(test)]
+            if STRICT_REENTRANCY_PANIC.with(|c| c.get()) {
+                panic!(
+                    "[Db] 检测到同一线程嵌套重入数据库连接锁（库: {}，调用点: {}:{}:{}）：禁止在 db.with / db.with_mut 闭包内再次请求同一 Db 锁",
+                    inner.file.display(),
+                    caller.file(),
+                    caller.line(),
+                    caller.column()
+                );
+            }
+            eprintln!(
+                "[Storage] ⚠️ 拦截到同一线程重入数据库锁（库: {}，调用点: {}:{}:{}），已安全降级返回以避免死锁",
+                inner.file.display(),
+                caller.file(),
+                caller.line(),
+                caller.column()
+            );
+            return None;
+        }
+        Some(Self { inner_addr: addr })
+    }
+}
+
+impl Drop for ThreadLockGuard {
+    fn drop(&mut self) {
+        let addr = self.inner_addr;
+        HELD_DB_INNERS.with(|stack| {
+            let mut s = stack.borrow_mut();
+            if let Some(pos) = s.iter().rposition(|&x| x == addr) {
+                s.remove(pos);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_reentrancy_fallback_mode<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            STRICT_REENTRANCY_PANIC.with(|c| c.set(self.0));
+        }
+    }
+    let prev = STRICT_REENTRANCY_PANIC.with(|c| {
+        let old = c.get();
+        c.set(false);
+        old
+    });
+    let _reset = Reset(prev);
+    f()
+}
 
 /// 数据库文件名。放配置目录（`~/.agent2api`）里，与 config.json / 日志并排 ——
 /// 用户在设置页看到的「配置目录」就是这一个位置，备份与排障只需要它。
@@ -105,6 +188,20 @@ use rusqlite::Connection;
 /// （接入本库的五个 store —— 账号、事件日志、请求统计、调试报文、脱敏词表 ——
 /// 改造后都不再有自己的文件名，它们的数据都在本库的各张表里。）
 pub const FILE_NAME: &str = "agent2api.db";
+
+static QUERY_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn query_cache_generation() -> u64 {
+    QUERY_CACHE_GENERATION.load(Ordering::Acquire)
+}
+
+pub(crate) fn invalidate_query_caches() {
+    QUERY_CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Accounts);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Balances);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Usage);
+    crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Proxies);
+}
 
 /// SQLite 连接句柄。`Clone` 共享**同一个**连接（内部 `Arc`）。
 ///
@@ -127,44 +224,14 @@ pub struct Db {
 struct DbInner {
     /// 单连接。锁中毒时按「数据库不可用」处理，**不用** `into_inner()` 接管 ——
     /// 与 `core::egress` / `logs_store` 的取向不同，理由见 `with` 的注释。
-    conn: Mutex<Connection>,
+    conn: Mutex<credential_epoch::ConnectionState>,
+    /// 仅在短事务无法确认已结束或无法恢复连接设置时隔离；所有访问须在conn锁内检查。
+    task_guard_unusable: AtomicBool,
     /// 库文件路径（打开时确定，之后不变）
     file: PathBuf,
     accounts: Arc<revisions::AccountRevisions>,
     requests: Arc<AtomicU64>,
-    source_epoch: Mutex<Arc<credential_source::Epoch>>,
-    task_guard_unusable: AtomicBool,
-}
-
-thread_local! {
-    static ENTERED_DATABASES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-}
-
-// Check before locking: std::sync::Mutex cannot be entered twice on one thread.
-// The Arc identity also catches calls made through a cloned Db handle.
-struct DatabaseEntry(usize);
-
-impl DatabaseEntry {
-    fn enter(db: &Db) -> Option<Self> {
-        let identity = Arc::as_ptr(&db.inner) as usize;
-        ENTERED_DATABASES.with(|entered| {
-            let mut entered = entered.borrow_mut();
-            if entered.contains(&identity) { return None; }
-            entered.push(identity);
-            Some(Self(identity))
-        })
-    }
-}
-
-impl Drop for DatabaseEntry {
-    fn drop(&mut self) {
-        ENTERED_DATABASES.with(|entered| {
-            let mut entered = entered.borrow_mut();
-            if let Some(index) = entered.iter().rposition(|identity| *identity == self.0) {
-                entered.remove(index);
-            }
-        });
-    }
+    usage: Arc<AtomicU64>,
 }
 
 impl Db {
@@ -193,21 +260,26 @@ impl Db {
                     .map_err(|error| format!("创建数据库目录失败: {error}"))?;
             }
         }
-        let conn = Connection::open(path).map_err(|error| format!("打开数据库失败: {error}"))?;
+        let mut conn = Connection::open(path).map_err(|error| format!("打开数据库失败: {error}"))?;
         apply_pragmas(&conn)?;
         schema::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
-        conn.execute_batch("BEGIN; DELETE FROM tool_image_files; UPDATE tool_image_jobs SET result=NULL, state='expired', reserved_bytes=0, error='服务已重启，结果不再可用；未重新提交' WHERE state!='expired'; COMMIT;").map_err(|error| format!("清理临时图片结果失败: {error}"))?;
+        // 图片字节只在本次运行中可用；保留提交编号和原到期时间，阻止重启后的重复扣费。
+        let cleanup = conn.transaction().map_err(|error| format!("清理临时图片结果失败: {error}"))?;
+        cleanup.execute_batch("DELETE FROM tool_image_files; UPDATE tool_image_jobs SET result=NULL, state='expired', reserved_bytes=0, error='服务已重启，结果不再可用；未重新提交' WHERE state!='expired';")
+            .map_err(|error| format!("清理临时图片结果失败: {error}"))?;
+        cleanup.commit().map_err(|error| format!("清理临时图片结果失败: {error}"))?;
         let accounts = Arc::new(revisions::AccountRevisions::default());
         let requests = Arc::new(AtomicU64::new(0));
-        install_cloud_sync_hook(&conn, accounts.clone(), requests.clone());
+        let usage = Arc::new(AtomicU64::new(0));
+        install_cloud_sync_hook(&conn, accounts.clone(), requests.clone(), usage.clone());
         Ok(Db {
             inner: Arc::new(DbInner {
-                conn: Mutex::new(conn),
+                conn: Mutex::new(credential_epoch::ConnectionState::new(conn)),
+                task_guard_unusable: AtomicBool::new(false),
                 file: path.to_path_buf(),
                 accounts,
                 requests,
-                source_epoch: Mutex::new(Arc::new(credential_source::Epoch)),
-                task_guard_unusable: AtomicBool::new(false),
+                usage,
             }),
         })
     }
@@ -233,11 +305,16 @@ impl Db {
     /// 它们保护的是「一次读改写周期」这个调度点，锁内没有需要保持一致的数据
     /// （真正的数据在库里）。两处判据不同正是因为**保护对象不同**：这里持的是
     /// 连接本身（状态可能停在事务中间），那里持的是空标记。
+    #[track_caller]
     pub fn with<T>(&self, f: impl FnOnce(&Connection) -> T) -> Option<T> {
-        let _entry = DatabaseEntry::enter(self)?;
+        let _reentrant_guard = ThreadLockGuard::enter(&self.inner)?;
         match self.inner.conn.lock() {
-            Ok(conn) if !self.inner.task_guard_unusable.load(Ordering::Acquire) => Some(f(&conn)),
-            Ok(_) => None,
+            Ok(conn) => {
+                if self.inner.task_guard_unusable.load(Ordering::Acquire) {
+                    return None;
+                }
+                Some(f(&conn))
+            }
             Err(_) => None,
         }
     }
@@ -258,26 +335,34 @@ impl Db {
     ///
     /// 调用点：`AccountStore::with_conn_mut`（账号层的批量写与整份状态差异写 ——
     /// 批量改/删、`migrate_startup`、三家旧数据导入、导入合并）。
+    #[track_caller]
     pub fn with_mut<T>(&self, f: impl FnOnce(&mut Connection) -> T) -> Option<T> {
-        let _entry = DatabaseEntry::enter(self)?;
+        let _reentrant_guard = ThreadLockGuard::enter(&self.inner)?;
         match self.inner.conn.lock() {
-            Ok(mut conn) if !self.inner.task_guard_unusable.load(Ordering::Acquire) => Some(f(&mut conn)),
-            Ok(_) => None,
+            Ok(mut conn) => {
+                if self.inner.task_guard_unusable.load(Ordering::Acquire) {
+                    return None;
+                }
+                Some(f(&mut conn))
+            }
             Err(_) => None,
         }
-    }
-
-    pub(crate) fn account_revision(&self) -> u64 {
-        self.inner.accounts.current()
     }
 
     pub(crate) fn request_revision(&self) -> u64 {
         self.inner.requests.load(Ordering::Acquire)
     }
 
-    /// SQLite Backup replaces pages without invoking the requests update hook.
     pub(crate) fn invalidate_requests(&self) {
-        self.inner.requests.fetch_add(1, Ordering::Release);
+        self.inner.requests.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn usage_revision(&self) -> u64 {
+        self.inner.usage.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn account_revision(&self) -> u64 {
+        self.inner.accounts.current()
     }
 
     pub(crate) fn account_changes(&self, since: Option<u64>) -> AccountChanges {
@@ -285,7 +370,6 @@ impl Db {
     }
 
     pub(crate) fn invalidate_accounts(&self) {
-        self.revoke_credential_sources();
         self.inner.accounts.invalidate();
     }
 
@@ -335,7 +419,8 @@ pub fn stored_schema_version(path: &Path) -> Option<i64> {
 ///   - `synchronous=NORMAL`：WAL 下的推荐档位 —— 事务提交不再每次 fsync
 ///     WAL 文件，只在检查点落盘时 fsync。掉电**不会损坏库**（WAL 本身是
 ///     崩溃安全的），最多丢最近若干已提交事务；换来的是写入快一个量级。
-///     本项目存的是日志/统计/账号缓存，丢最后几条可以接受，因此不用 FULL。
+///     普通日志/统计仍使用此档；CodeArts 封闭发送槽另在原锁内、BEGIN 前临时升到 FULL。
+///     槽的 COMMIT 事实与设置恢复分别确认，不能用本默认值推定一次材料已经耐久消费。
 ///   - `foreign_keys=ON`：SQLite 默认**关闭**外键约束（为兼容旧版而留的坑），
 ///     必须逐连接开启。现在表之间还没有外键，但先开着 —— 后续切片加关联表时
 ///     不会因为「忘了开这个 PRAGMA」而静默失去约束。
@@ -368,13 +453,17 @@ fn apply_pragmas(conn: &Connection) -> Result<(), String> {
 /// 钩子只服务自动同步这一个可选功能。注册不上（旧版 SQLite 等）时最坏是
 /// 「自动同步不触发」，手动上传照样可用 —— 不该让整个网关起不来。
 /// 账号表同时记录行级失效信号；回调不读库，也不获取账号或快照的锁。
-fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRevisions>, requests: Arc<AtomicU64>) {
+fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRevisions>, requests: Arc<AtomicU64>, usage: Arc<AtomicU64>) {
     let result = conn.update_hook(Some(move |_action, _db: &str, table: &str, rowid: i64| {
+        if table == "requests" {
+            requests.fetch_add(1, Ordering::AcqRel);
+        }
         if table == "accounts" {
             accounts.changed(rowid);
         }
-        if table == "requests" {
-            requests.fetch_add(1, Ordering::Release);
+        if table == "account_usage_records" {
+            usage.fetch_add(1, Ordering::AcqRel);
+            crate::server::core::panel_events::notify(crate::server::core::panel_events::Change::Balances);
         }
         crate::server::core::cloud_sync::auto_sync::on_table_change(table);
     }));
@@ -387,16 +476,80 @@ fn install_cloud_sync_hook(conn: &Connection, accounts: Arc<revisions::AccountRe
     }
 }
 
-/// 测试专用：会**自己删文件**的临时库。
-///
-/// 为什么不是"打开前 `remove_file`"就完事：那只保证"不复用旧数据",不保证
-/// "不留垃圾"。文件名带进程 id,每轮 `cargo test` 都是一批新 pid —— Trae 一家
-/// 就这么在 `$TMPDIR` 里留下过 401 个文件、一百多 MB。所以清理必须挂在
-/// 拥有者的 `Drop` 上,调用点要把守卫**留在作用域里**(`let (store, _db) = …`),
-/// 而不是只拿那个 `Db`。
-///
-/// 测试中途 panic 也会走 drop(测试跑的是 unwind profile,`panic=abort`
-/// 只作用于生产构建),所以不需要显式 cleanup 调用。
+#[cfg(test)]
+mod image_restart_tests {
+    use super::*;
+    use crate::server::core::tool_services::{image_config::{ImageConfig, ImageTarget}, image_jobs::{self, ImageFile, NewJob}};
+    use serde_json::json;
+
+    fn completed_job(db: &Db) -> (image_jobs::ImageJob, String) {
+        let target = ImageTarget { provider: "isolated-image-provider".into(), model: "Internal-Pixels".into(), account_id: "fixed-image-account".into() };
+        let (job, created) = image_jobs::create(db, &ImageConfig::default(), NewJob {
+            owner: "opaque-image-owner", request_id: "completed-image-request", request_hash: "original-request-hash",
+            operation: "generate", target: &target, count: 1, timeout: 30,
+        }).unwrap();
+        assert!(created);
+        let file_id = "a".repeat(64);
+        image_jobs::finish(db, &job.id, json!({"syntheticPrivateMetadata":"image result"}), vec![ImageFile {
+            id: file_id.clone(), mime: "image/png".into(), width: 1, height: 1, bytes: vec![1, 2, 3],
+        }]).unwrap();
+        (job, file_id)
+    }
+
+    #[test]
+    fn reopening_expires_image_payloads_and_preserves_submission_deduplication() {
+        let (db, temp) = test_temp::TempDb::open("image-restart-expiration");
+        let (completed, file_id) = completed_job(&db);
+        let target = ImageTarget { provider: "isolated-image-provider".into(), model: "Internal-Pixels".into(), account_id: String::new() };
+        let (running, _) = image_jobs::create(&db, &ImageConfig::default(), NewJob {
+            owner: "opaque-image-owner", request_id: "running-image-request", request_hash: "running-request-hash",
+            operation: "generate", target: &target, count: 1, timeout: 30,
+        }).unwrap();
+        db.with(|conn| conn.execute("INSERT INTO kv(key,value) VALUES('image-restart-marker','kept')", [])).unwrap().unwrap();
+        drop(db);
+        let reopened = Db::open(temp.path()).unwrap();
+        for original in [&completed, &running] {
+            let job = image_jobs::find_request(&reopened, &original.owner, &original.request_id).unwrap().unwrap();
+            assert_eq!(job.id, original.id);
+            assert_eq!(job.owner, original.owner);
+            assert_eq!(job.request_hash, original.request_hash);
+            assert_eq!(job.expires_at, original.expires_at);
+            assert_eq!(job.state, "expired");
+            assert!(job.result.is_none());
+        }
+        assert_eq!(image_jobs::read_file(&reopened, &file_id).err().unwrap().status_code, 404);
+        let (duplicate, created) = image_jobs::create(&reopened, &ImageConfig::default(), NewJob {
+            owner: "opaque-image-owner", request_id: "completed-image-request", request_hash: "original-request-hash",
+            operation: "generate", target: &target, count: 1, timeout: 30,
+        }).unwrap();
+        assert!(!created, "a retry after restart must not charge for another generation");
+        assert_eq!(duplicate.id, completed.id);
+        assert_eq!(duplicate.state, "expired");
+        reopened.with(|conn| {
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM tool_image_files", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(conn.query_row("SELECT SUM(reserved_bytes) FROM tool_image_jobs", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(conn.query_row("SELECT value FROM kv WHERE key='image-restart-marker'", [], |row| row.get::<_, String>(0)).unwrap(), "kept");
+        }).unwrap();
+        drop(reopened);
+    }
+
+    #[test]
+    fn failed_image_restart_cleanup_rolls_back_and_rejects_database_open() {
+        let (db, temp) = test_temp::TempDb::open("image-restart-rollback");
+        let (job, _) = completed_job(&db);
+        db.with(|conn| conn.execute_batch("CREATE TRIGGER fail_image_restart BEFORE UPDATE ON tool_image_jobs BEGIN SELECT RAISE(ABORT,'synthetic image cleanup failure'); END;")).unwrap().unwrap();
+        drop(db);
+        let error = match Db::open(temp.path()) { Ok(_) => panic!("required image cleanup must not fail silently"), Err(error) => error };
+        assert!(error.contains("清理临时图片结果失败"), "unexpected database-open failure: {error}");
+        let conn = Connection::open(temp.path()).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM tool_image_files", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT state FROM tool_image_jobs WHERE id=?1", [&job.id], |row| row.get::<_, String>(0)).unwrap(), "succeeded");
+        assert!(conn.query_row("SELECT result IS NOT NULL FROM tool_image_jobs WHERE id=?1", [&job.id], |row| row.get::<_, bool>(0)).unwrap());
+        drop(conn);
+    }
+}
+
+/// 测试专用临时库；守卫必须在所有数据库句柄释放之后销毁，Windows 才能清理文件。
 #[cfg(test)]
 pub(crate) mod test_temp {
     use std::path::{Path, PathBuf};
@@ -404,6 +557,7 @@ pub(crate) mod test_temp {
     use super::Db;
 
     pub struct TempDb {
+        _directory: tempfile::TempDir,
         path: PathBuf,
     }
 
@@ -415,25 +569,19 @@ pub(crate) mod test_temp {
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
                 .collect();
-            let path = std::env::temp_dir().join(format!("agent2api-test-{safe}-{}.db", std::process::id()));
-            let _ = std::fs::remove_file(&path);
+            let directory = tempfile::Builder::new()
+                .prefix(&format!("agent2api-test-{safe}-"))
+                .tempdir()
+                .expect("临时数据库目录应当可创建");
+            let path = directory.path().join("agent2api.db");
             let db = Db::open(&path)
                 .unwrap_or_else(|error| panic!("临时库打不开（{}）：{error}", path.display()));
-            (db, TempDb { path })
+            (db, TempDb { _directory: directory, path })
         }
 
         #[allow(dead_code)]
         pub fn path(&self) -> &Path {
             &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            // WAL / SHM 也要清:只删主文件会把它们留在原地。
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{}", self.path.display(), suffix));
-            }
         }
     }
 }

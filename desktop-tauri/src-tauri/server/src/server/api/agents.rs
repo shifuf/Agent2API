@@ -1,6 +1,6 @@
 //! 客户端配置管理：草稿保存不写客户端；应用与恢复必须持有准确预览的确认令牌。
 
-use axum::{body::Bytes, extract::State, response::Response};
+use axum::{body::Bytes, extract::{Query, State}, response::Response};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -38,17 +38,66 @@ fn response(result: Result<Value, String>) -> Response {
     }
 }
 
-pub async fn list_agents(State(state): State<ServerState>) -> Response {
-    ok_json(agents::snapshot(state.port))
+async fn run_json(action: impl FnOnce() -> Result<Value, String> + Send + 'static) -> Response {
+    match crate::server::core::blocking::run(action).await {
+        Ok(result) => response(result),
+        Err(error) => management_error(500, error.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListQuery {
+    refresh: Option<String>,
+}
+
+pub async fn list_agents(
+    State(state): State<ServerState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let force_refresh = matches!(
+        query.refresh.as_deref().map(str::trim),
+        Some("1" | "true" | "TRUE")
+    );
+    match crate::server::core::blocking::run(move || {
+        agents::snapshot_with_options(state.port, force_refresh)
+    })
+    .await
+    {
+        Ok(value) => ok_json(value),
+        Err(error) => management_error(500, error.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelQuery {
+    gateway_key_id: Option<String>,
+}
+
+pub async fn list_models(State(state): State<ServerState>, Query(query): Query<ModelQuery>) -> Response {
+    run_json(move || {
+        agents::catalog::models(state.store(), query.gateway_key_id.as_deref())
+            .map(|models| json!({ "models": models }))
+    })
+    .await
 }
 
 pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         // 路径偏好不改变客户端自身的配置加载位置。
         if text(&payload, "action") == "path" {
             agents::paths::save_override(def, text(&payload, "configPath"))?;
+            return Ok(agents::snapshot(state.port));
+        }
+        if text(&payload, "action") == "config-save" {
+            agents::configuration_actions::save(def, &payload, state.db(), state.port)?;
+            return Ok(agents::snapshot(state.port));
+        }
+        if text(&payload, "action") == "config-remove" {
+            agents::configuration_actions::remove_saved(def, &payload, state.db(), state.port)?;
             return Ok(agents::snapshot(state.port));
         }
         let current = agents::store::load_client(def.id)?;
@@ -66,6 +115,7 @@ pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Res
                 .iter()
                 .find(|profile| profile.id == text(item, "id"));
             let mut profile = agents::store::from_request(item, old)?;
+            agents::model_config::normalize(def, &mut profile);
             if !ids.insert(profile.id.clone()) || profile.id.is_empty() {
                 return Err("方案 ID 不能为空或重复".into());
             }
@@ -81,7 +131,8 @@ pub async fn save_profiles(State(state): State<ServerState>, body: Bytes) -> Res
         }
         agents::store::save_client(state.db(), def.id, &profiles, text(&payload, "revision"))?;
         Ok(agents::snapshot(state.port))
-    })())
+    })
+    .await
 }
 
 fn same_profile(a: &Profile, b: &Profile) -> bool {
@@ -133,61 +184,73 @@ fn selected_profile(
             let old = profiles
                 .iter()
                 .find(|profile| profile.id == text(value, "id"));
-            return agents::store::from_request(value, old);
+            let mut profile = agents::store::from_request(value, old)?;
+            agents::model_config::normalize(def, &mut profile);
+            return Ok(profile);
         }
     }
     let wanted = text(payload, "profileId");
-    profiles
-        .into_iter()
-        .find(|profile| profile.id == wanted)
-        .ok_or_else(|| "没有找到要应用的已保存方案".into())
+    let mut profile = profiles.into_iter().find(|profile| profile.id == wanted)
+        .ok_or_else(|| "没有找到要应用的已保存方案".to_string())?;
+    agents::model_config::normalize(def, &mut profile);
+    Ok(profile)
 }
 
 pub async fn preview_profile(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
         let action = text(&payload, "operation");
+        if action.starts_with("config-") {
+            return agents::configuration_actions::create_preview(def, &payload, state.store(), state.port);
+        }
         if action == "native-edit" || action == "native-delete" {
             return agents::native::create_preview(def, &path, &payload, state.port);
         }
         if action == "restore" || action == "disconnect" {
             return agents::apply::restore_preview(def, &path, action == "disconnect");
         }
-        let operation = if action == "quick-connect" {
-            if def.default_model { "default".into() } else { "apply".into() }
-        } else { operation(def, &payload)? };
         let profile = selected_profile(def, &payload, true)?;
-        agents::preview::create(def, &path, &profile, &operation, state.port)
-    })())
+        agents::catalog::validate_profile(state.store(), &profile)?;
+        if action == "quick-connect" {
+            return agents::quick_connect::create_preview(def, &path, &profile, state.port);
+        }
+        agents::preview::create(def, &path, &profile, &operation(def, &payload)?, state.port)
+    })
+    .await
 }
 
 pub async fn apply_profile(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
         let action = text(&payload, "operation");
-        let applied = if action == "native-edit" || action == "native-delete" {
+        let applied = if action.starts_with("config-") {
+            agents::configuration_actions::apply(def, &payload, state.store(), state.db(), state.port)?
+        } else if action == "native-edit" || action == "native-delete" {
             agents::native::apply(def, &path, &payload, state.port)?
         } else {
             let profile = selected_profile(def, &payload, action == "quick-connect")?;
-            let operation = if action == "quick-connect" {
-                if def.default_model { "default".into() } else { "apply".into() }
-            } else { operation(def, &payload)? };
-            agents::apply::apply(def, &path, &profile, &operation, text(&payload, "token"), state.port)?
+            agents::catalog::validate_profile(state.store(), &profile)?;
+            if action == "quick-connect" {
+                agents::quick_connect::apply(def, &path, &profile, text(&payload, "token"), state.port)?
+            } else {
+                agents::apply::apply(def, &path, &profile, &operation(def, &payload)?, text(&payload, "token"), state.port)?
+            }
         };
         let mut snapshot = agents::snapshot(state.port);
         if let Some(object) = snapshot.as_object_mut() {
             object.insert("applied".into(), applied);
         }
         Ok(snapshot)
-    })())
+    })
+    .await
 }
 
 pub async fn restore_client(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
@@ -202,11 +265,12 @@ pub async fn restore_client(State(state): State<ServerState>, body: Bytes) -> Re
             object.insert("restored".into(), restored);
         }
         Ok(snapshot)
-    })())
+    })
+    .await
 }
 
 pub async fn import_client(State(state): State<ServerState>, body: Bytes) -> Response {
-    response((|| {
+    run_json(move || {
         let payload = payload(&body)?;
         let def = definition(&payload)?;
         let path = agents::paths::detect(def).path;
@@ -254,5 +318,94 @@ pub async fn import_client(State(state): State<ServerState>, body: Bytes) -> Res
             object.insert("imported".into(), json!({"clientId":def.id,"count":count}));
         }
         Ok(snapshot)
-    })())
+    })
+    .await
+}
+
+pub async fn get_local_direct(State(state): State<ServerState>) -> Response {
+    let stats = state.request_stats();
+    match crate::server::core::blocking::run(move || {
+        Ok::<Value, String>(crate::server::core::local_direct::status_json(&stats))
+    })
+    .await
+    {
+        Ok(Ok(value)) => ok_json(value),
+        Ok(Err(error)) => management_error(400, error),
+        Err(error) => management_error(500, error.to_string()),
+    }
+}
+
+pub async fn update_local_direct(
+    State(state): State<ServerState>,
+    body: Bytes,
+) -> Response {
+    let body = match payload(&body) {
+        Ok(value) => value,
+        Err(error) => return management_error(400, error),
+    };
+    let stats = state.request_stats();
+    let updated = match crate::server::core::blocking::run(move || {
+        let saved = crate::server::core::local_direct::settings::update_from_json(&body)?;
+        crate::server::core::local_direct::notify_settings_changed();
+        Ok::<(bool, Value), String>((
+            saved.enabled,
+            crate::server::core::local_direct::status_json(&stats),
+        ))
+    })
+    .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(error)) => return management_error(400, error),
+        Err(error) => return management_error(500, error.to_string()),
+    };
+
+    if updated.0 {
+        crate::server::core::local_direct::trigger_background_sync(
+            state.request_stats(),
+            Some(state.store().clone()),
+            false,
+            None,
+        );
+    }
+    let mut status = updated.1;
+    if let Some(obj) = status.as_object_mut() {
+        obj.insert("success".to_string(), Value::Bool(true));
+    }
+    ok_json(status)
+}
+
+pub async fn sync_local_direct(
+    State(state): State<ServerState>,
+    body: Bytes,
+) -> Response {
+    let parsed = if body.is_empty() {
+        Value::Null
+    } else {
+        match payload(&body) {
+            Ok(value) => value,
+            Err(error) => return management_error(400, error),
+        }
+    };
+    let force_rescan = parsed
+        .get("forceRescan")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let agent_id = parsed
+        .get("agentId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    match crate::server::core::local_direct::sync_now(
+        state.request_stats(),
+        Some(state.store().clone()),
+        force_rescan,
+        agent_id,
+    )
+    .await
+    {
+        Ok(value) => ok_json(value),
+        Err(error) => management_error(500, error),
+    }
 }

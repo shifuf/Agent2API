@@ -1,5 +1,7 @@
 //! 固定只读行来源共用的宿主私有出生版本；不含凭据写入或发送许可。
-//! 本仓库仅CatPaw普通SQL维护版本；真实Db恢复/同步/旧导入单向撤销来源。
+//! 普通SQL维护版本；本进程恢复/同步/旧导入单向撤销来源。外部写入不在此合同内。
+
+pub(crate) mod doubao_state;
 
 use std::{any::Any, panic::{catch_unwind, AssertUnwindSafe}};
 
@@ -27,12 +29,18 @@ pub(super) fn strip_private(fields: &mut Map<String, Value>) {
 /// 只读来源的固定集合，不包含CodeArts凭据写入资格，也不接任意provider JSON。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RowProvider {
+    MonkeyCode,
+    MonkeyCodeIntl,
+    DoubaoWork,
     CatPaw,
 }
 
 impl RowProvider {
     pub(super) fn parse(provider: &str) -> Option<Self> {
         match provider {
+            "monkeycode" => Some(Self::MonkeyCode),
+            "monkeycode-intl" => Some(Self::MonkeyCodeIntl),
+            "doubaowork" => Some(Self::DoubaoWork),
             "catpaw" => Some(Self::CatPaw),
             _ => None,
         }
@@ -40,12 +48,15 @@ impl RowProvider {
 
     pub(crate) fn id(self) -> &'static str {
         match self {
+            Self::MonkeyCode => "monkeycode",
+            Self::MonkeyCodeIntl => "monkeycode-intl",
+            Self::DoubaoWork => "doubaowork",
             Self::CatPaw => "catpaw",
         }
     }
 }
 
-/// 仅剥离CatPaw旧导入记录的顶层宿主标记；不签发来源，不改任何业务字段。
+/// 仅剥离固定三家旧导入记录的顶层宿主标记；不签发来源，不改任何业务字段。
 pub(crate) fn strip_imported_row_version(record: &mut super::state::StoredAccount) {
     if sql::credential_version::maintained_provider(&record.provider()) {
         record.remove(PRIVATE_FIELD);
@@ -58,7 +69,6 @@ pub(crate) struct RowSource {
     store: AccountStore,
     inner: sql::credential_version::RowStamp,
     source: CredentialSource,
-    key_source: crypto::AccountKeySource,
 }
 
 pub(crate) enum RowFinalError {
@@ -107,9 +117,6 @@ pub(super) struct RowFinalRead<'a> {
 }
 
 impl RowFinalRead<'_> {
-    pub(super) fn with_key_source<R>(&self, action: impl FnOnce() -> R) -> Option<R> {
-        self.owner.key_source.with_current(action)
-    }
     pub(super) fn with_original_store<R>(
         &self,
         read: impl FnOnce(&AccountStore, &CredentialSource, &sql::credential_version::RowStamp, &[u8; 32]) -> R,
@@ -191,7 +198,15 @@ impl RowSource {
         self.inner.user_agent()
     }
 
-
+    pub(crate) fn original_doubao_proxy(&self) -> Result<Value, Error> {
+        if self.provider() != RowProvider::DoubaoWork { return Err(Error::UnsupportedProvider); }
+        let key = cached_key()?;
+        let _guard = self.store.guard();
+        let db = self.store.database().ok_or(Error::Storage(StorageFailure::Unavailable))?;
+        db.commit_credential_source(&self.source, |conn| {
+            sql::credential_version::row_egress::doubao_proxy(conn, &key, &self.inner)
+        }).map_err(source_error)?
+    }
 }
 
 impl AccountStore {
@@ -205,11 +220,13 @@ impl AccountStore {
         self.prepare_row_source_inner(provider, id, false)
     }
 
+    pub(crate) fn prepare_maintenance_row_source(&self, provider: RowProvider, id: &str) -> Result<RowSource, Error> {
+        if provider != RowProvider::DoubaoWork { return Err(Error::UnsupportedProvider); }
+        self.prepare_row_source_inner(provider, id, true)
+    }
+
     fn prepare_row_source_inner(&self, provider: RowProvider, id: &str, account_maintenance: bool) -> Result<RowSource, Error> {
-        let key_source = crypto::account_key_source().ok_or(Error::Storage(StorageFailure::KeyUnavailable))?;
-        // 工厂在账号/Db锁外解析已有密钥；最终发送门仅借已缓存材料。
-        let key = Zeroizing::new(crypto::secret_key(SecretScope::Accounts)
-            .map_err(|_| Error::Storage(StorageFailure::KeyUnavailable))?);
+        let key = cached_key()?;
         let _guard = self.guard();
         let db = self
             .database()
@@ -219,12 +236,10 @@ impl AccountStore {
                 sql::credential_version::prepare_row(conn, &key, provider, id, account_maintenance)
             })
             .map_err(source_error)??;
-        key_source.with_current(|| ()).ok_or(Error::Conflict(Conflict::HostSourceChanged))?;
         Ok(RowSource {
             store: self.clone(),
             inner,
             source,
-            key_source,
         })
     }
 }

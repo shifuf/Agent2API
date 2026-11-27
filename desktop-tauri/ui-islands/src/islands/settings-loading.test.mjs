@@ -55,6 +55,29 @@ test('opening update settings does not calculate system diagnostics', async () =
   assert.deepEqual(calls, ['update'])
 })
 
+test('an explicit update check does not restore the installer or load hidden settings', async () => {
+  const { api, calls } = fixture('gateway')
+  await api.load({ checkUpdate: true })
+  assert.deepEqual(calls, [])
+  assert.equal(api.getSnapshot().category, 'about')
+})
+
+test('upstream category placement loads network access, privacy and currency where they are shown', async () => {
+  const gateway = fixture('gateway')
+  await gateway.api.load()
+  assert.ok(gateway.calls.includes('getAppSettings'))
+  assert.ok(gateway.calls.includes('getBackendStatus'))
+  assert.ok(!gateway.calls.includes('getPrivacy'))
+  const security = fixture('security')
+  await security.api.load()
+  assert.ok(security.calls.includes('getPrivacy'))
+  assert.ok(!security.calls.includes('getStorage'))
+  const general = fixture('general')
+  await general.api.load()
+  assert.ok(general.calls.includes('getModelPricing'))
+  assert.ok(!general.calls.includes('getStorage'))
+})
+
 test('switching categories preserves configuration drafts until the next settings load', async () => {
   const { api, calls } = fixture('gateway')
   await api.load()

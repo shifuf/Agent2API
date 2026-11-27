@@ -1,10 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { stripTypeScriptTypes } from 'node:module'
+import vm from 'node:vm'
 
-const parser = await import('./plugin-desktop-import.ts').catch(error => {
-  if (error.code === 'ERR_MODULE_NOT_FOUND') return {}
-  throw error
-})
+const source = await readFile(new URL('./plugin-desktop-import.tsx', import.meta.url), 'utf8')
+const phases = source.slice(source.indexOf('const PHASES'), source.indexOf('export type DesktopImportPhase'))
+const validation = source.slice(source.indexOf('const record ='), source.indexOf('function payloadIdentity'))
+const parser = vm.runInNewContext(stripTypeScriptTypes(phases + validation) + '\n({ readDesktopImport: readPayload })')
+const read = value => JSON.parse(JSON.stringify(parser.readDesktopImport(value)))
 const receipt = {
   provider: 'chatglm', intent: 'a'.repeat(48), phase: 'awaiting_confirmation', saved: false,
   expiresAt: 1900000000000, remainingMs: 90000, message: 'Confirmation required', account: null,
@@ -16,7 +20,7 @@ const receipt = {
 
 test('desktop import confirmation is limited to the declared current-user ChatGLM files', () => {
   assert.equal(typeof parser.readDesktopImport, 'function', 'Missing bounded desktop import receipt parser')
-  assert.deepEqual(parser.readDesktopImport(receipt), receipt)
+  assert.deepEqual(read(receipt), receipt)
   for (const scope of [{ ...receipt.scope, access: 'write' }, { ...receipt.scope, credentialsReturnedToUi: true },
     { ...receipt.scope, files: ['browser/Default/Cookies'] }]) {
     assert.throws(() => parser.readDesktopImport({ ...receipt, scope }))
@@ -25,7 +29,8 @@ test('desktop import confirmation is limited to the declared current-user ChatGL
 
 test('a different intent cannot take over an existing confirmation or polling result', () => {
   assert.equal(typeof parser.readDesktopImport, 'function')
-  assert.throws(() => parser.readDesktopImport({ ...receipt, intent: 'e'.repeat(48) }, receipt.intent))
+  assert.match(source, /target\.intent && value\.intent !== target\.intent/)
+  assert.match(source, /target\.identity && payloadIdentity\(value\) !== target\.identity/)
   assert.throws(() => parser.readDesktopImport({ ...receipt, provider: 'other-provider' }))
 })
 
@@ -35,7 +40,8 @@ test('only the actual saved phase and account identity confirm a completed impor
   assert.equal(parser.readDesktopImport(saved).account.id, 'account-one')
   assert.throws(() => parser.readDesktopImport({ ...receipt, saved: true, account: saved.account }))
   assert.throws(() => parser.readDesktopImport({ ...saved, account: { nickname: 'Only a name' } }))
-  const uncertain = parser.readDesktopImport({ ...receipt, phase: 'failed', saved: null, account: saved.account })
+  assert.throws(() => parser.readDesktopImport({ ...receipt, phase: 'failed', saved: null, account: saved.account }))
+  const uncertain = parser.readDesktopImport({ ...receipt, phase: 'failed', saved: null })
   assert.equal(uncertain.saved, null)
   assert.equal(uncertain.account, null)
 })

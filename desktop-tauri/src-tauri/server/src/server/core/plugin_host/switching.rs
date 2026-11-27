@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use super::install::{InstalledPack, PackRegistry};
 use super::registry::SwitchGuard;
+use super::packages::provenance::{StartReceipt, StartSource};
 use super::{bootstrap, ownership, runtime};
 use crate::server::core::account_store::AccountStore;
 
@@ -21,13 +22,6 @@ impl ChangeScope {
                 packs.extend(old.get(provider).cloned());
                 packs.extend(new.get(provider).cloned());
             }
-        }
-        let declared = before.packs.iter().chain(after.packs.iter())
-            .filter(|pack| pack.id == target)
-            .flat_map(ownership::declared_ids);
-        for provider in declared {
-            // 启动失败时实际执行体可能仍是兼容旧包，变更必须覆盖该宿主。
-            packs.extend(runtime::provider_pack(&provider));
         }
         let providers: HashSet<String> = old.iter().chain(new.iter())
             .filter(|(_, pack)| packs.contains(*pack)).map(|(provider, _)| provider.clone()).collect();
@@ -48,31 +42,50 @@ impl ChangeScope {
     }
 
     pub async fn start(&self, store: &AccountStore) -> Result<(), String> {
+        self.start_install(store, None).await.map(|_| ())
+    }
+
+    pub async fn start_install(&self, store: &AccountStore, mut source: Option<StartSource>) -> Result<Option<StartReceipt>, String> {
         let registry = PackRegistry::load();
-        let mut failed = runtime::failed_ids();
-        failed.retain(|id| !self.packs.contains(id));
+        for pack in registry.packs.iter().filter(|pack| self.packs.contains(&pack.id)) {
+            ownership::record_start(pack, true);
+        }
         let mut failures = Vec::new();
-        for pack in ownership::startup_packs(&registry).into_iter().filter(|pack| self.packs.contains(&pack.id)) {
-            let owners = ownership::owners_excluding(&registry, None, &failed);
-            if !owners.values().any(|owner| owner == &pack.id) { continue; }
+        let mut receipt = None;
+        let mut selected: Vec<_> = registry.packs.iter().filter(|pack| pack.enabled && self.packs.contains(&pack.id)).collect();
+        selected.sort_by_key(|pack| !pack.entry.ends_with(".wasm"));
+        for pack in selected {
+            let owners = ownership::owners(&registry);
+            if let Some(reason) = ownership::unavailable_reason(pack) {
+                super::startup::begin(vec![pack.id.clone()], super::startup::Phase::Starting).block(&reason);
+                continue;
+            }
+            let start_source = if source.as_ref().is_some_and(|source| source.pack() == pack.id) { source.take() } else { None };
+            // 已存在的ready对象不接收票据；同摘要也不能冒领本次安装的新运行回执。
             if runtime::host_for_pack(&pack.id).is_some_and(|host| host.ready()) { continue; }
-            if runtime::host_for_pack(&pack.id).is_some_and(|host| host.current_run().is_some()) {
-                failures.push(format!("{} 的旧进程尚未确认退出", pack.id));
+            if runtime::host_for_pack(&pack.id).is_some_and(|host| host.has_unsettled_instance()) {
+                failures.push(format!("{} 的旧执行实例尚未确认本地退出，未重新加载或覆盖", pack.id));
                 continue;
             }
             let started = tokio::time::timeout(Duration::from_secs(60),
-                bootstrap::start_pack(store.clone(), pack, &owners)).await;
-            if !matches!(started, Ok(Some(ref host)) if host.ready()) {
-                failed.insert(pack.id.clone());
-                let reason = runtime::host_for_pack(&pack.id).and_then(|host| host.status().last_error)
-                    .unwrap_or_else(|| "启动失败或加载超时，请检查插件日志".to_string());
-                failures.push(format!("{}：{reason}", pack.id));
-                if let Err(error) = runtime::shutdown_packs(std::slice::from_ref(&pack.id)).await {
-                    failures.push(error);
+                bootstrap::start_pack_with_source(store.clone(), pack, &owners, start_source)).await;
+            if let Ok(Some((host, observed))) = started {
+                if host.ready() {
+                    if observed.is_some() { receipt = observed; }
+                    continue;
                 }
             }
+            let reason = runtime::host_for_pack(&pack.id).and_then(|host| host.status().last_error)
+                .or_else(|| super::startup::status(&pack.id).and_then(|status| status.error))
+                .unwrap_or_else(|| "启动失败或加载超时，请检查插件日志".to_string());
+            failures.push(format!("{}：{reason}", pack.id));
+            if let Err(error) = runtime::shutdown_packs(std::slice::from_ref(&pack.id)).await {
+                failures.push(error);
+            } else {
+                ownership::record_start(pack, false);
+            }
         }
-        if failures.is_empty() { Ok(()) } else { Err(failures.join("；")) }
+        if failures.is_empty() { Ok(receipt) } else { Err(failures.join("；")) }
     }
 
     pub fn refresh_catalogs(&self) {

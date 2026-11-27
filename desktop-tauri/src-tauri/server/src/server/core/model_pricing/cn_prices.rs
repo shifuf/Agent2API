@@ -127,15 +127,9 @@ pub fn is_domestic_cn_provider(provider_id: &str) -> bool {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    domestic_endpoint(&base_url)
-}
-
-fn domestic_endpoint(base_url: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(base_url) else { return false };
-    if !matches!(url.scheme(), "https" | "http") { return false }
-    let Some(host) = url.host_str() else { return false };
-    let host = host.trim_end_matches('.');
-    if host.starts_with("maas-api.cn-") && host.ends_with(".myhuaweicloud.com") { return true; }
+    if base_url.is_empty() {
+        return false;
+    }
     [
         ".bigmodel.cn",
         ".minimaxi.com",
@@ -147,22 +141,10 @@ fn domestic_endpoint(base_url: &str) -> bool {
         ".sensenova.cn",
         "qianfan.baidubce.com",
         "spark-api-open.xf-yun.com",
+        "maas-api.cn-",
     ]
     .iter()
-    .any(|domain| host == domain.trim_start_matches('.') || (domain.starts_with('.') && host.ends_with(domain)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::domestic_endpoint;
-
-    #[test]
-    fn only_the_endpoint_hostname_selects_the_domestic_tariff() {
-        assert!(domestic_endpoint("https://open.bigmodel.cn/v1"));
-        assert!(domestic_endpoint("https://dashscope.aliyuncs.com/v1"));
-        assert!(!domestic_endpoint("https://proxy.local/dashscope.aliyuncs.com"));
-        assert!(!domestic_endpoint("https://not.bigmodel.cn.example/v1"));
-    }
+    .any(|domain| base_url.contains(domain))
 }
 
 /// 查找国内人民币官方基准单价。

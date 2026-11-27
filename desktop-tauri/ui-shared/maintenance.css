@@ -1,0 +1,285 @@
+/* ─────────────────────────────────────────────
+   自动维护页（左右分栏主从联动）
+
+   版面：
+     .maintenance-page（整屏 flex 列）
+       ├─ .maintenance-heading            页头（标题 + 插件维护任务 / 刷新记录 / 维护设置）
+       └─ .maintenance-workspace          主体工作区（宽屏左右两栏；≤1023px 退化为上下堆叠）
+            ├─ .maintenance-sidebar       左侧「维护项目」清单（全部入口 + 任务健康度与独立执行）
+            └─ .maintenance-records       右侧「执行记录」
+                 ├─ .maintenance-toolbar  当前范围 + 结果/触发筛选 + 搜索
+                 ├─ .maintenance-scroll   记录表自己滚，表头常驻
+                 └─ .maintenance-foot     条数 / 保留说明 / 翻页
+
+   颜色、圆角、字号一律取组件库与 tokens 的语义变量，深浅主题共用同一组声明；
+   本文件只负责摆放。中窄屏（≤1023px）改单列堆叠，手机端（≤700px）改卡片列表。
+   ───────────────────────────────────────────── */
+
+.maintenance-page {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  /* 宽屏下左右面板各自滚动；中窄屏堆叠或矮窗口时由这一层兜底整体滚动 */
+  overflow-y: auto;
+  padding: var(--pad);
+  color: var(--text);
+}
+
+.maintenance-page > * { flex-shrink: 0; }
+
+/* ── 页头 ── */
+.maintenance-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.maintenance-heading h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
+.maintenance-heading p { margin: 4px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.6; }
+.maintenance-heading-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* ── 左右分栏工作区 ── */
+.maintenance-workspace {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── 左侧维护项目清单 ── */
+.maintenance-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.maintenance-sidebar-head {
+  flex: none;
+  justify-content: space-between;
+  padding: 10px 16px;
+}
+
+.maintenance-all-wrap {
+  flex: none;
+  padding: 8px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.maintenance-all-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 150ms, border-color 150ms, color 150ms;
+}
+
+.maintenance-all-item:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.maintenance-all-item.is-active {
+  border-color: var(--ui-primary-bd);
+  background: var(--ui-primary-soft);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.maintenance-all-count {
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.maintenance-task-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.maintenance-task-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--hairline);
+  cursor: pointer;
+  outline: none;
+  transition: background-color 150ms;
+}
+
+.maintenance-task-item:first-child { border-top: 0; }
+.maintenance-task-item:hover { background: color-mix(in srgb, var(--control-hover) 60%, transparent); }
+.maintenance-task-item:focus-visible { box-shadow: inset 0 0 0 2px var(--ui-primary-bd); }
+.maintenance-task-item.is-failed { background: color-mix(in srgb, var(--ui-destructive-soft) 18%, transparent); }
+.maintenance-task-item.is-active { background: color-mix(in srgb, var(--ui-primary-soft) 65%, transparent); }
+
+.maintenance-task-head,
+.maintenance-task-meta,
+.maintenance-task-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.maintenance-task-time {
+  flex: none;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.maintenance-task-schedule {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.maintenance-task-link {
+  flex: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--primary);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.maintenance-task-link:hover:not(:disabled) { text-decoration: underline; }
+.maintenance-task-link:disabled { color: var(--text-3); opacity: 0.45; cursor: not-allowed; }
+
+.maintenance-summary-name { font-size: 13px; font-weight: 500; white-space: nowrap; }
+.maintenance-summary-line { color: var(--text-3); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.maintenance-divided { border-top: 1px solid var(--hairline); }
+
+/* ── 状态与汇总（维护页三处共用，见 maintenance-shared.tsx） ── */
+.maintenance-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+
+.maintenance-counts { display: inline-flex; flex-wrap: nowrap; align-items: baseline; gap: 6px; color: var(--text-3); font-size: 12px; white-space: nowrap; }
+.maintenance-counts b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.maintenance-counts-bad b { color: var(--danger); font-weight: 600; }
+.maintenance-counts-sep { opacity: .4; }
+.maintenance-sep { opacity: .45; padding: 0 5px; }
+.maintenance-cooldown { color: var(--warn); font-weight: 500; }
+.maintenance-num { font-variant-numeric: tabular-nums; }
+.maintenance-push { margin-left: auto; }
+
+/* ── 右侧执行记录卡 ── */
+.maintenance-records { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+
+.maintenance-toolbar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.maintenance-toolbar-title { flex: none; font-size: 13px; font-weight: 500; }
+.maintenance-toolbar-scope { margin-left: 6px; color: var(--text-3); font-size: 12px; font-weight: 400; }
+.maintenance-search { margin-left: auto; flex: 1 1 180px; width: 100%; max-width: 240px; }
+.maintenance-toolbar > [data-slot='segmented-control'] { max-width: 100%; overflow-x: auto; }
+
+.maintenance-scroll { min-height: 0; flex: 1; }
+.maintenance-history-table { min-width: 720px; }
+.maintenance-history-table th:first-child, .maintenance-history-table td:first-child { padding-left: 16px; }
+.maintenance-history-table th:last-child, .maintenance-history-table td:last-child { padding-right: 16px; }
+/* 表头回到列表口径：11px 常规字重，不上字距 */
+.maintenance-history-table th { font-size: 11px; font-weight: 400; letter-spacing: 0; }
+.maintenance-history-table tbody tr:last-child > td { border-bottom: 0; }
+.maintenance-retry-label { display: block; margin-top: 2px; color: var(--text-3); font-size: 11px; }
+
+.maintenance-foot {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.maintenance-foot-spinner { color: var(--text-3); }
+
+/* ── 逐项明细弹窗 ── */
+.maintenance-detail-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; overflow-x: auto; }
+.maintenance-detail-scroll { min-height: 0; flex: 1; }
+.maintenance-detail-table { min-width: 764px; }
+.maintenance-detail-table th { font-size: 11px; font-weight: 400; letter-spacing: 0; }
+.maintenance-detail-table tbody tr:last-child > td { border-bottom: 0; }
+/* 原因列由 <col> 和拖动列宽决定宽度，这里只负责自然换行，不设 max-width 以免拖宽失效 */
+.maintenance-detail-table .maintenance-reason { white-space: normal; overflow-wrap: anywhere; line-height: 1.6; }
+
+.maintenance-metadata { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--hairline); color: var(--text-3); font-size: 12px; }
+.maintenance-detail-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--text-3); font-size: 11.5px; }
+
+.maintenance-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px; margin: 0; }
+.maintenance-facts dt { color: var(--text-3); font-size: 11.5px; }
+.maintenance-facts dd { margin: 2px 0 0; font-size: 12.5px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+/* ── 维护设置弹窗：一张分组表，行间只用发丝线 ── */
+.maintenance-setting-group { flex-shrink: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }
+.maintenance-setting { padding: 14px 16px; }
+.maintenance-setting-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.maintenance-setting h3 { margin: 0; font-size: 13px; font-weight: 500; }
+.maintenance-setting-heading p { margin: 2px 0 0; color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
+
+.maintenance-muted { margin: 0; color: var(--text-3); font-size: 11.5px; line-height: 1.65; }
+
+/* ── 中窄屏（≤1023px）：左右分栏退化为上下堆叠 ── */
+@media (max-width: 1023px) {
+  .maintenance-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    flex: none;
+  }
+  .maintenance-sidebar { flex: none; }
+  .maintenance-task-list { overflow-y: visible; }
+  .maintenance-records { min-height: 420px; }
+  .maintenance-foot-note { display: none; }
+}
+
+/* ── 手机端（≤700px）：与组件的 compact 判定同一阈值 ── */
+@media (max-width: 700px) {
+  .maintenance-page { gap: 10px; padding: 0; }
+  .maintenance-heading h2 { display: none; }
+  .maintenance-heading p { margin-top: 0; }
+  .maintenance-heading-actions { width: 100%; justify-content: flex-end; }
+  .maintenance-toolbar { padding: 10px 12px; gap: 8px; }
+  .maintenance-toolbar > [data-slot='segmented-control'] { width: 100%; justify-content: center; }
+  .maintenance-search { flex: 1 1 100%; max-width: none; }
+  .maintenance-records { min-height: 0; }
+  .maintenance-history-cards { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow-y: auto; }
+  .maintenance-run-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--hairline); }
+  .maintenance-run-card-heading { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .maintenance-run-card-heading strong { font-weight: 500; }
+  .maintenance-run-card > .maintenance-muted { font-size: 11.5px; }
+  .maintenance-foot { padding: 9px 12px; }
+  .maintenance-facts { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 701px) {
+  .maintenance-history-cards { display: none; }
+}

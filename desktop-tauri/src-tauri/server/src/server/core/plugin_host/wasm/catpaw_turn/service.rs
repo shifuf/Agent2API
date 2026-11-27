@@ -106,9 +106,6 @@ impl Context {
                 }
             };
             if let Err(error) = &result {
-                // Preserve the real host observation. The guest's compatibility
-                // wrapper may remap it to 502; it cannot change health settlement
-                // or make an unconfirmed submitted round safe to replay.
                 request.context.catpaw_service.failure.get_or_insert_with(|| error.clone());
                 crate::server::logging::verbose("[CatPaw]", &format!("{method} 未确认：{}",
                     error.code.as_deref().unwrap_or("host_error")));
@@ -124,7 +121,7 @@ impl Context {
             self.permission(capability)?;
         }
         if self.shared.options.provider != "catpaw" || self.verification.is_some()
-            || self.managed.is_some() || self.claim_owner.is_some() || self.account_maintenance || self.desktop_import.is_some()
+            || self.managed.is_some() || self.checkin_call.is_some() || self.desktop_import.is_some()
             || self.sink.is_none() {
             return Err(error::unavailable());
         }

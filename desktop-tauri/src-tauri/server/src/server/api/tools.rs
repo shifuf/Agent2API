@@ -138,7 +138,7 @@ pub async fn get_selection() -> Response {
     ok_json(tool_services::provider_selection())
 }
 
-/// PUT /api/tools/provider-selection `{search_providers?, fetch_provider?}`
+/// PUT /api/tools/provider-selection `{search_providers?, fetch_provider?, max_global_sources?, long_query_policy?}`
 pub async fn put_selection(body: Bytes) -> Response {
     let payload = match parse_body(&body) {
         Ok(value) => value,
@@ -147,14 +147,29 @@ pub async fn put_selection(body: Bytes) -> Response {
     let Some(object) = payload.as_object() else {
         return errors::management_error(400, "请求体必须是 JSON 对象");
     };
-    let search = object.get("search_providers").map(|value| {
-        value
-            .as_array()
-            .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
-            .unwrap_or_default()
-    });
-    let fetch = object.get("fetch_provider").and_then(Value::as_str).map(str::to_string);
-    match tool_services::update_selection(search, fetch) {
+    let search = match object.get("search_providers") {
+        None => None,
+        Some(Value::Array(items)) => Some(items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()),
+        Some(_) => return errors::management_error(400, "search_providers 必须是数组"),
+    };
+    let fetch = match object.get("fetch_provider") {
+        None => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return errors::management_error(400, "fetch_provider 必须是字符串"),
+    };
+    let max_global_sources = match object.get("max_global_sources") {
+        None | Some(Value::Null) => None,
+        Some(value) => match value.as_u64().and_then(|v| usize::try_from(v).ok()) {
+            Some(n) => Some(n),
+            None => return errors::management_error(400, "max_global_sources 必须是正整数"),
+        },
+    };
+    let long_query_policy = match object.get("long_query_policy") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return errors::management_error(400, "long_query_policy 必须是字符串"),
+    };
+    match tool_services::update_selection(search, fetch, max_global_sources, long_query_policy) {
         Ok(value) => ok_json(value),
         Err(error) => errors::management_error(400, error),
     }
@@ -196,6 +211,14 @@ pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path
         Some(Value::String(value)) => Some(value.as_str()),
         Some(_) => return errors::management_error(400, "account_id 必须是字符串或 null"),
     };
+    let max_results = match object.get("max_results") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => match value.as_u64().and_then(|v| usize::try_from(v).ok()).filter(|v| *v >= 1) {
+            Some(n) => Some(Some(n)),
+            None => return errors::management_error(400, "max_results 必须是正整数或 null"),
+        },
+    };
     let keys = match object.get("keys") {
         None => None,
         Some(Value::Array(items)) if items.len() <= tool_services::MAX_PROVIDER_KEYS => {
@@ -207,7 +230,7 @@ pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path
         Some(Value::Array(_)) => return errors::management_error(400, "每家提供商最多保存 100 个密钥"),
         Some(_) => return errors::management_error(400, "keys 必须是数组"),
     };
-    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id, keys) {
+    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id, keys, max_results) {
         Ok(value) => ok_json(value),
         Err(error) => errors::management_error(400, error),
     }
@@ -373,14 +396,15 @@ pub async fn install_info(State(state): State<ServerState>, headers: HeaderMap, 
         return errors::management_error(400, "未知的工具服务");
     }
     let base = base_url(&headers, &state);
-    let tools: Vec<&str> = if service == tool_services::WEB_SEARCH_SERVICE_ID {
-        vec!["web_search", "web_fetch"]
-    } else if service == tool_services::IMAGE_GENERATION_SERVICE_ID {
-        let mut names = vec!["generate_images", "get_image_result"];
-        if tool_services::image_config::load().is_some_and(|config| config.editing.is_some()) { names.push("edit_images"); }
-        names
-    } else {
-        vec!["image_analyze"]
+    let tools: Vec<&str> = match service {
+        tool_services::WEB_SEARCH_SERVICE_ID => vec!["web_search", "web_fetch"],
+        tool_services::IMAGE_GENERATION_SERVICE_ID => {
+            let mut tools = vec!["generate_images"];
+            if tool_services::image_config::editing_available(state.store(), None) { tools.push("edit_images"); }
+            tools.push("get_image_result");
+            tools
+        }
+        _ => vec!["image_analyze"],
     };
     let mut value = json!({
         "base_url": base,
@@ -392,8 +416,11 @@ pub async fn install_info(State(state): State<ServerState>, headers: HeaderMap, 
             "server_name": tool_services::package_name(service),
             "url": format!("{}{}", base.trim_end_matches('/'), tool_services::endpoint(service, "mcp")),
             "tools": tools,
-            "bridge_url": match service { tool_services::VISION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/vision.js", base.trim_end_matches('/')),
-                tool_services::IMAGE_GENERATION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/image-generation.cjs", base.trim_end_matches('/')), _ => String::new() },
+            "bridge_url": match service {
+                tool_services::VISION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/vision.js", base.trim_end_matches('/')),
+                tool_services::IMAGE_GENERATION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/image-generation.cjs", base.trim_end_matches('/')),
+                _ => String::new(),
+            },
         },
     });
     if service == tool_services::WEB_SEARCH_SERVICE_ID {
@@ -488,13 +515,23 @@ pub async fn install_mcp(State(state): State<ServerState>, headers: HeaderMap, b
     if clients.is_empty() {
         return errors::management_error(400, "请至少选择一个客户端");
     }
-    let outcomes = tool_services::install_mcp(
-        service,
-        mode,
-        &base_url(&headers, &state),
-        &key,
-        &clients,
-    );
+    let image_options = if service == tool_services::IMAGE_GENERATION_SERVICE_ID && mode == "bridge" {
+        let reference_directories = match object.get("reference_directories") {
+            None => Vec::new(),
+            Some(Value::Array(values)) if values.iter().all(Value::is_string) => values.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+            _ => return errors::management_error(400, "参考图目录必须是字符串数组"),
+        };
+        Some(tool_services::ImageBridgeOptions { output_directory: text_field(object, "output_directory").into(), reference_directories })
+    } else { None };
+    let base = base_url(&headers, &state);
+    let service = service.to_string();
+    let mode = mode.to_string();
+    let outcomes = match crate::server::core::blocking::run(move || tool_services::install_mcp(
+        &service, &mode, &base, &key, &clients, image_options.as_ref(),
+    )).await {
+        Ok(outcomes) => outcomes,
+        Err(error) => return errors::management_error(500, error.message),
+    };
     ok_json(outcomes_json(outcomes))
 }
 

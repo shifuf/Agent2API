@@ -48,6 +48,8 @@ pub struct AttemptDetail {
     pub notice: Option<String>,
     #[serde(rename = "bodyBytes", default)]
     pub body_bytes: Option<i64>,
+    #[serde(rename = "errorPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub error_policy: Option<Value>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -82,7 +84,7 @@ impl RequestTelemetry {
     pub fn set_route_decision(&self, mut decision: Value) {
         let mut guard = self.lock();
         if let (Some(object), Some(previous)) = (decision.as_object_mut(), guard.route.as_ref()) {
-            for key in ["titleRoute", "promptRuleId", "visionRoute", "visionParent"] {
+            for key in ["titleRoute", "promptRuleId", "visionRoute", "visionParent", "visionCompatibility", "compactRoute", "errorPolicyConfig"] {
                 if let Some(value) = previous.get(key) { object.entry(key).or_insert_with(|| value.clone()); }
             }
         }
@@ -135,10 +137,22 @@ impl RequestTelemetry {
             provider: provider.to_string(), account: truncate_chars(account, MAX_ATTEMPT_ACCOUNT_CHARS),
             account_id, candidate_id, member_id, model: String::new(), reasoning: String::new(), reason, sticky_hit,
             started_at: Some(started_at), response_at: None, finished_at: None,
-            status: None, error: None, retries: Vec::new(), notice: None, body_bytes: None,
+            status: None, error: None, retries: Vec::new(), notice: None, body_bytes: None, error_policy: None,
             response_models: Vec::new(), response_model_source: String::new(),
         });
         self.enter_phase(&mut guard, LogPhase::Waiting);
+        self.flush_live(&guard);
+    }
+
+    pub fn note_error_policy(&self, policy: Value) {
+        let mut guard = self.lock();
+        if let Some(last) = guard.current_attempt_mut() {
+            let mut next = last.error_policy.take().filter(Value::is_object).unwrap_or_else(|| serde_json::json!({}));
+            if let (Some(object), Some(patch)) = (next.as_object_mut(), policy.as_object()) {
+                for (key, value) in patch { object.insert(key.clone(), value.clone()); }
+            }
+            last.error_policy = Some(next);
+        }
         self.flush_live(&guard);
     }
 }

@@ -350,7 +350,7 @@ fn percent_text(value: f64) -> String {
 /// 重置时刻 → 本地时区 `MM-DD HH:MM`（与 `zcode::monitor::reset_text` 同口径：
 /// 上游给的是绝对时刻，按操作者本机时区渲染；时间戳越界给 None ——
 /// 宁可不写这一段，也不编一个时刻）
-fn reset_text(ms: Option<i64>) -> Option<String> {
+pub(super) fn reset_text(ms: Option<i64>) -> Option<String> {
     let ms = ms.filter(|value| *value > 0)?;
     chrono::Local
         .timestamp_millis_opt(ms)

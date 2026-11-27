@@ -188,10 +188,20 @@ pub fn mcp_targets(service: &str) -> Vec<Value> {
     let name = server_name(service);
     let mut rows = Vec::new();
     for def in agents::CLIENTS {
+        if def.id == "dsh" && resources::mcp_config_path(def).is_none() {
+            let detection = agents::paths::detect(def);
+            rows.push(json!({ "key": def.id, "label": def.name, "path": detection.path,
+                "detected": detection.detected, "installed": false, "supported": false,
+                "note": detection.note.unwrap_or_else(|| "请先在 Agent 页选择 DSH 配置目标并启动一次客户端。".into()) }));
+            continue;
+        }
         let Some(path) = resources::mcp_config_path(def) else {
             continue;
         };
-        let installed = resources::snapshot(def, "mcp")
+        let snapshot = resources::snapshot(def, "mcp");
+        let supported = def.id != "dsh" || snapshot.is_ok();
+        let note = if def.id == "dsh" { snapshot.as_ref().err().cloned() } else { None };
+        let installed = snapshot
             .ok()
             .and_then(|snapshot| {
                 snapshot
@@ -206,24 +216,25 @@ pub fn mcp_targets(service: &str) -> Vec<Value> {
             "path": path.display().to_string(),
             "detected": crate::server::core::agents::paths::detect(def).detected,
             "installed": installed,
-            "supported": true,
+            "supported": supported,
+            "note": note,
         }));
     }
     rows
 }
 
 /// 视觉本地桥接脚本的落点（写一次、安装时复用）
-fn ensure_bridge_script(service: &str) -> Result<PathBuf, String> {
+fn ensure_bridge_script() -> Result<PathBuf, String> {
     let dir = crate::paths::config_dir().join("tools");
     std::fs::create_dir_all(&dir).map_err(|error| format!("创建工具目录失败：{error}"))?;
-    let (file, script) = if service == super::IMAGE_GENERATION_SERVICE_ID { ("image-generation.cjs", super::IMAGE_BRIDGE_SCRIPT) } else { ("vision-bridge.js", super::VISION_BRIDGE_SCRIPT) };
-    let path = dir.join(file);
+    let path = dir.join("vision-bridge.js");
     let current = std::fs::read(&path).ok();
-    if current.as_deref() != Some(script.as_bytes()) {
-        agents::files::write_atomic(&path, script.as_bytes())?;
+    if current.as_deref() != Some(super::VISION_BRIDGE_SCRIPT.as_bytes()) {
+        agents::files::write_atomic(&path, super::VISION_BRIDGE_SCRIPT.as_bytes())?;
     }
     Ok(path)
 }
+
 fn timeout_entry(def: &agents::ClientDef, timeout: u64) -> Value {
     if timeout == 0 {
         return Value::Null;
@@ -233,6 +244,7 @@ fn timeout_entry(def: &agents::ClientDef, timeout: u64) -> Value {
         "zcode" => json!({ "timeoutMs": millis }),
         "claude-code" => json!({ "timeout": millis }),
         "codex" => json!({ "tool_timeout_sec": timeout }),
+        "dsh" => json!({ "toolCallTimeoutMs": millis }),
         _ => Value::Null,
     }
 }
@@ -259,11 +271,11 @@ fn mcp_entry(
     let base = match bridge {
         Some(path) => {
             let bridge_path = path.display().to_string();
-            let mut env = if service == super::IMAGE_GENERATION_SERVICE_ID { json!({"AGENT2API_IMAGE_ENDPOINT":url, "AGENT2API_IMAGE_KEY":api_key}) } else { json!({
+            let mut env = json!({
                 "AGENT2API_VISION_ENDPOINT": url,
                 "AGENT2API_VISION_KEY": api_key,
-            }) };
-            if timeout > 0 && service == super::VISION_SERVICE_ID {
+            });
+            if timeout > 0 {
                 env["AGENT2API_VISION_TIMEOUT_MS"] = json!(timeout.saturating_mul(1000) + 60_000);
             }
             match def.id {
@@ -342,6 +354,7 @@ pub fn install_mcp(
     base_url: &str,
     api_key: &str,
     client_ids: &[String],
+    image_options: Option<&super::ImageBridgeOptions>,
 ) -> Vec<InstallOutcome> {
     let name = server_name(service);
     let url = format!(
@@ -349,9 +362,17 @@ pub fn install_mcp(
         base_url.trim_end_matches('/'),
         super::endpoint(service, "mcp")
     );
-    let timeout = super::timeout_seconds(service);
-    let bridge = if matches!(service, super::VISION_SERVICE_ID | super::IMAGE_GENERATION_SERVICE_ID) && mode == "bridge" {
-        match ensure_bridge_script(service) {
+    let timeout = if service == super::IMAGE_GENERATION_SERVICE_ID { 120 } else { super::timeout_seconds(service) };
+    let image_bridge = if service == super::IMAGE_GENERATION_SERVICE_ID && mode == "bridge" {
+        let options = image_options.ok_or_else(|| "请选择图片输出目录".to_string());
+        match options.and_then(super::image_bridge::prepare) {
+            Ok(prepared) => Some(prepared),
+            Err(error) => return client_ids.iter().map(|id| InstallOutcome::failed(id,
+                agents::find(id).map(|def| def.name).unwrap_or(id), error.clone())).collect(),
+        }
+    } else { None };
+    let bridge = if service == super::VISION_SERVICE_ID && mode == "bridge" {
+        match ensure_bridge_script() {
             Ok(path) => Some(path),
             Err(error) => {
                 return client_ids
@@ -377,7 +398,15 @@ pub fn install_mcp(
             outcomes.push(InstallOutcome::failed(client_id, def.name, "该客户端不支持 MCP 配置写入"));
             continue;
         }
-        let config = mcp_entry(def, service, &url, api_key, bridge.as_deref(), timeout);
+        let mut config = if let Some(bridge) = &image_bridge {
+            merge_entry(super::image_bridge::entry(def, &url, api_key, bridge), timeout_entry(def, timeout))
+        } else { mcp_entry(def, service, &url, api_key, bridge.as_deref(), timeout) };
+        if def.id == "dsh" {
+            config["serverName"] = json!(name);
+            config["transport"] = json!(if mode == "bridge" { "stdio" } else { "streamable-http" });
+            config["failOnStartupError"] = json!(false);
+            if let Some(object) = config.as_object_mut() { object.remove("type"); }
+        }
         match write_mcp_entry(def, name, config) {
             Ok(path) => outcomes.push(InstallOutcome::ok(client_id, def.name, path)),
             Err(error) => outcomes.push(InstallOutcome::failed(client_id, def.name, error)),

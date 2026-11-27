@@ -49,9 +49,11 @@ let cachedBase: string | null = null
 type BackendStatus = { port?: number }
 type DesktopBridge = {
   platform?: string
+  /** 手机端固定本次请求的服务器，异步续期或重试期间切换时中止。 */
+  serverIdentity?: () => string
   getBackendStatus?: () => Promise<BackendStatus | null | undefined>
   waitForBackend?: () => Promise<BackendStatus | null | undefined>
-  /** 当前管理凭证；网页端 refresh=true 时先静默续期，桌面端由壳自行换证。 */
+  /** 当前管理凭证；网页/手机端 refresh=true 时先静默续期，桌面端由壳自行换证。 */
   directCredentials?: (refresh?: boolean) => Promise<unknown>
 }
 
@@ -61,6 +63,8 @@ function bridge(): DesktopBridge | undefined {
 
 /** 当前该用哪个基址发请求（见模块头两条路） */
 export async function gatewayBase(force = false): Promise<string> {
+  const mobile = (window as unknown as { wbMobileBase?: () => string }).wbMobileBase
+  if (mobile) return mobile()
   if (cachedBase && !force) return cachedBase
   const api = bridge()
   if (api?.platform === 'web') {
@@ -165,10 +169,29 @@ export async function requestDirect(
   options: { method: string; body?: unknown; signal?: AbortSignal; apiKey?: string },
   retried = false,
 ): Promise<Response> {
+  return requestDirectForServer(path, options, retried, bridge()?.serverIdentity?.())
+}
+
+async function requestDirectForServer(
+  path: string,
+  options: { method: string; body?: unknown; signal?: AbortSignal; apiKey?: string },
+  retried: boolean,
+  identity: string | undefined,
+): Promise<Response> {
+  const requireCurrentServer = () => {
+    if (identity !== undefined && bridge()?.serverIdentity?.() !== identity) {
+      throw new DOMException('服务器已切换', 'AbortError')
+    }
+    if (options.signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
+  }
+  requireCurrentServer()
   const api = bridge()
   if (api?.platform !== 'web' && api?.waitForBackend) await api.waitForBackend()
-  const base = await gatewayBase()
+  requireCurrentServer()
   const headers: Record<string, string> = { ...(await directAuthHeaders(retried)) }
+  requireCurrentServer()
+  const base = await gatewayBase()
+  requireCurrentServer()
   if (options.apiKey !== undefined) {
     headers['x-api-key'] = options.apiKey
     headers.Authorization = `Bearer ${options.apiKey}`
@@ -187,20 +210,24 @@ export async function requestDirect(
   } catch (error) {
     // 用户主动停止（abort）不是故障，原样交回 —— 调用方按 signal.aborted 区分
     if (options.signal?.aborted) throw error
+    requireCurrentServer()
     throw wrapFetchError(error, base)
   }
+  requireCurrentServer()
   if (response.status === 401 && !retried) {
     type AuthFailure = { error?: { type?: string; code?: string } }
     let rejected: AuthFailure | null = null
     try { rejected = await response.clone().json() as AuthFailure } catch { /* 非 JSON 不触发会话恢复 */ }
+    requireCurrentServer()
     const kind = rejected?.error?.type || rejected?.error?.code
-    const desktopRecovery = api?.platform !== 'web' && (kind === 'panel_login_required'
+    const desktopRecovery = api?.platform !== 'web' && api?.platform !== 'mobile' && (kind === 'panel_login_required'
       || kind === 'invalid_api_key' && options.apiKey === undefined)
-    const webRetry = api?.platform === 'web' && kind === 'panel_login_required' && options.apiKey === undefined
+    const panelRetry = (api?.platform === 'web' || api?.platform === 'mobile') && kind === 'panel_login_required' && options.apiKey === undefined
       && (options.method === 'GET' || !path.startsWith('/api/assistant/images/'))
-    if (desktopRecovery || webRetry) {
+    if (desktopRecovery || panelRetry) {
       await response.text().catch(() => '')
-      return requestDirect(path, options, true)
+      requireCurrentServer()
+      return requestDirectForServer(path, options, true, identity)
     }
   }
   return response

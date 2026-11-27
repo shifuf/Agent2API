@@ -1,184 +1,318 @@
-use std::{io, sync::Arc};
+//! 隐私脱敏配置与实时预览：`GET/PUT /api/privacy`、`POST /api/privacy/test`。
 
-use axum::{
-    body::{to_bytes, Body, Bytes},
-    extract::{Request, State},
-    http::{header, HeaderMap},
-    middleware::Next,
-    response::Response,
+use std::collections::BTreeMap;
+
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::response::Response;
+use serde_json::{json, Map, Value};
+
+use crate::server::config;
+use crate::server::core::privacy::{
+    self, CompiledPrivacySettings, PrivacyAction, PrivacyCustomRule, PrivacyProviderMode,
+    PrivacySettings, PrivacyVault,
 };
-use futures::{stream, StreamExt};
-use serde_json::{json, Value};
+use crate::server::core::{custom_providers, providers};
+use crate::server::errors;
+use crate::server::http::{ok_json, parse_body};
+use crate::server::logging;
+use crate::server::ServerState;
 
-use crate::server::{
-    access,
-    core::privacy::{self, stream::Events, Vault, REJECTED, UNAVAILABLE},
-    errors::{management_error, GatewayError},
-    http::ok_json,
-    ServerState,
-};
-
-const MAX_BODY: usize = 8 * 1024 * 1024;
-
-pub async fn get(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !access::session_valid(&headers) {
-        return management_error(403, "隐私设置需要管理员会话");
-    }
-    match state.db().ok_or(UNAVAILABLE).and_then(privacy::load) {
-        Ok(policy) => ok_json(policy.public()),
-        Err(error) => management_error(503, error),
-    }
-}
-
-pub async fn put(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !access::session_valid(&headers) {
-        return management_error(403, "隐私设置需要管理员会话");
-    }
-    let Some(db) = state.db() else {
-        return management_error(503, UNAVAILABLE);
+pub async fn protect(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let snapshot = config::current();
+    let settings = match config::compile_privacy(snapshot.raw()) {
+        Ok(settings) => settings,
+        Err(_) => return crate::server::errors::GatewayError::with_status(503, "隐私配置不可用，请检查加密规则后重试").payload_response(),
     };
-    let Ok(value) = serde_json::from_slice::<Value>(&body) else {
-        return management_error(400, "隐私配置不是有效 JSON");
-    };
-    match privacy::write(db, &value) {
-        Ok(result) => ok_json(result),
-        Err((code, error)) => management_error(code, error),
-    }
-}
-
-pub async fn preview(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if !access::session_valid(&headers) {
-        return management_error(403, "隐私设置需要管理员会话");
-    }
-    let Ok(Some(text)) = serde_json::from_slice::<Value>(&body)
-        .map(|value| value["text"].as_str().map(str::to_owned))
-    else {
-        return management_error(400, "请输入预览文本");
-    };
-    let result = state
-        .db()
-        .ok_or(UNAVAILABLE)
-        .and_then(privacy::load)
-        .and_then(|policy| Vault::new(&policy.rules))
-        .and_then(|vault| vault.mask(&text));
-    match result {
-        Ok(masked) => ok_json(json!({"text":masked})),
-        Err(error) => management_error(503, error),
-    }
-}
-
-fn denied(code: i32, text: &'static str) -> Response {
-    GatewayError::with_status(code, text).payload_response()
-}
-
-pub async fn protect(State(state): State<ServerState>, request: Request, next: Next) -> Response {
-    let policy = match state.db().ok_or(UNAVAILABLE).and_then(privacy::load) {
-        Ok(policy) => policy,
-        Err(_) => return denied(503, UNAVAILABLE),
-    };
-    if !policy.enabled {
+    if !settings.settings.enabled {
         return next.run(request).await;
     }
-    let vault = match Vault::new(&policy.rules) {
-        Ok(vault) => Arc::new(vault),
-        Err(_) => return denied(503, UNAVAILABLE),
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => return errors::GatewayError::bad_request("隐私保护无法读取请求正文").payload_response(),
     };
-    let (mut head, body) = request.into_parts();
-    if head.headers.contains_key(header::CONTENT_ENCODING) || head.uri.query().is_some() {
-        return denied(400, REJECTED);
-    }
-    for name in ["authorization", "proxy-authorization", "x-api-key", "x-panel-token", "x-panel-refresh", "cookie"] { head.headers.remove(name); }
-    for (name, value) in &head.headers {
-        if name == header::CONTENT_LENGTH {
-            continue;
-        }
-        if vault.matches(name.as_str())
-            || value.to_str().ok().is_none_or(|text| vault.matches(text))
-        {
-            return denied(400, REJECTED);
+    let body: Value = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(_) => return errors::GatewayError::bad_request("请求正文不是有效 JSON").payload_response(),
+    };
+    if let Some(model) = body.get("model").and_then(Value::as_str) {
+        if let privacy::MaskTextResult::Handled { text, blocked_message, .. } = privacy::mask_text(model, &settings, &PrivacyVault::ephemeral()) {
+            if blocked_message.is_some() || text.as_deref().is_some_and(|masked| masked != model) {
+                return errors::GatewayError::bad_request("隐私保护拒绝在模型标识中发送敏感内容").payload_response();
+            }
         }
     }
-    let Ok(bytes) = to_bytes(body, MAX_BODY).await else {
-        return denied(413, REJECTED);
+    let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+    let guard = std::sync::Arc::new(());
+    let response = privacy::ACTIVE.scope(guard.clone(), next.run(request)).await;
+    let (parts, body) = response.into_parts();
+    let stream = futures::stream::unfold((body.into_data_stream(), guard), |(mut stream, guard)| async move {
+        use futures::StreamExt;
+        let next = privacy::LOG_SCOPE.scope(std::sync::Arc::downgrade(&guard), stream.next()).await;
+        next.map(|item| (item, (stream, guard)))
+    });
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
+pub async fn get_privacy(State(_state): State<ServerState>) -> Response {
+    let snapshot = config::current();
+    let compiled = snapshot.privacy_settings();
+    ok_json(privacy_json(&compiled, true))
+}
+
+pub async fn put_privacy(State(_state): State<ServerState>, body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(value) => value,
+        Err(error) => return errors::management_error(400, error.message),
     };
-    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
-        return denied(400, REJECTED);
+    let Some(object) = payload.as_object() else {
+        return errors::management_error(400, "请求体必须是 JSON 对象");
     };
-    if vault.mask_json(&mut value).is_err() {
-        return denied(400, REJECTED);
+    if object.is_empty() {
+        return errors::management_error(400, "请提供至少一项需要修改的隐私脱敏设置");
     }
-    let Ok(safe) = serde_json::to_vec(&value) else {
-        return denied(400, REJECTED);
+
+    let current = config::current().privacy_settings();
+    let was_enabled = current.settings.enabled;
+    let next_settings = match merge_settings(&current.settings, object, true) {
+        Ok(settings) => settings,
+        Err(message) => return errors::management_error(400, message),
     };
-    if safe.len() > MAX_BODY {
-        return denied(413, REJECTED);
+
+    let (saved, compiled) = match config::set_privacy_settings(next_settings) {
+        Ok(res) => res,
+        Err(message) => return errors::management_error(400, message),
+    };
+
+    if !saved {
+        logging::log("[Config]", "⚠️  隐私脱敏设置写入失败，本次运行内仍生效");
     }
-    head.headers.remove(header::CONTENT_LENGTH);
-    let request = Request::from_parts(head, Body::from(safe));
-    let response = privacy::ACTIVE
-        .scope(vault.clone(), next.run(request))
-        .await;
-    let (mut head, body) = response.into_parts();
-    head.headers.remove(header::CONTENT_LENGTH);
-    let mime = head
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if mime.starts_with("text/event-stream") {
-        let scope = vault.log_scope();
-        let state = (body.into_data_stream(), Events::new(vault), false, scope);
-        let restored = stream::try_unfold(
-            state,
-            |(mut input, mut events, mut done, scope)| async move {
-                while !done {
-                    let chunk = privacy::LOG_SCOPE
-                        .scope(scope.clone(), input.next())
-                        .await
-                        .transpose()
-                        .map_err(|_| io::Error::other("privacy stream interrupted"))?;
-                    done = chunk.is_none();
-                    let result = events
-                        .push(chunk.as_deref().unwrap_or_default(), done)
-                        .map_err(|_| io::Error::other("privacy stream unavailable"))?;
-                    if !result.is_empty() {
-                        return Ok::<_, io::Error>(Some((
-                            Bytes::from(result),
-                            (input, events, done, scope),
-                        )));
-                    }
-                }
-                Ok(None)
+    if compiled.settings.enabled != was_enabled {
+        logging::log(
+            "[Config]",
+            if compiled.settings.enabled {
+                "隐私脱敏已开启：敏感信息在离开本机前将被自动保护"
+            } else {
+                "隐私脱敏已关闭"
             },
         );
-        return Response::from_parts(head, Body::from_stream(restored));
+    } else {
+        logging::log("[Config]", "隐私脱敏设置已更新");
     }
-    if !mime.starts_with("application/json") {
-        return denied(502, "无法安全读取上游回复");
-    }
-    let Ok(bytes) = to_bytes(body, MAX_BODY * 2).await else {
-        return denied(502, "无法安全读取上游回复");
+
+    ok_json(privacy_json(&compiled, saved))
+}
+
+pub async fn test_privacy(State(_state): State<ServerState>, body: Bytes) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(value) => value,
+        Err(error) => return errors::management_error(400, error.message),
     };
-    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
-        return denied(502, "无法安全读取上游回复");
+    let Some(object) = payload.as_object() else {
+        return errors::management_error(400, "请求体必须是 JSON 对象");
     };
-    if !head.status.is_success() {
-        if value.pointer("/error/code").and_then(Value::as_str) == Some("privacy_opaque_provider") { return denied(400, "隐私模式不支持不能检查最终报文的提供商；请求未转发"); }
-        return denied(
-            i32::from(head.status.as_u16()),
-            "请求失败；为保护隐私已省略详细错误",
+    let Some(text) = object.get("text").and_then(Value::as_str) else {
+        return errors::management_error(400, "请提供要测试的文本");
+    };
+    if text.len() > privacy::MAX_TEST_TEXT_BYTES {
+        return errors::management_error(
+            400,
+            format!("测试文本最多 {} 字节", privacy::MAX_TEST_TEXT_BYTES),
         );
     }
-    if value.get("error").is_some_and(|error| !error.is_null()) { return denied(502, "请求失败；为保护隐私已省略详细错误"); }
-    if vault.restore_json(&mut value, "").is_err() {
-        return denied(502, "无法安全读取上游回复");
+
+    let current = config::current().privacy_settings();
+    let compiled = match object.get("config") {
+        None | Some(Value::Null) => {
+            let mut preview_settings = current.settings.clone();
+            preview_settings.enabled = true;
+            match CompiledPrivacySettings::compile(preview_settings) {
+                Ok(compiled) => compiled,
+                Err(message) => return errors::management_error(400, message),
+            }
+        }
+        Some(cfg) => {
+            let Some(cfg_obj) = cfg.as_object() else {
+                return errors::management_error(400, "config 必须是 JSON 对象");
+            };
+            let mut merged = match merge_settings(&current.settings, cfg_obj, false) {
+                Ok(settings) => settings,
+                Err(message) => return errors::management_error(400, message),
+            };
+            merged.enabled = true;
+            match CompiledPrivacySettings::compile(merged) {
+                Ok(compiled) => compiled,
+                Err(message) => return errors::management_error(400, message),
+            }
+        }
+    };
+
+    ok_json(privacy::preview_text(text, &compiled))
+}
+
+fn merge_settings(
+    base: &PrivacySettings,
+    patch: &Map<String, Value>,
+    validate_providers: bool,
+) -> Result<PrivacySettings, String> {
+    let mut next = base.clone();
+
+    if let Some(val) = patch.get("enabled") {
+        next.enabled = val
+            .as_bool()
+            .ok_or_else(|| "enabled 必须是 true 或 false".to_string())?;
     }
-    match serde_json::to_vec(&value) {
-        Ok(bytes) => Response::from_parts(head, Body::from(bytes)),
-        Err(_) => denied(502, "无法安全读取上游回复"),
+    if let Some(val) = patch.get("reversible") {
+        next.reversible = val
+            .as_bool()
+            .ok_or_else(|| "reversible 必须是 true 或 false".to_string())?;
     }
+    if let Some(val) = patch.get("action") {
+        next.action = serde_json::from_value::<PrivacyAction>(val.clone())
+            .map_err(|_| "action 必须是 mask、warn 或 block".to_string())?;
+    }
+    if let Some(val) = patch.get("secrets") {
+        next.secrets = val
+            .as_bool()
+            .ok_or_else(|| "secrets 必须是 true 或 false".to_string())?;
+    }
+    if let Some(val) = patch.get("personal") {
+        next.personal = val
+            .as_bool()
+            .ok_or_else(|| "personal 必须是 true 或 false".to_string())?;
+    }
+    if let Some(val) = patch.get("categories") {
+        let map = serde_json::from_value::<BTreeMap<String, bool>>(val.clone())
+            .map_err(|err| format!("categories 格式不正确：{err}"))?;
+        for (k, v) in map {
+            if next.categories.contains_key(&k) {
+                next.categories.insert(k, v);
+            }
+        }
+    }
+    if let Some(val) = patch.get("kindActions") {
+        if val.is_null() {
+            next.kind_actions.clear();
+        } else {
+            next.kind_actions =
+                serde_json::from_value::<BTreeMap<String, PrivacyAction>>(val.clone())
+                    .map_err(|err| format!("kindActions 格式不正确：{err}"))?;
+        }
+    }
+    if let Some(val) = patch.get("words") {
+        next.words = serde_json::from_value::<Vec<String>>(val.clone())
+            .map_err(|err| format!("保密词列表必须是字符串数组：{err}"))?;
+    }
+    if let Some(val) = patch.get("wordsIgnoreCase") {
+        next.words_ignore_case = val
+            .as_bool()
+            .ok_or_else(|| "wordsIgnoreCase 必须是 true 或 false".to_string())?;
+    }
+    if let Some(val) = patch.get("wordsWholeWord") {
+        next.words_whole_word = val
+            .as_bool()
+            .ok_or_else(|| "wordsWholeWord 必须是 true 或 false".to_string())?;
+    }
+    if let Some(val) = patch.get("customRules") {
+        next.custom_rules = serde_json::from_value::<Vec<PrivacyCustomRule>>(val.clone())
+            .map_err(|err| format!("自定义识别规则格式不正确：{err}"))?;
+    }
+    if let Some(val) = patch.get("allowlist") {
+        next.allowlist = serde_json::from_value::<Vec<String>>(val.clone())
+            .map_err(|err| format!("白名单必须是字符串数组：{err}"))?;
+    }
+    if let Some(val) = patch.get("providerMode") {
+        next.provider_mode = serde_json::from_value::<PrivacyProviderMode>(val.clone())
+            .map_err(|_| "providerMode 必须是 exclude 或 include".to_string())?;
+    }
+    if let Some(val) = patch.get("providers") {
+        next.providers = parse_providers(val, &base.providers, validate_providers)?;
+    }
+
+    Ok(next)
+}
+
+fn parse_providers(
+    value: &Value,
+    previous: &[String],
+    validate_known: bool,
+) -> Result<Vec<String>, String> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = value
+        .as_array()
+        .ok_or_else(|| "providers 必须是字符串数组".to_string())?;
+    if items.len() > privacy::MAX_PROVIDERS {
+        return Err(format!("提供商列表最多 {} 个", privacy::MAX_PROVIDERS));
+    }
+    let mut selected = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item
+            .as_str()
+            .ok_or_else(|| "提供商元素必须是字符串".to_string())?
+            .trim()
+            .to_ascii_lowercase();
+        if id.is_empty() {
+            return Err("提供商 id 不能为空".to_string());
+        }
+        if validate_known
+            && !providers::is_known_provider_id(&id)
+            && !custom_providers::is_custom_provider_id(&id)
+            && !previous.contains(&id)
+        {
+            return Err(format!("未知的提供商：{id}"));
+        }
+        selected.push(id);
+    }
+    selected.sort();
+    selected.dedup();
+    Ok(selected)
+}
+
+fn privacy_json(compiled: &CompiledPrivacySettings, saved: bool) -> Value {
+    let settings = &compiled.settings;
+    let mut options = providers::summary_json(|_| 0, &[]);
+    options.extend(custom_providers::summary_json(|_| 0));
+    for id in &settings.providers {
+        if !options
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some(id))
+        {
+            options.push(json!({"id": id, "label": providers::label_of(id)}));
+        }
+    }
+    json!({
+        "enabled": settings.enabled,
+        "reversible": settings.reversible,
+        "action": settings.action,
+        "secrets": settings.secrets,
+        "personal": settings.personal,
+        "categories": settings.categories,
+        "kindActions": settings.kind_actions,
+        "words": settings.words,
+        "wordsIgnoreCase": settings.words_ignore_case,
+        "wordsWholeWord": settings.words_whole_word,
+        "customRules": settings.custom_rules,
+        "allowlist": settings.allowlist,
+        "providerMode": settings.provider_mode,
+        "providers": settings.providers,
+        "providerOptions": options,
+        "categoryOptions": privacy::category_catalog(),
+        "vaultEntries": PrivacyVault::global().stats(),
+        "saved": saved,
+        "limits": {
+            "maxWords": privacy::MAX_WORDS,
+            "maxWordChars": privacy::MAX_WORD_CHARS,
+            "maxAllowlist": privacy::MAX_ALLOWLIST,
+            "maxCustomRules": privacy::MAX_CUSTOM_RULES,
+            "maxNameChars": privacy::MAX_NAME_CHARS,
+            "maxKindChars": privacy::MAX_KIND_CHARS,
+            "minPrefixChars": privacy::MIN_PREFIX_CHARS,
+            "maxPrefixChars": privacy::MAX_PREFIX_CHARS,
+            "maxRegexChars": privacy::MAX_REGEX_CHARS,
+            "maxTestTextBytes": privacy::MAX_TEST_TEXT_BYTES,
+        },
+    })
 }

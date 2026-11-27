@@ -12,7 +12,7 @@
 
 use serde_json::{json, Value};
 
-use super::search::batch_items;
+use super::search::{batch_items, extract_limit};
 use crate::server::logging;
 
 pub const MCP_MODERN_VERSION: &str = "2026-07-28";
@@ -28,19 +28,20 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub enum McpServerKind {
     WebSearch,
     Vision,
-    Images,
+    ImageGeneration,
 }
 
 pub struct McpRequestContext {
-    pub state: crate::server::ServerState,
-    pub headers: axum::http::HeaderMap,
-    pub owner: String,
-    pub source: crate::server::request_stats::RequestSource,
-    pub key_source: Result<std::sync::Arc<crate::server::config::model_key_source::Source>, crate::server::errors::GatewayError>,
     /// 网关基址（视觉分析内部调用用）
     pub base_url: String,
     pub store: crate::server::core::account_store::AccountStore,
     pub scope: Option<crate::server::core::key_scope::KeyScope>,
+    pub key_source: Option<std::sync::Arc<crate::server::config::model_key_source::Source>>,
+    pub state: crate::server::ServerState,
+    pub source: crate::server::request_stats::RequestSource,
+    pub owner: String,
+    /// Retained only for the image-result authorization check after polling.
+    pub headers: axum::http::HeaderMap,
 }
 
 pub struct McpSpec {
@@ -71,6 +72,12 @@ pub fn web_search_spec() -> McpSpec {
                             "items": { "type": "string", "minLength": 1 },
                             "minItems": 1,
                             "maxItems": 10
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Optional max results per query per provider (1-100); automatically clamped to each provider's supported limit.",
+                            "minimum": 1,
+                            "maximum": 100
                         }
                     },
                     "required": ["queries"],
@@ -139,7 +146,7 @@ pub fn spec(kind: McpServerKind) -> McpSpec {
     match kind {
         McpServerKind::WebSearch => web_search_spec(),
         McpServerKind::Vision => vision_spec(),
-        McpServerKind::Images => super::image_mcp::spec(super::image_config::load().is_some_and(|config| config.editing.is_some())),
+        McpServerKind::ImageGeneration => super::image_mcp::spec(false),
     }
 }
 
@@ -183,7 +190,7 @@ async fn call_tool(
     ctx: &McpRequestContext,
 ) -> Result<Value, ToolCallError> {
     match kind {
-        McpServerKind::Images => Ok(super::image_mcp::call(name, args, ctx).await),
+        McpServerKind::ImageGeneration => Ok(super::image_mcp::call(name, args, ctx).await),
         McpServerKind::WebSearch => {
             let operation = if name == "web_search" {
                 "search"
@@ -195,9 +202,14 @@ async fn call_tool(
             let field = if operation == "search" { "queries" } else { "urls" };
             let items = batch_items(args.get(field), field)
                 .map_err(|error| ToolCallError::InvalidParams(error.message))?;
+            let limit = if operation == "search" {
+                extract_limit(args).map_err(|error| ToolCallError::InvalidParams(error.message))?
+            } else {
+                None
+            };
             let started = logging::now_ms();
             let outcome = if operation == "search" {
-                super::run_search(&ctx.store, ctx.scope.as_ref(), items.clone())
+                super::run_search(&ctx.store, ctx.scope.as_ref(), items.clone(), limit)
                     .await
                     .map(|run| (run.payload, run.successful))
             } else {
@@ -261,11 +273,21 @@ async fn dispatch_one(
     if method.starts_with("notifications/") {
         return None;
     }
+    if kind == McpServerKind::ImageGeneration && message.get("id").is_some()
+        && !matches!(message.get("id"), Some(Value::String(_) | Value::Number(_))) {
+        return Some(rpc_error(Value::Null, INVALID_REQUEST, "A string or number request ID is required"));
+    }
     let id = message.get("id").cloned().unwrap_or(Value::Null);
     if id.is_null() {
         return None;
     }
-    let spec = spec(kind);
+    let spec = if kind == McpServerKind::ImageGeneration {
+        let store = ctx.store.clone();
+        let scope = ctx.scope.clone();
+        let editing = crate::server::core::blocking::run(move || super::image_config::editing_available(&store, scope.as_ref()))
+            .await.unwrap_or(false);
+        super::image_mcp::spec(editing)
+    } else { spec(kind) };
     let params = message.get("params").cloned().unwrap_or(Value::Null);
 
     match method {
@@ -280,8 +302,8 @@ async fn dispatch_one(
         }
         "server/discover" => Some(rpc_result(id, json!({
             "resultType": "complete",
-            "ttlMs": MCP_LIST_TTL_MS,
-            "cacheScope": "public",
+            "ttlMs": if kind == McpServerKind::ImageGeneration { 0 } else { MCP_LIST_TTL_MS },
+            "cacheScope": if kind == McpServerKind::ImageGeneration { "private" } else { "public" },
             "supportedVersions": [MCP_MODERN_VERSION, MCP_LEGACY_VERSIONS[0], MCP_LEGACY_VERSIONS[1], MCP_LEGACY_VERSIONS[2], MCP_LEGACY_VERSIONS[3]],
             "capabilities": { "tools": {} },
             "_meta": { "io.modelcontextprotocol/serverInfo": spec.server_info },
@@ -290,13 +312,14 @@ async fn dispatch_one(
         "ping" => Some(rpc_result(id, json!({}))),
         "tools/list" => Some(rpc_result(id, json!({
             "resultType": "complete",
-            "ttlMs": MCP_LIST_TTL_MS,
-            "cacheScope": "public",
+            "ttlMs": if kind == McpServerKind::ImageGeneration { 0 } else { MCP_LIST_TTL_MS },
+            "cacheScope": if kind == McpServerKind::ImageGeneration { "private" } else { "public" },
             "tools": spec.tools,
         }))),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            if !spec.tools.iter().any(|tool| tool.get("name").and_then(Value::as_str) == Some(name)) {
+            if !spec.tools.iter().any(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                && !(kind == McpServerKind::ImageGeneration && name == "edit_images") {
                 return Some(rpc_error(id, INVALID_PARAMS, format!("Unknown tool: {name}")));
             }
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));

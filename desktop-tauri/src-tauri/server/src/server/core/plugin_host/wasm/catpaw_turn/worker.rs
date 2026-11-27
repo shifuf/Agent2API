@@ -48,7 +48,6 @@ pub(super) fn start(registry: &Arc<Registry>, source: &SourceRef, params: Value)
     guard.active = true;
     let owner = if let Some(previous) = record.predecessor() {
         drop(account);
-        // getrandom 的可失败步骤先完成，不能在取走旧 Owner 并登记转移后才重新签回执。
         let receipt = super::owner::next_receipt()?;
         let mut owner = previous.take_handoff_owner(&record.source, &input)?;
         if let Err(error) = owner.rebind_continuation(record.source.clone(), input, receipt) {

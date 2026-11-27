@@ -46,6 +46,10 @@ use serde_json::{Map, Value};
 use crate::server::db::schema;
 use crate::server::db::Db;
 
+#[cfg(test)]
+#[path = "sql_tests.rs"]
+mod tests;
+
 /// 配置迁移的完成标记键（`db::migrate::config` 的幂等闸门）。
 ///
 /// 与 `settings` 那种「目标键在不在」的闸门不同 —— 这里**必须**用标记：
@@ -68,6 +72,7 @@ pub(crate) const KEY_CONFIG_MIGRATED: &str = "configMigrated";
 /// 于是某次写配置就可能把别人的状态删掉或覆盖（`db::schema` 模块头讲的
 /// 「两类键名绝不能相撞」就是这条约束的另一面）。
 pub(crate) fn read_conn(conn: &Connection) -> rusqlite::Result<Map<String, Value>> {
+    crate::server::core::panel_oauth::migrate_legacy_storage(conn)?;
     let mut statement = conn.prepare("SELECT key, value FROM kv")?;
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))

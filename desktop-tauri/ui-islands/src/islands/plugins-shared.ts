@@ -1,17 +1,17 @@
 import { t } from '../i18n'
-import { githubErrorMessage } from '../../../ui-shared/updates'
+import { summarizeNetworkError, updateErrorMessage } from '../../../ui-shared/updates'
+import { pluginPackName } from '../../../ui-shared/plugins'
 import type { PluginMutation } from './plugins-types'
-export { isPluginTargetCompatible, selectPluginPlatform } from '../../../ui-shared/plugins'
 
 export type PluginBridge = {
   __TAURI_INTERNALS__?: {
-    supportsAbortSignal?: boolean
     invoke?: (command: string, args?: unknown) => Promise<unknown>
   }
   wbApp?: {
-    toast?: (message: string, kind?: 'err' | 'ok') => void
+    toast?: (message: string, kind?: 'err' | 'ok' | 'warn') => void
     refresh?: () => Promise<boolean>
     refreshPluginPages?: (payload?: PluginMutation) => Promise<void> | void
+    showPage?: (page: string) => void
     readonly currentPage?: string
   }
 }
@@ -21,18 +21,20 @@ export function bridge(): PluginBridge {
 }
 
 export function errorMessage(error: unknown): string {
-  return githubErrorMessage(error, t, 'plugin')
+  return updateErrorMessage(error, t)
 }
 
-export function toast(message: string, kind?: 'err' | 'ok'): void {
-  bridge().wbApp?.toast?.(errorMessage(message), kind)
+export function toast(message: string, kind?: 'err' | 'ok' | 'warn'): void {
+  bridge().wbApp?.toast?.(kind === 'err' ? summarizeNetworkError(message, t).summary : errorMessage(message), kind)
 }
 
-export async function api<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+export async function api<T>(method: string, path: string, body?: unknown, options?: { retry: 'never' }): Promise<T> {
+  const mobile = (window as unknown as { wbMobileRequest?: (method: string, path: string, body?: unknown, options?: { retry: 'never' }) => Promise<T> }).wbMobileRequest
+  if (mobile) return mobile(method, path, body, options)
   const invoke = bridge().__TAURI_INTERNALS__?.invoke
   if (!invoke) throw new Error(t('桌面运行时不可用（Tauri 未初始化）'))
   const result = await invoke('api_request', {
-    request: { method, path, body: body === undefined ? null : body, ...(signal && { signal }) },
+    request: { method, path, body: body === undefined ? null : body, ...(options ? { retry: options.retry } : {}) },
   })
   if (result && typeof result === 'object' && 'success' in result) {
     const envelope = result as { success?: boolean; data?: unknown; error?: string }
@@ -43,7 +45,7 @@ export async function api<T>(method: string, path: string, body?: unknown, signa
 }
 
 export function formatTime(value: number): string {
-  return value ? new Date(value).toLocaleString() : '—'
+  return value ? new Date(value).toLocaleString(document.documentElement.lang || undefined) : '—'
 }
 
 export function formatSize(bytes: number): string {
@@ -61,7 +63,6 @@ export function platformLabel(target: string): string {
     'aarch64-apple-darwin': t('macOS (Apple Silicon)'),
     'x86_64-unknown-linux-gnu': t('Linux (amd64)'),
     'aarch64-unknown-linux-gnu': t('Linux (arm64)'),
-    'wasm32-unknown-unknown': t('跨平台 Wasm'),
   }
   return labels[target] || target
 }
@@ -80,9 +81,7 @@ export function readBase64(file: File): Promise<string> {
 }
 
 export function pluginName(id: string, name?: string | null): string {
-  if (id === 'agent2api-providers') return t('提供商增强')
-  if (id === 'agent2api-web-providers') return t('网页提供商')
-  return name || id
+  return pluginPackName(id, name, t)
 }
 
 export function pluginDescription(id: string, description?: string | null): string {
@@ -92,5 +91,6 @@ export function pluginDescription(id: string, description?: string | null): stri
   if (id === 'agent2api-web-providers') {
     return t('为 Agent2API 扩展网页提供商，支持智谱清言的模型调用、访客与登录账号、凭证续期、模型目录、积分查询、签到和任务领取。')
   }
-  return description || t('作者尚未提供插件介绍。')
+  const trimmed = description?.trim()
+  return trimmed ? t(trimmed) : t('作者尚未提供插件介绍。')
 }

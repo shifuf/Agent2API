@@ -191,9 +191,8 @@ impl StartInput {
         ids: &Correlation,
         handle: &str,
     ) -> Result<Self, proto::WireError> {
-        // 保留的四份 JSON 字符串、解析材料及本次 reqwest 请求体同归原输入预算。
-        let bytes = super::budget::value_bytes(params)?.checked_mul(3).ok_or_else(error::budget)?;
-        let memory = super::budget::Allocation::new(bytes)?;
+        let retained_bytes = super::budget::value_bytes(params)?.checked_mul(3).ok_or_else(error::budget)?;
+        let memory = super::budget::Allocation::new(retained_bytes)?;
         json_text::fields(
             params,
             &[
@@ -260,11 +259,11 @@ impl StartInput {
         let turn_view = json_text::parse(turn, json_text::MAX_BYTES)?;
         check_turn(&turn_view, prepared, ids, &history_view, &directives_view)?;
         Ok(Self {
+            _memory: memory,
             round: round.to_string(),
             turn: turn.to_string(),
             history: history.to_string(),
             directives: directives.to_string(),
-            _memory: memory,
         })
     }
 }

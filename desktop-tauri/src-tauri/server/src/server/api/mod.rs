@@ -35,9 +35,14 @@
 
 // 「Agent」页：本机 AI 客户端配置接管（列表 / 保存 / 写入 / 预览 / 还原 / 导入）
 pub mod agents;
+pub mod advertisements;
 pub mod agent_resources;
+pub(crate) mod capacity_admission;
+pub(crate) mod runtime_capacity;
 pub mod accounts;
 pub mod routing_actions;
+mod accounts_list;
+mod account_import_setup;
 pub mod accounts_batch;
 mod accounts_export;
 mod account_credentials;
@@ -45,6 +50,7 @@ mod accounts_sort;
 // `/api/accounts/usage` 的查询与结果组装（从 accounts.rs 拆出：余额能力从
 // 「只服务 workbuddy」扩到四家混查时新增，见该文件模块头）
 pub mod accounts_usage;
+mod accounts_usage_snapshot;
 // AI 助手（GET/PUT /api/assistant/config + POST /api/assistant/chat）：
 // 设置读写与流式对话转发。工具定义与执行都在前端，后端不认识任何工具，
 // 见该文件模块头
@@ -56,6 +62,9 @@ pub mod assistant_images;
 // 编排在 `core::tool_services`，见那两个文件模块头
 pub mod tools;
 pub mod tool_runtime;
+pub mod tool_image_admin;
+pub mod tool_images;
+mod tool_image_results;
 mod image_input;
 // 整库备份 / 恢复（设置页「整库备份 / 恢复」，SQL 文本形态；核心在
 // `db::backup`，替换语义与账号 JSON 导入的 merge 是两条独立通道）
@@ -73,6 +82,7 @@ pub mod chat;
 // 签到中心的聚合快照（GET /api/checkin-center）：分组口径在后端唯一化，
 // 资格类状态由前端按需惰性查询，见该文件模块头
 pub mod checkin_center;
+pub mod campaign_rewards;
 // 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
 // 范围与密钥封装见 `core::cloud_sync` 的模块头
 pub mod cloud_sync;
@@ -85,10 +95,8 @@ pub mod checkin_schedules;
 pub mod cline_headers;
 pub mod codearts_welfare;
 pub mod compact_routes;
+// 路由页「标题生成」的配置接口（GET/PUT /api/models/title-routes）
 pub mod title_routes;
-pub mod vision_compat;
-pub(crate) mod tool_images;
-mod tool_image_results;
 pub mod client_identification;
 pub mod config_api;
 // WorkBuddy 成长任务（查询 / 执行 / 开学季 / 猫猫旅行）：从参考项目
@@ -120,26 +128,26 @@ pub mod keys_api;
 /// 同形的单开关端点，独立成文件而不是塞进 config_api —— 理由见该模块头。
 pub mod keepalive;
 pub mod logs_api;
+pub mod maintenance;
 pub mod model_manage;
 pub mod managed_models;
 pub(crate) mod model_access;
 // models.dev 模型元数据（开关 / 状态 / 立即刷新）：与「逐家上游目录」的
 // /api/models/refresh 分开，理由见该文件模块头
 pub mod model_meta;
+pub mod model_pricing;
 // 模型测试（模型管理页操作列的「测试」）：挂管理面、走真实转发链路，
 // 只把候选收窄到「这一家 × 这一个账号」并把流量标成测试，见该文件模块头
 pub mod model_test;
 pub mod models;
 pub mod public_model_catalog;
+pub mod notifications;
 // Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
 pub mod onboarding;
+mod officeace_subscription;
 pub mod panel;
-pub(crate) mod panel_oauth;
-pub mod notifications;
-#[cfg(feature = "task-plugins")]
-pub mod task_jobs;
-#[cfg(feature = "task-plugins")]
-pub mod task_plugins;
+pub mod panel_events;
+pub mod panel_oauth;
 pub mod pipeline;
 mod stream_wait;
 mod live_progress;
@@ -147,11 +155,14 @@ mod record_persist;
 // 提供商插件包的管理面（列表 / 安装 / 卸载 / 启停）：插件是用户安装的，
 // 这一组端点就是「装插件」的唯一入口，见该文件模块头
 pub mod plugins;
-pub mod plugin_helpers;
-pub mod plugin_login;
-pub mod plugin_desktop_import;
-pub mod plugin_provider_settings;
 pub mod plugin_tasks;
+pub mod plugin_login;
+pub mod plugin_helpers;
+pub mod plugin_desktop_import;
+pub mod plugin_desktop_launch;
+pub mod plugin_permissions;
+pub mod plugin_icons;
+pub mod plugin_provider_settings;
 // 插件 UI 资源的托管（`/plugins/{pack}/ui/*`）：插件包可以带页面，由网关
 // 出静态资源、客户端 iframe 嵌入。不挂 protected —— 见该文件模块头
 pub mod plugin_ui;
@@ -159,8 +170,8 @@ pub mod plugin_ui;
 // 原样出给 iframe 里的插件页，让迁移过来的页面与宿主同一套色板 / 圆角 / 阴影
 pub mod plugin_theme;
 pub mod prompt;
+pub mod privacy;
 pub mod prompt_rules;
-pub(crate) mod privacy;
 pub mod protocol;
 pub mod proxies;
 pub mod qoder_umid;
@@ -169,6 +180,8 @@ pub mod queue_api;
 // 实施点在 `core::upstream::payload` 的 send_body（只作用在对话链路，生图不经过），
 // 见该文件模块头
 pub mod image_compress;
+pub mod vision_compat;
+mod vision_compat_record;
 pub mod retry_api;
 pub(crate) mod request_prepare;
 // 开发者角色兼容开关（GET/PUT /api/developer-role-compat）：与 /api/sanitize
@@ -179,7 +192,7 @@ pub mod role_compat;
 // /api/developer-role-compat 同形的单开关端点，实施点在
 // `core::protocol::responses` 的 Responses 事件重建层，见该文件模块头
 pub mod reasoning_collapse;
-pub mod model_pricing;
+pub mod routing_errors;
 pub mod routing_api;
 pub mod routing_flow;
 pub mod routing_groups;
@@ -187,6 +200,8 @@ pub mod routing_trace;
 pub mod routing_workspace;
 pub mod sanitize;
 pub mod scheduled_tasks;
+pub mod task_jobs;
+pub mod task_plugins;
 pub mod session;
 // 侧边栏布局（GET/PUT /api/sidebar-layout）：桌面壳与网页端两个 origin
 // 共享同一份菜单布局，见该文件模块头
@@ -203,8 +218,7 @@ pub mod zcode_captcha;
 pub mod zcode_captcha_pool;
 pub mod zcode_claim;
 pub mod zcode_claim_verification;
-// ZCode 客户端版本号（设置页可改）：上游按它决定活动套餐下不下发，
-// 落后时的症状是**静默空列表**，见该文件模块头
+// 旧版客户端的设置地址兼容入口。
 pub mod zcode_version;
 // 设置页「版本信息」：环境 / 版本 / 路径 / 开关状态的一次性读数
 // （`GET /api/system-info`，见该文件模块头）

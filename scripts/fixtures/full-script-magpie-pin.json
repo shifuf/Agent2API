@@ -1,0 +1,9 @@
+{
+  "name": "@magpie-community/opencode-antigravity-auth",
+  "version": "0.2.4",
+  "file": "tgz/magpie-community-opencode-antigravity-auth-0.2.4.tgz",
+  "integrity": "sha512-H1wmGg5EbTErCRzZhY+3RZWcZoICtbz1zgyleVPfpTQxaddpVZrRwuvxhCoYb6ceBYo7gZ37AQvDXOlRt2izgQ==",
+  "sourceRepository": "https://github.com/magpie-community/plugins/tree/main/packages/antigravity",
+  "inspectedEntry": "package/opencode.mjs exports AntigravityAuthPlugin from index.mjs; index.mjs imports only node:crypto and node:http; constructor does not read personal CLI credentials or sign in",
+  "unverified": ["external Google OAuth authorization", "account model catalog", "upstream inference", "token renewal", "usage"]
+}

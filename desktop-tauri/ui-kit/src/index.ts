@@ -14,7 +14,7 @@
 
 export { Button, buttonVariants, type ButtonProps } from './button'
 export { Input } from './input'
-export { Combobox } from '@base-ui/react/combobox'
+export { Combobox as BaseCombobox } from '@base-ui/react/combobox'
 export { Textarea } from './textarea'
 export {
   InputGroup,
@@ -88,6 +88,16 @@ export {
   SelectLabel,
   SelectSeparator,
 } from './select'
+export {
+  Combobox,
+  ComboboxTrigger,
+  ComboboxValue,
+  ComboboxContent,
+  ComboboxInput,
+  ComboboxList,
+  ComboboxItem,
+  ComboboxEmpty,
+} from './combobox'
 export {
   SegmentedControl,
   type SegmentedControlOption,

@@ -42,6 +42,8 @@ case 'is_error_response':result=p.status>=400;break;case 'retry.decision':result
 case 'shutdown':process.exit(0);}process.stdout.write(JSON.stringify({id:frame.id,result})+'\\n');}).on('close',()=>process.exit(0));`)
 const profile = path.join(home, 'isolated-client'), gemini = path.join(profile, '.gemini', 'settings.json')
 await mkdir(path.dirname(gemini), { recursive: true }); await writeFile(gemini, '{}')
+const legacyConfig = { generation: { model }, editing: { model }, max_images: 1, max_concurrency: 1, retention_hours: 2, storage_mb: 64 }
+await writeFile(path.join(home, 'config.json'), JSON.stringify({ toolImageGeneration: legacyConfig }))
 const start = () => spawn(executable, [], { cwd: home, windowsHide: true, stdio: 'ignore', env: { ...process.env, USERPROFILE: profile, HOME: profile, GEMINI_CLI_HOME: profile,
   AGENT2API_UI_DIR: path.resolve(import.meta.dirname, '../desktop-tauri/ui'),
   CODEX_HOME: path.join(profile, '.codex'), NODE_OPTIONS: `--require=${JSON.stringify(script)}`,
@@ -81,7 +83,7 @@ try {
   let ready = false
   for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) { try { if ((await fetch(base + '/health')).ok) { ready = true; break } } catch {} await delay(150) }
   assert(ready); session = (await ok('/api/panel/setup?auth-mode=body', { username: 'fixture', password: 'fixture-password-123' })).accessToken
-  assert(session); await ok(configPath)
+  assert(session); assert.deepEqual((await ok(configPath)).config.generation, { provider: '', model, account_id: '' }, 'legacy fork image configuration must remain readable')
   let loaded = false
   for (let attempt = 0; attempt < 100; attempt++) {
     const plugins = await ok('/api/plugins'); loaded = plugins.packs.some(item => item.id === pack && item.providers.some(candidate => candidate.loaded))
@@ -98,15 +100,34 @@ try {
   assert([401, 403].includes((await send(configPath, config, owner, 'PUT')).status)); await ok(configPath, config, null, 'PUT')
   const args = { request_id: 'submission-pixels-001', prompt: 'One white fixture pixel.', wait_seconds: 10 }
   await ok('/api/tools/servers/image-generation', { protocol: 'mcp', enabled: true }, null, 'PATCH')
+  assert.equal((await ok(configPath)).config.generation.model, model, 'unrelated tool settings must preserve the image configuration')
   if (process.argv.includes('--browser')) await browserCheck()
   const targets = (await ok('/api/tools/install-targets?service=image-generation&protocol=mcp')).targets
   assert.equal(path.resolve(targets.find(row => row.key === 'gemini-cli').path), path.resolve(gemini))
   const keyId = (await ok('/api/tools/api-keys')).keys.find(key => key.name === 'owner').id
-  const installs = (await ok('/api/tools/install-mcp', { service_id:'image-generation',mode:'bridge',api_key_id:keyId,clients:['gemini-cli'] })).results; assert.equal(installs[0].ok,true)
+  const imageOutput = path.join(profile, 'generated-images'); await mkdir(imageOutput, { recursive: true })
+  const installs = (await ok('/api/tools/install-mcp', { service_id:'image-generation',mode:'bridge',api_key_id:keyId,clients:['gemini-cli'],output_directory:imageOutput,reference_directories:[imageOutput] })).results; assert.equal(installs[0].ok,true,JSON.stringify(installs))
   assert([401,403].includes((await send('/api/tools/uninstall-mcp',{service_id:'image-generation',clients:['gemini-cli']},owner)).status))
-  const bridge = JSON.parse(await readFile(gemini, 'utf8')).mcpServers['agent2api-image-generation']; assert.equal(bridge.command,'node'); assert.equal(bridge.env.AGENT2API_IMAGE_ENDPOINT,base+mcp); assert.equal(bridge.env.AGENT2API_IMAGE_KEY,owner)
+  const bridge = JSON.parse(await readFile(gemini, 'utf8')).mcpServers['agent2api-image-generation']; assert.match(path.basename(bridge.command),/^node(?:\.exe)?$/i); assert.equal(bridge.env.AGENT2API_IMAGE_ENDPOINT,base+mcp); assert.equal(bridge.env.AGENT2API_IMAGE_KEY,owner); assert.equal(path.toNamespacedPath(bridge.env.AGENT2API_IMAGE_OUTPUT_DIR),path.toNamespacedPath(imageOutput))
   assert(!path.relative(home,bridge.args[0]).startsWith('..')); assert.equal(await (await send('/api/tools/mcp-bridge/image-generation.cjs')).text(),await readFile(bridge.args[0],'utf8'))
-  const client = spawn(process.execPath, bridge.args, { cwd:profile, windowsHide:true, env:{...process.env,...bridge.env},stdio:['pipe','pipe','pipe'] }); const closed = once(client,'close'); let output=''; client.stdout.on('data',chunk=>{output+=chunk}); client.stdin.end(JSON.stringify({jsonrpc:'2.0',id:3,method:'tools/list'})+'\n'); await closed; assert(JSON.parse(output).result.tools.some(item=>item.name==='edit_images'))
+  const clientEnv = { ...process.env, ...bridge.env }; delete clientEnv.NODE_OPTIONS
+  const client = spawn(process.execPath, bridge.args, { cwd:profile, windowsHide:true, env:clientEnv,stdio:['pipe','pipe','pipe'] }); const closed = once(client,'close'); let output='', bridgeError=''
+  client.stderr.on('data', chunk => { bridgeError += chunk })
+  const listed = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Bridge tools/list timed out: ${bridgeError}`)), 30000)
+    client.stdout.on('data', chunk => {
+      output += chunk
+      if (!output.includes('\n')) return
+      clearTimeout(timer)
+      try { resolve(JSON.parse(output.split('\n')[0])) } catch (error) { reject(error) }
+    })
+    client.once('error', error => { clearTimeout(timer); reject(error) })
+    client.once('close', code => { clearTimeout(timer); reject(new Error(`Bridge exited before replying (${code}): ${bridgeError}`)) })
+  })
+  try {
+    client.stdin.write(JSON.stringify({jsonrpc:'2.0',id:3,method:'tools/list'})+'\n')
+    assert((await listed).result.tools.some(item=>item.name==='edit_images'))
+  } finally { client.stdin.end(); await closed }
   const excluded = await createKey('excluded',['Some/Other']); await tool('generate_images',args,excluded,true); assert.equal(calls.length,0)
   await ok('/api/debug',{debugMode:true},null,'PUT')
   await ok('/api/retry',{retryCount:0,retryCrossProviderCount:0,retryIntervalSeconds:0,noRetryStatusCodes:[400]},null,'PUT')
@@ -120,12 +141,22 @@ try {
   await tool('edit_images', edit, peer, true); assert.equal(calls.length, 1)
   assert.equal((await tool('edit_images', edit, owner)).status, 'succeeded'); assert.equal(calls.at(-1).path, '/edits')
   const failed=await tool('generate_images',{...args,request_id:'failure-pixels-001',prompt:privateFailure},owner,true);assert.equal(failed.status,'failed');assert(!JSON.stringify(failed).includes(privateFailure))
+  const leafConfig = { ...config, generation: { provider, model: wire, account_id: account }, editing: { provider, model: wire, account_id: account } }
+  await ok(configPath, leafConfig, null, 'PUT')
+  await tool('generate_images', { ...args, request_id: 'leaf-denied-001' }, owner, true)
+  const leaf = await createKey('leaf', [wire])
+  const leafResult = await tool('generate_images', { ...args, request_id: 'leaf-direct-001' }, leaf)
+  assert.equal(leafResult.status, 'succeeded'); assert.equal(calls.at(-1).body.model, wire); assert.equal(calls.at(-1).account, `Bearer ${account}`)
+  await ok(configPath, config, null, 'PUT')
   const before = calls.length
   const rows = JSON.stringify(await ok('/api/stats/requests?limit=100')); assert(!rows.includes(pixel) && !rows.includes(args.prompt) && !rows.includes(privateFailure))
   for (const id of [job.job_id,failed.job_id]) { assert.equal((await send('/api/stats/requests/raw?id='+id)).status,404);assert.equal((await send('/api/debug/traffic?id='+id)).status,404) }
+  await ok(configPath, undefined, null, 'DELETE'); assert.equal((await ok(configPath)).config, null, 'clearing config must not revive the legacy fork slot')
   child.kill(); await exited; child=start(); exited=once(child,'exit'); for (let n=0;n<100;n++) { try { if ((await fetch(base+'/health')).ok) break } catch {} await delay(200) }
+  assert.equal((await ok(configPath)).config, null, 'cleared legacy image settings must stay cleared after restart')
   for (let n=0;n<100;n++) { if ((await ok('/api/plugins')).packs.some(item=>item.id===pack && item.providers.some(candidate=>candidate.loaded))) break; await delay(200) }
   assert.equal((await send(file.pathname,undefined,owner)).status,404); const expired = await tool('get_image_result',{job_id:job.job_id},owner,true); assert.equal(expired.status,'expired'); assert.equal((await tool('generate_images',args,owner,true)).status,'expired'); assert.equal(calls.length,before)
+  await ok(configPath, config, null, 'PUT')
   await ok(`/api/accounts/${account}`, { enabled: false }, null, 'PATCH')
   await tool('generate_images', { ...args, request_id: 'disabled-source-001' }, owner, true); assert.equal(calls.length, before)
   console.log('PASS image MCP: isolated real install and stdio bridge, scoped generation/edit, owner-only results, restart deduplication, no raw stats, disabled group member')

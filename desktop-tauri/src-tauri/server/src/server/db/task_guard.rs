@@ -33,35 +33,34 @@ pub(crate) enum TaskTransaction<T> {
 }
 
 impl Db {
+    pub(crate) fn try_task_transaction<T>(
+        &self,
+        action: impl FnOnce(&Connection) -> T,
+    ) -> TaskTransaction<T> {
+        self.try_task_transaction_inner(None, action)
+    }
+
     /// 原来源在同一次conn try锁内核对，失败不进入事务，也不回退无来源入口。
     pub(crate) fn try_task_transaction_from<T>(
         &self,
         source: &CredentialSource,
         action: impl FnOnce(&Connection) -> T,
     ) -> TaskTransaction<T> {
-        self.try_task_transaction_inner(source, action)
+        self.try_task_transaction_inner(Some(source), action)
     }
 
     fn try_task_transaction_inner<T>(
         &self,
-        source: &CredentialSource,
+        source: Option<&CredentialSource>,
         action: impl FnOnce(&Connection) -> T,
     ) -> TaskTransaction<T> {
-        let Some(_entry) = super::DatabaseEntry::enter(self) else {
-            return TaskTransaction::NotEntered(TaskTransactionError::Unavailable);
-        };
         let conn = match self.inner.conn.try_lock() {
             Ok(conn) => conn,
             Err(TryLockError::WouldBlock) => return TaskTransaction::NotEntered(TaskTransactionError::Busy),
             Err(TryLockError::Poisoned(_)) => return TaskTransaction::NotEntered(TaskTransactionError::Poisoned),
         };
-        let epoch = match self.inner.source_epoch.try_lock() {
-            Ok(epoch) => epoch,
-            Err(TryLockError::WouldBlock) => return TaskTransaction::NotEntered(TaskTransactionError::Busy),
-            Err(TryLockError::Poisoned(_)) => return TaskTransaction::NotEntered(TaskTransactionError::Poisoned),
-        };
         if self.inner.task_guard_unusable.load(Ordering::Acquire)
-            || !source.matches(self, &epoch)
+            || source.is_some_and(|source| !source.matches(self, &conn))
         {
             return TaskTransaction::NotEntered(TaskTransactionError::Unavailable);
         }

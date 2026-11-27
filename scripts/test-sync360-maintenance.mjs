@@ -25,7 +25,7 @@ env.AGENT2API_UI_DIR=resolve(import.meta.dirname,'../desktop-tauri/ui')
 let child,exited,session
 async function start(){child=spawn(binary,[],{env,cwd:dir,windowsHide:true,stdio:'ignore'});exited=once(child,'exit');for(let turn=0;turn<100;turn++){if((await fetch(base+'/health').catch(()=>null))?.ok)return;await delay(100)}throw Error('server not ready')}
 async function stop(){if(child && child.exitCode===null)child.kill();if(exited)await exited;child=null}
-async function request(path,method='GET',body){return fetch(base+path,{method,headers:{'Content-Type':'application/json','x-panel-token':session.accessToken},body:body&&JSON.stringify(body),signal:AbortSignal.timeout(20000)})}
+async function request(path,method='GET',body,headers={'x-panel-token':session.accessToken}){return fetch(base+path,{method,headers:{'Content-Type':'application/json',...headers},body:body&&JSON.stringify(body),signal:AbortSignal.timeout(90000)})}
 async function list(){const response=await request('/api/scheduled-tasks');assert.equal(response.status,200);return (await response.json()).data.tasks}
 const task=async()=> (await list()).find(row=>row.id==='credentialMaintenance')
 async function dbfile(path){for(const item of await readdir(path,{withFileTypes:true})){const file=join(path,item.name);if(item.name==='agent2api.db')return file;if(item.isDirectory()){const nested=await dbfile(file);if(nested)return nested}}}
@@ -40,11 +40,18 @@ async function checkHistoryUi(history){
   }}finally{await browser.close()}
 }
 try {
-  await writeFile(join(dir,'config.json'), JSON.stringify({scheduledTasks:{modelRefresh:{enabled:false},credentialMaintenance:{enabled:false}}}))
+  await writeFile(join(dir,'config.json'), JSON.stringify({scheduledTasks:{modelRefresh:{enabled:false},credentialMaintenance:{enabled:false},updateCheck:{enabled:false},magpiePluginCheck:{enabled:false}},pluginUpdates:{checkMode:'custom',autoCheck:false,autoUpdate:false}}))
   await start();session=await createFixturePanelSession(base,credentials)
   assert.ok(Array.isArray((await task()).history),'credential maintenance must expose durable per-run history')
-  const plans=await list();assert.equal(plans.find(item=>item.id==='modelRefresh').enabled,false);assert.equal(plans.find(item=>item.id==='credentialMaintenance').enabled,false);const plugin=plans.find(item=>item.id==='pluginCatalog');assert.ok(plugin.readOnlyPlan);assert.equal(plugin.available,false);assert.ok(!(await request('/api/scheduled-tasks/pluginCatalog/run','POST',{})).ok)
-  const noUpdates=plans.find(item=>item.id==='updateCheck');assert.equal(noUpdates.canRun,false);const callsBefore=updateCalls;assert.ok(!(await request('/api/scheduled-tasks/updateCheck/run','POST',{})).ok);await delay(80);assert.equal(updateCalls,callsBefore)
+  const plans=await list();assert.equal(plans.find(item=>item.id==='modelRefresh').enabled,false);assert.equal(plans.find(item=>item.id==='credentialMaintenance').enabled,false);const plugin=plans.find(item=>item.id==='pluginCatalogCheck');assert.ok(plugin);assert.equal(plugin.checkMode,'custom');assert.equal(plugin.enabled,false);assert.equal(plugin.autoUpdate,false);assert.equal(plugin.canRun,true)
+  const restrictedResponse=await request('/api/keys','POST',{name:'Maintenance restricted Key',allowedModels:['fixture-public-model']});assert.equal(restrictedResponse.status,200);const restricted=(await restrictedResponse.json()).data.created.key
+  for(const headers of [{},{'x-api-key':restricted}])for(const [path,method,body] of [['/api/scheduled-tasks','GET'],['/api/scheduled-tasks/pluginCatalogCheck','POST',{checkMode:'custom',enabled:false,interval:30}],['/api/scheduled-tasks/credentialMaintenance/run','POST',{}],['/api/maintenance','GET'],['/api/plugins/settings','PATCH',{autoUpdate:true}]])assert.ok([401,403].includes((await request(path,method,body,headers)).status),`${method} ${path} must reject anonymous/restricted Key access`)
+  const custom=await request('/api/scheduled-tasks/pluginCatalogCheck','POST',{checkMode:'custom',enabled:false,interval:30,autoUpdate:false});assert.equal(custom.status,200);const customPlan=(await custom.json()).data;assert.equal(customPlan.checkMode,'custom');assert.equal(customPlan.interval,30);assert.equal(customPlan.enabled,false);assert.equal(customPlan.autoUpdate,false)
+  const pluginSettings=(await (await request('/api/plugins/settings')).json()).data;assert.equal(pluginSettings.checkMode,'custom');assert.equal(pluginSettings.interval,30);assert.equal(pluginSettings.autoCheck,false);assert.equal(pluginSettings.autoUpdate,false)
+  assert.equal((await request('/api/scheduled-tasks/pluginCatalogCheck','POST',{checkMode:'invalid'})).status,400);assert.equal((await request('/api/scheduled-tasks/pluginCatalogCheck','POST',{checkMode:'custom',interval:0})).status,400)
+  const followed=await request('/api/scheduled-tasks/pluginCatalogCheck','POST',{checkMode:'follow'});assert.equal(followed.status,200);assert.equal((await followed.json()).data.checkMode,'follow');assert.equal((await task()).enabled,false)
+  assert.equal((await request('/api/scheduled-tasks/pluginCatalogCheck','POST',{checkMode:'custom',enabled:false,autoUpdate:false})).status,200)
+  const noUpdates=plans.find(item=>item.id==='updateCheck');assert.equal(noUpdates.canRun,true);assert.equal(noUpdates.enabled,false);assert.ok(!(await request('/api/update/install','POST',{})).ok,'disabled self-update must not install a package');const callsBefore=updateCalls;await delay(80);assert.equal(updateCalls,callsBefore)
   await request('/api/scheduled-tasks/credentialMaintenance','POST',{enabled:false});await delay(1400)
   const outcomes=await Promise.all([request('/api/accounts/refresh-expiring','POST',{}),request('/api/scheduled-tasks/credentialMaintenance/run','POST',{})]);assert.equal(outcomes.filter(result=>result.ok).length,1,'both manual paths must share the same claim')
   let item=(await task()).history[0];assert.equal(item.trigger,'manual');assert.equal(item.status,'succeeded');assert.ok(item.finishedAt>=item.startedAt);assert.deepEqual(Object.keys(item).sort(),['finishedAt','startedAt','status','trigger'])

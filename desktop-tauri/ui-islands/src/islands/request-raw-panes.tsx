@@ -1,11 +1,56 @@
 import * as React from 'react'
-import { Button, Empty, HtmlContent, Spinner } from '@ui'
+import { Button, Empty, HtmlContent, Spinner, Switch } from '@ui'
 import { t } from '../i18n'
-import { exceedsPreviewBudget, PREVIEW_LIMIT } from './request-preview-budget'
+import { NOTES } from './settings-model'
+import { loadDebug, saveDebug, useSettings } from './settings-state'
+
+export function RequestDebugSwitch() {
+  const { debug, busy } = useSettings()
+  const [loading, setLoading] = React.useState(true)
+  const alive = React.useRef(false)
+  const loadingRef = React.useRef(false)
+
+  const refresh = React.useCallback(async () => {
+    if (loadingRef.current) return
+    loadingRef.current = true
+    setLoading(true)
+    try { await loadDebug() }
+    finally {
+      loadingRef.current = false
+      if (alive.current) setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    alive.current = true
+    void refresh()
+    return () => { alive.current = false }
+  }, [refresh])
+
+  const saving = busy === 'debug'
+  const unavailable = !loading && debug.status === 'unavailable'
+  return (
+    <div className='ml-auto flex min-h-[30px] flex-wrap items-center justify-end gap-2'>
+      <label className='inline-flex items-center gap-2 whitespace-nowrap text-[12px] text-subtle' title={NOTES.debug}>
+        <span>{t('调试模式')}</span>
+        <Switch checked={debug.on} disabled={loading || debug.status !== 'ready' || busy !== null}
+          aria-label={t('调试模式')} aria-busy={loading || saving}
+          onCheckedChange={next => void saveDebug(next)} />
+      </label>
+      {loading || saving ? <Spinner className='size-3.5 text-muted-foreground'
+        aria-label={loading ? t('正在读取…') : t('保存中…')} /> : null}
+      {unavailable ? <>
+        <span className='text-[11.5px] text-destructive' role='status'
+          title={t('未能读取调试模式设置，请稍后重试')}>{t('读取失败')}</span>
+        <Button variant='ghost' size='xs' disabled={busy !== null} onClick={() => void refresh()}>{t('重试')}</Button>
+      </> : null}
+    </div>
+  )
+}
 
 export type RawBody = Record<string, unknown>
 export type DebugTraffic = Record<string, unknown>
-export type RawState = null | 'gone' | { body: RawBody; truncated: boolean }
+export type RawState = null | 'gone' | { error: string } | { body: RawBody; truncated: boolean }
 export type DebugState = null | 'gone' | { data: DebugTraffic }
 
 function jsonText(value: unknown): string {
@@ -21,16 +66,6 @@ const DEBUG_SEGS = [
   { label: t('响应体'), pick: (data: DebugTraffic) => data.responseBody ? String(data.responseBody) : '' },
 ]
 
-async function copyBody(text: string) {
-  const app = window as unknown as { copyToClipboard?: (value: string) => Promise<boolean>; toast?: (text: string, kind?: string) => void }
-  let ok = false
-  try {
-    if (app.copyToClipboard) ok = await app.copyToClipboard(text)
-    else { await navigator.clipboard.writeText(text); ok = true }
-  } catch { /* Present clipboard failures instead of dropping a rejected promise. */ }
-  app.toast?.(ok ? t('已复制') : t('复制失败，请手动选择复制'), ok ? undefined : 'err')
-}
-
 export function hasDebugTraffic(data: DebugTraffic): boolean {
   return [data.requestHeaders, data.requestBody, data.responseHeaders, data.responseBody]
     .some(value => typeof value === 'string' ? value.trim() !== '' : value != null)
@@ -45,24 +80,39 @@ export function RequestEmpty({ text, loading = false }: { text: string; loading?
   )
 }
 
-export function PreviewPane({ state }: { state: RawState }) {
-  const body = !state || state === 'gone' ? null : state.body
+export function PreviewPane({ state, localDirect = false }: { state: RawState; localDirect?: boolean }) {
+  if (!state) return <RequestEmpty text={t('正在读取…')} loading />
+  if (state !== 'gone' && 'error' in state) {
+    return <RequestEmpty text={state.error} />
+  }
+  const body = state === 'gone' ? null : state.body
   const bridge = window as unknown as {
     wbConversationPreview?: { render?: (request: unknown, response: unknown) => string }
   }
-  const oversized = React.useMemo(() => !!body && exceedsPreviewBudget([body.requestBody, body.responseBody]), [body])
-  const html = React.useMemo(() => body && !oversized
-    ? bridge.wbConversationPreview?.render?.(body.requestBody, body.responseBody) || '' : '', [body, oversized])
-  if (!state) return <RequestEmpty text={t('正在读取…')} loading />
-  if (oversized && body) return <div className='flex flex-col gap-3'>
-    <RequestEmpty text={t('正文过大，已暂停对话预览；可复制已保存正文查看。')} />
-    {state !== 'gone' && state.truncated ? <div className='text-warning'>{t('旧版本保存的正文可能已截断，无法恢复缺失内容')}</div> : null}
-    <Button variant='outline' onClick={() => { void copyBody(jsonText(body)) }}>{t('复制')}</Button>
-  </div>
-  if (!html) return <RequestEmpty text={t('无报文原文（未开启「调试模式」，或已被清理）')} />
+  const html = body ? bridge.wbConversationPreview?.render?.(body.requestBody, body.responseBody) || '' : ''
+  if (!html) {
+    return (
+      <RequestEmpty
+        text={localDirect
+          ? t('未找到可展示的本机对话内容（可能原文件已删除或该版本仅记录了用量）')
+          : t('无报文原文（未开启「调试模式」，或已被清理）')}
+      />
+    )
+  }
+  const sourceFile = typeof body?.sourceFile === 'string' ? body.sourceFile : ''
   return (
     <div>
-      {state !== 'gone' && state.truncated && (
+      {body?.liveLocal === true ? (
+        <div className='mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-2 px-3 py-1.5 text-[11.5px] text-subtle'>
+          <span>{t('实时读取自本机对话文件（不存入数据库）')}</span>
+          {sourceFile ? (
+            <span className='max-w-[55%] truncate font-mono text-[11px] text-muted-foreground' title={sourceFile}>
+              {sourceFile}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {state !== 'gone' && !('error' in state) && state.truncated && (
         <div className='mb-2 text-[11.5px] text-warning'>{t('旧版本保存的正文可能已截断，无法恢复缺失内容')}</div>
       )}
       <HtmlContent html={html} />
@@ -90,14 +140,12 @@ export function RawPane({ data }: { data: DebugTraffic }) {
           <div key={seg.label} className='flex min-w-0 flex-col gap-1.5'>
             <div className='flex items-center gap-2'>
               <h3 className='text-[11.5px] font-semibold tracking-[.02em] text-muted-foreground'>{seg.label}</h3>
-              {text && <Button variant='outline' size='xs' className='ml-auto'
-                onClick={() => { void copyBody(text) }}>{t('复制')}</Button>}
+              {text && <Button variant='outline' size='xs' className='ml-auto' data-copy={text}>{t('复制')}</Button>}
             </div>
             {text ? (
               <pre tabIndex={0} aria-label={seg.label}
                 className='m-0 max-h-80 overflow-auto rounded-md border border-border bg-surface-2 p-[10px_12px] font-mono text-[11.5px] leading-[1.6] whitespace-pre-wrap text-subtle [overflow-wrap:anywhere]'>
-                {text.slice(0, PREVIEW_LIMIT)}
-                {text.length > PREVIEW_LIMIT ? `\n${t('显示内容已截断，复制可获取完整正文。')}` : ''}
+                {text}
               </pre>
             ) : <RequestEmpty text={t('这条请求没有保存这一段报文')} />}
           </div>

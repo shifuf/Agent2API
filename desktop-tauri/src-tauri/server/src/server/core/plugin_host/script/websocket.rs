@@ -59,10 +59,11 @@ impl Drop for Opening {
 }
 
 pub async fn open(params: &Value) -> Result<Value, proto::WireError> {
-    open_tracked(params, None).await
+    open_with_policy(params, false).await
 }
 
-pub(in crate::server::core::plugin_host) async fn open_tracked(params: &Value, dispatch: Option<&crate::server::core::upstream::usage::DispatchTracker>) -> Result<Value, proto::WireError> {
+pub(in crate::server::core::plugin_host) async fn open_with_policy(params: &Value,
+    system_proxy_when_unset: bool) -> Result<Value, proto::WireError> {
     let mut url = url::Url::parse(params["url"].as_str().unwrap_or(""))
         .map_err(|_| error("WebSocket 地址无效"))?;
     if !matches!(url.scheme(), "ws" | "wss") || url.host_str().is_none()
@@ -73,7 +74,7 @@ pub(in crate::server::core::plugin_host) async fn open_tracked(params: &Value, d
     let secure = url.scheme() == "wss";
     url.set_scheme(if secure { "https" } else { "http" }).map_err(|_| error("WebSocket 地址无效"))?;
     let proxy = super::transport::proxy_for(&url, params)?;
-    let client = egress::resolved_client(proxy.as_ref(), false, "", &[]).map_err(error)?;
+    let client = egress::websocket_client(proxy.as_ref(), system_proxy_when_unset && !super::transport::is_loopback(&url)).map_err(error)?;
     let key = generate_key();
     let mut request = client.get(url).version(reqwest::Version::HTTP_11)
         .header("connection", "Upgrade").header("upgrade", "websocket")
@@ -105,10 +106,14 @@ pub(in crate::server::core::plugin_host) async fn open_tracked(params: &Value, d
         .ok_or_else(|| error("缺少 WebSocket 会话标识"))?.to_string();
     let (commands, incoming) = mpsc::channel(8);
     let (events, outgoing) = mpsc::channel(2);
+    let network = crate::server::core::runtime_capacity::try_acquire(
+        crate::server::core::runtime_capacity::Class::Network, params["provider"].as_str().unwrap_or(""))?;
+    let buffer = crate::server::core::runtime_capacity::Allocation::new(256 * 1024)?;
     let connection = Arc::new(Connection {
         commands, events: tokio::sync::Mutex::new(outgoing),
         cancel: CancellationToken::new(), touched: Mutex::new(Instant::now()),
     });
+    let connection_limit = crate::server::core::runtime_capacity::limits().connections;
     {
         let mut items = connections().lock().map_err(|_| error("脚本 WebSocket 会话不可用"))?;
         items.retain(|_, item| {
@@ -116,14 +121,14 @@ pub(in crate::server::core::plugin_host) async fn open_tracked(params: &Value, d
             if !keep { item.cancel.cancel(); }
             keep
         });
-        if items.len() >= 64 || items.contains_key(&id) { return Err(error("WebSocket 连接已达上限或标识重复")); }
+        if items.len() >= connection_limit || items.contains_key(&id) { return Err(error("WebSocket 连接已达上限或标识重复")); }
         items.insert(id.clone(), connection.clone());
     }
     let mut opening = Opening(Some(id.clone()));
     let wait = Duration::from_millis(crate::server::config::timeout_settings().headers_ms().clamp(1000, 600_000));
+    let request = request.build().map_err(|failure| error(egress::describe_error_detail(&failure)))?;
     let connected = async {
-        let request = request.build().map_err(|failure| error(egress::describe_error_detail(&failure)))?;
-        if let Some(dispatch) = dispatch { dispatch.mark(); }
+        super::trace::mark_dispatched(params);
         let response = client.execute(request).await.map_err(|failure| error(egress::describe_error_detail(&failure)))?;
         if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
             return Err(error(format!("WebSocket 握手失败：HTTP {}", response.status().as_u16())));
@@ -147,7 +152,11 @@ pub(in crate::server::core::plugin_host) async fn open_tracked(params: &Value, d
         _ = connection.cancel.cancelled() => return Err(error("WebSocket 连接已取消")),
         result = tokio::time::timeout(wait, connected) => result.map_err(|_| error("WebSocket 握手等待超时"))??,
     };
-    crate::spawn_task(run(socket, incoming, events, connection.cancel.clone()));
+    crate::spawn_task(async move {
+        let _network = network;
+        let _buffer = buffer;
+        run(socket, incoming, events, connection.cancel.clone()).await;
+    });
     opening.0 = None;
     Ok(json!({ "id": id, "protocol": protocol }))
 }

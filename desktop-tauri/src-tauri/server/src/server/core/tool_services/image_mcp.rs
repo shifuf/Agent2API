@@ -40,7 +40,7 @@ fn generation_tool(editing: bool, count: u32, retention: u32) -> Value {
     if editing {
         properties["images"] = json!({ "type": "array", "minItems": 1, "maxItems": 16,
             "items": { "type": "string", "minLength": 1 },
-            "description": "Ordered references: image:<id> from a result owned by the same gateway key, or an inline image data URI. No remote URLs or filesystem paths." });
+            "description": "Ordered references: image:<id> from a previous result, public HTTP(S) URLs, or image data URIs. HTTP mode cannot read local file paths. PNG/JPEG/WebP only." });
         required.push("images");
     }
     json!({

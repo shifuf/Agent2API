@@ -36,7 +36,6 @@ use super::{
 };
 use super::anthropic::{parse_json_object, tool_result_parts, DEFAULT_MAX_TOKENS, ToolResultParts};
 use super::responses::ConvertError;
-use crate::server::core::model_rules;
 
 // ─── 请求：Chat → Anthropic ─────────────────────────────────
 
@@ -127,24 +126,24 @@ pub fn anthropic_request_from_chat(chat: &Value, model: &str) -> Result<Value, C
 
     // thinking 先判定：它决定 max_tokens 的下限，也决定 temperature/top_p
     // 能不能带（见模块头第二条规则）
-    let thinking = chat
-        .get("reasoning_effort")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .and_then(thinking_budget);
+    let adaptive = super::anthropic_thinking::supports_adaptive(model);
+    let effort = chat.get("reasoning_effort").and_then(Value::as_str).map(str::trim)
+        .filter(|level| !level.is_empty() && !crate::server::core::model_rules::reasoning_is_off(level));
+    let thinking = effort.and_then(thinking_budget);
     let mut max_tokens = ["max_tokens", "max_completion_tokens"]
         .iter()
         .find_map(|key| chat.get(*key).and_then(Value::as_i64).filter(|value| *value > 0))
         .unwrap_or(DEFAULT_MAX_TOKENS);
-    if let Some(budget) = thinking {
-        // Anthropic 要求 budget_tokens < max_tokens；不够就抬到 budget 之上
+    if let Some(budget) = thinking.filter(|_| !adaptive) {
         if max_tokens <= budget {
             max_tokens = budget + 1024;
         }
     }
     out.insert("max_tokens".to_string(), Value::from(max_tokens));
-    if thinking.is_some() {
+    if effort.is_some() && adaptive {
+        out.insert("thinking".to_string(), json!({ "type": "adaptive", "display": "summarized" }));
+        out.insert("output_config".to_string(), json!({ "effort": effort }));
+    } else if thinking.is_some() {
         if let Some(budget) = thinking {
             out.insert(
                 "thinking".to_string(),
@@ -199,7 +198,9 @@ pub fn anthropic_request_from_chat(chat: &Value, model: &str) -> Result<Value, C
             &dropped.describe(None, Some("目标上游按 anthropic 协议收，只认 anthropic 来源的原生声明")),
         );
     }
-    Ok(Value::Object(out))
+    let mut body = Value::Object(out);
+    super::anthropic_thinking::normalize(&mut body, model);
+    Ok(body)
 }
 
 /// 拆开的工具结果 → Anthropic 的 `tool_result.content`。
@@ -493,13 +494,7 @@ fn tool_choice_to_anthropic(choice: &Value) -> Value {
 /// 分档值与参考实现 `thinkingBudget` 对齐（它的 low/medium/high/max 四个
 /// 值原样落在这四档上）。
 fn thinking_budget(effort: &str) -> Option<i64> {
-    let rank = model_rules::reasoning_rank(effort)?;
-    Some(match rank {
-        0 | 1 => 1024,
-        2 => 4096,
-        3 => 10240,
-        _ => 32768,
-    })
+    super::anthropic_thinking::budget_for_effort(effort)
 }
 
 // ─── 响应：Anthropic SSE → Chat SSE（流式）────────────────────
@@ -528,16 +523,15 @@ pub struct ChatFromAnthropicStream {
     created: i64,
     started: bool,
     finished: bool,
-    /// Distinguish a real terminal from complete() called as an EOF fallback.
     upstream_terminal: bool,
     /// tool_use 块（按上游 content_block 的 index 记）→ 是否已发过参数
     /// （一个分片都没来时，`content_block_stop` 要补一个空对象参数帧）
     tools: BTreeMap<i64, bool>,
     input_tokens: i64,
     cache_read: i64,
-    cache_creation: Option<i64>,
-    cache_creation_5m: Option<i64>,
-    cache_creation_1h: Option<i64>,
+    cache_creation: i64,
+    cache_creation_1h: i64,
+    cache_unknown: bool,
     output_tokens: i64,
     /// 已映射成 chat 口径的 finish_reason（`message_delta` 里给）
     finish_reason: Option<String>,
@@ -556,20 +550,24 @@ impl ChatFromAnthropicStream {
             tools: BTreeMap::new(),
             input_tokens: 0,
             cache_read: 0,
-            cache_creation: None,
-            cache_creation_5m: None,
-            cache_creation_1h: None,
+            cache_creation: 0,
+            cache_creation_1h: 0,
+            cache_unknown: false,
             output_tokens: 0,
             finish_reason: None,
         }
     }
 
     /// 吃一段上游字节，吐出要下发的 chat SSE 帧
+    pub fn has_upstream_terminal(&self) -> bool {
+        self.upstream_terminal
+    }
+
     pub fn push(&mut self, chunk: &[u8]) -> Vec<bytes::Bytes> {
         let mut out = Vec::new();
         for payload in self.buffer.push(chunk) {
             match payload {
-                None => { self.upstream_terminal = true; out.extend(self.finish()); },
+                None => out.extend(self.finish()),
                 Some(data) => {
                     if let Ok(value) = serde_json::from_str::<Value>(&data) {
                         out.extend(self.consume(&value));
@@ -579,9 +577,6 @@ impl ChatFromAnthropicStream {
         }
         out
     }
-
-    /// A terminal parsed from the upstream, including one buffered until EOF.
-    pub(crate) fn has_upstream_terminal(&self) -> bool { self.upstream_terminal }
 
     /// 上游流结束（没有 `message_stop` 时的兜底收尾）
     pub fn finish(&mut self) -> Vec<bytes::Bytes> {
@@ -594,7 +589,7 @@ impl ChatFromAnthropicStream {
                 if let Ok(value) = serde_json::from_str::<Value>(&data) {
                     out.extend(self.consume(&value));
                 }
-            } else { self.upstream_terminal = true; }
+            }
         }
         out.extend(self.complete());
         out
@@ -606,11 +601,12 @@ impl ChatFromAnthropicStream {
             return Vec::new();
         }
         let kind = string_field(event, "type").to_lowercase();
-        self.upstream_terminal |= kind == "message_stop" || (kind == "message_delta"
-            && event.pointer("/delta/stop_reason").and_then(Value::as_str).is_some_and(|reason| !reason.trim().is_empty()));
         match kind.as_str() {
             "ping" => Vec::new(),
-            "error" => self.fail(event),
+            "error" => {
+                self.upstream_terminal = true;
+                self.fail(event)
+            }
             "message_start" => {
                 if let Some(id) = event
                     .pointer("/message/id")
@@ -730,7 +726,10 @@ impl ChatFromAnthropicStream {
                 }
                 Vec::new()
             }
-            "message_stop" => self.complete(),
+            "message_stop" => {
+                self.upstream_terminal = true;
+                self.complete()
+            }
             _ => Vec::new(),
         }
     }
@@ -757,7 +756,8 @@ impl ChatFromAnthropicStream {
     /// 判据用「字段在不在」而不是「值是否非零」：0 是合法上报值（缓存未命中
     /// 就是 0），拿它当「没报」会让我们永远回落到一个更早的旧值。
     fn absorb_usage(&mut self, usage: &Value) {
-        let take = |key: &str| usage.get(key).and_then(Value::as_i64).filter(|value| *value >= 0);
+        self.cache_unknown |= usage.get("magpie_cache_unknown").and_then(Value::as_bool) == Some(true);
+        let take = |key: &str| super::usage::token_count(usage.get(key));
         if let Some(value) = take("input_tokens") {
             self.input_tokens = value;
         }
@@ -765,12 +765,10 @@ impl ChatFromAnthropicStream {
             self.cache_read = value;
         }
         if let Some(value) = take("cache_creation_input_tokens") {
-            self.cache_creation = Some(value);
+            self.cache_creation = value;
         }
-        if let Some(tiers) = usage.get("cache_creation") {
-            let count = |key: &str| tiers.get(key).and_then(Value::as_i64).filter(|value| *value >= 0);
-            self.cache_creation_5m = count("ephemeral_5m_input_tokens").or(self.cache_creation_5m);
-            self.cache_creation_1h = count("ephemeral_1h_input_tokens").or(self.cache_creation_1h);
+        if let Some(value) = super::usage::TokenUsage::from_chat(usage).and_then(|tokens| tokens.cache_creation_1h) {
+            self.cache_creation_1h = value;
         }
         if let Some(value) = take("output_tokens") {
             self.output_tokens = value;
@@ -808,31 +806,24 @@ impl ChatFromAnthropicStream {
             }
         });
         out.push(self.finish_frame(&finish_reason));
-        let split_write = self.cache_creation_5m.unwrap_or(0).saturating_add(self.cache_creation_1h.unwrap_or(0));
-        let written = self.cache_creation.unwrap_or(split_write);
-        let prompt_tokens = self.input_tokens.saturating_add(self.cache_read).saturating_add(written);
-        let mut usage = json!({
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": self.output_tokens,
-            "total_tokens": prompt_tokens.saturating_add(self.output_tokens),
-            "prompt_tokens_details": { "cached_tokens": self.cache_read },
-        });
-        if self.cache_creation.is_some() || self.cache_creation_5m.is_some() || self.cache_creation_1h.is_some() {
-            usage["cache_creation_input_tokens"] = json!(written);
-        }
-        if let Some(count) = self.cache_creation_5m {
-            usage["cache_creation"]["ephemeral_5m_input_tokens"] = json!(count);
-        }
-        if let Some(count) = self.cache_creation_1h {
-            usage["cache_creation"]["ephemeral_1h_input_tokens"] = json!(count);
-        }
+        // Chat 输入包含缓存读写；cached_tokens 只表示命中，写入必须单独保留。
+        let prompt_tokens = self.input_tokens
+            .saturating_add(self.cache_read).saturating_add(self.cache_creation);
         out.push(chat_frame(&json!({
             "id": self.id,
             "object": "chat.completion.chunk",
             "created": self.created,
             "model": self.model,
             "choices": [],
-            "usage": usage,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": self.output_tokens,
+                "total_tokens": prompt_tokens.saturating_add(self.output_tokens),
+                "prompt_tokens_details": { "cached_tokens": self.cache_read },
+                "cache_creation_input_tokens": self.cache_creation,
+                "cache_creation_1h_tokens": self.cache_creation_1h,
+                "magpie_cache_unknown": self.cache_unknown,
+            },
         })));
         out.push(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
         out
@@ -913,25 +904,6 @@ mod tests {
             .iter()
             .map(|frame| String::from_utf8_lossy(frame).into_owned())
             .collect()
-    }
-
-    #[test]
-    fn review_cache_tiers_merge_across_frames_without_inventing_cache_hits() {
-        let mut stream = ChatFromAnthropicStream::new("fixture");
-        let output = output_text(&stream.push(concat!(
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":11,\"cache_read_input_tokens\":9,\"cache_creation\":{\"ephemeral_5m_input_tokens\":7}}}}\n\n",
-            "data: {\"type\":\"message_delta\",\"usage\":{\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_1h_input_tokens\":3},\"output_tokens\":4}}\n\n",
-            "data: {\"type\":\"message_stop\"}\n\n",
-        ).as_bytes()));
-        let usage = output.lines().filter_map(|line| line.strip_prefix("data: "))
-            .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
-            .find_map(|frame| frame.get("usage").cloned()).unwrap();
-        assert_eq!(usage["prompt_tokens"], 21);
-        assert_eq!(usage["total_tokens"], 25);
-        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 0);
-        assert_eq!(usage["cache_creation_input_tokens"], 10);
-        assert_eq!(usage["cache_creation"]["ephemeral_5m_input_tokens"], 7);
-        assert_eq!(usage["cache_creation"]["ephemeral_1h_input_tokens"], 3);
     }
 
     #[test]

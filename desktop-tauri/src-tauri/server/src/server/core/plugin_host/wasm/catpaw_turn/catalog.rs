@@ -8,7 +8,10 @@ use serde_json::{Map, Value};
 use tokio::time::Instant;
 
 use super::{input::PreparedInput, json_text, network, source};
-use super::super::{fixed_http::FrozenHttpClient, conversation::SourceRef};
+use crate::server::core::{
+    egress::managed::FrozenHttpClient,
+    plugin_host::wasm::conversation::SourceRef,
+};
 
 use super::super::catpaw_account::Account as RowSource;
 
@@ -59,18 +62,18 @@ pub(super) async fn verify(
     source::inspect_account(original, account).await.map_err(|_| unavailable())?;
     // 原独立轮次 worker 持完整出口和账号；取消不把已经开始的目录请求改投另一来源。
     let bytes = tokio::time::timeout_at(deadline, async {
-        #[cfg(test)]
-        let expected_url = super::super::test_support::transport_url(URL);
-        #[cfg(not(test))]
-        let expected_url = URL;
         let mut response = client
             .client()
             .map_err(|_| unavailable())?
             .execute(request.into_catalog()?)
             .await
             .map_err(|_| unavailable())?;
+        #[cfg(not(test))]
+        let expected = URL.to_owned();
+        #[cfg(test)]
+        let expected = super::super::test_support::transport_url(URL);
         if response.status() != reqwest::StatusCode::OK
-            || response.url().as_str() != expected_url
+            || response.url().as_str() != expected
             || response.headers().contains_key("location")
             || response
                 .content_length()

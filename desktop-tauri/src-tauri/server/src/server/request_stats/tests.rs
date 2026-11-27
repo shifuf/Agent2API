@@ -1,159 +1,452 @@
-use super::*;
-use std::sync::mpsc;
-use std::time::Duration;
+use super::{
+    ApiKeyIdentity, NewRequestEntry, RequestQuery, RequestSource, RequestStats, Retention,
+};
+use crate::server::db::Db;
+use serde_json::{json, Value};
 
-fn store() -> (Db, Arc<RequestStats>) {
-    // Production initializes this before accepting requests; do the same here.
-    let _ = crate::server::logging::process_started_at();
-    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
-    let stats = Arc::new(RequestStats::with_db(Some(db.clone()), Retention::default));
-    (db, stats)
+fn temp_stats() -> (tempfile::TempDir, RequestStats) {
+    crate::server::logging::process_started_at();
+    let dir = tempfile::tempdir().expect("应当能创建临时目录");
+    let db = Db::open(&dir.path().join("agent2api.db")).expect("应当能创建临时数据库");
+    (dir, RequestStats::with_db(Some(db), Retention::default))
 }
 
-fn values(options: &Value, name: &str) -> Vec<String> {
-    options[name].as_array().unwrap().iter().map(|value| value.as_str().or_else(|| value["value"].as_str()).unwrap().to_owned()).collect()
+fn source(client: &str, key: &str) -> RequestSource {
+    RequestSource {
+        client: client.into(),
+        api_key: ApiKeyIdentity::from_filter(key).expect("合法的密钥筛选标识"),
+        ..Default::default()
+    }
 }
 
-// A warm filter request must not queue behind an unrelated DB operation.
+fn entry(id: &str, ts: i64) -> NewRequestEntry {
+    let mut entry = NewRequestEntry::new("public-model", 200);
+    entry.id = id.into();
+    entry.ts = Some(ts);
+    entry.provider = Some("test-provider".into());
+    entry.upstream_model = "wire-model".into();
+    entry.source = source("zcode", "key:a");
+    entry.prompt_tokens = 8;
+    entry.completion_tokens = 2;
+    entry.total_tokens = 10;
+    entry
+}
+
+fn ids(stats: &RequestStats, query: RequestQuery) -> Vec<String> {
+    let page = stats.query_requests(&query);
+    let rows = page["entries"].as_array().expect("请求记录应为数组");
+    rows.iter()
+        .map(|row| row["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn seed() -> (tempfile::TempDir, RequestStats, i64) {
+    let (dir, stats) = temp_stats();
+    let now = crate::server::logging::now_ms();
+    stats.record(entry("ok", now));
+    let mut test = entry("test", now);
+    test.is_test = true;
+    stats.record(test);
+    stats.record_started(
+        "running",
+        now,
+        "public-model",
+        "public-model",
+        "",
+        &source("zcode", "key:a"),
+        false,
+    );
+    let mut failed = entry("failed", now);
+    failed.error = Some("回答中途断开".into());
+    failed.source = source("codex", "env");
+    stats.record(failed);
+    let mut unknown = entry("unknown", now);
+    unknown.source = RequestSource::default();
+    unknown.provider = Some("other-provider".into());
+    stats.record(unknown);
+    (dir, stats, now)
+}
+
 #[test]
-fn upstream_compat_warm_filter_cache_avoids_database_lock() {
-    let (db, stats) = store();
-    stats.record(NewRequestEntry::new("cached-model", 200));
-    assert_eq!(values(&stats.filter_options(), "models"), ["cached-model"]);
-    let (locked_send, locked_receive) = mpsc::channel();
-    let (unlock_send, unlock_receive) = mpsc::channel();
-    let holder = std::thread::spawn(move || db.with(|_| {
-        locked_send.send(()).unwrap();
-        unlock_receive.recv().unwrap();
-    }));
-    locked_receive.recv().unwrap();
-    let (send, receive) = mpsc::channel();
-    let reader = std::thread::spawn(move || send.send(stats.filter_options()).unwrap());
-    let result = receive.recv_timeout(Duration::from_secs(1));
-    unlock_send.send(()).unwrap();
-    holder.join().unwrap();
-    reader.join().unwrap();
-    assert!(result.is_ok(), "cached filters waited for the database lock");
-    assert_eq!(values(&result.unwrap(), "models"), ["cached-model"]);
+fn default_query_keeps_test_running_and_completed_rows() {
+    let (_dir, stats, _) = seed();
+    let page = stats.query_requests(&RequestQuery::default());
+    assert_eq!(page["total"], 5);
+    assert_eq!(page["matched"], 5);
+    assert_eq!(page["running"], 1);
+    assert_eq!(
+        ids(&stats, RequestQuery::default()),
+        ["unknown", "failed", "running", "test", "ok"]
+    );
 }
 
 #[test]
-fn upstream_compat_new_filter_dimensions_appear_after_committed_writes() {
-    let (_, stats) = store();
-    stats.record(NewRequestEntry::new("old", 200));
-    let _ = stats.filter_options();
-    let mut entry = NewRequestEntry::new("alias", 200);
-    entry.upstream_model = "actual".into();
-    entry.provider = Some("new-provider".into());
-    entry.source = RequestSource {
-        client: "fixture-client".into(),
-        api_key: ApiKeyIdentity { source: "key".into(), id: "fixture".into(), name: "Fixture key".into() },
+fn client_filter_distinguishes_missing_identity_from_no_filter() {
+    let (_dir, stats, _) = seed();
+    for (client, expected) in [
+        ("zcode", vec!["running", "test", "ok"]),
+        ("codex", vec!["failed"]),
+        ("", vec!["unknown"]),
+    ] {
+        assert_eq!(
+            ids(
+                &stats,
+                RequestQuery {
+                    client: Some(client.into()),
+                    ..Default::default()
+                }
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn api_key_filters_distinguish_managed_environment_anonymous_and_unknown() {
+    let (_dir, stats) = temp_stats();
+    let now = crate::server::logging::now_ms();
+    for (i, key) in ["key:a", "key:b", "env", "none", "unknown"]
+        .iter()
+        .enumerate()
+    {
+        let mut item = entry(key, now + i as i64);
+        item.source = source("zcode", key);
+        stats.record(item);
+    }
+    for key in ["key:a", "key:b", "env", "none", "unknown"] {
+        assert_eq!(
+            ids(
+                &stats,
+                RequestQuery {
+                    api_key: Some(key.into()),
+                    ..Default::default()
+                }
+            ),
+            [key]
+        );
+    }
+}
+
+#[test]
+fn production_and_completed_filters_work_independently_and_together() {
+    let (_dir, stats, _) = seed();
+    assert_eq!(
+        ids(
+            &stats,
+            RequestQuery {
+                production_only: true,
+                ..Default::default()
+            }
+        ),
+        ["unknown", "failed", "running", "ok"]
+    );
+    assert_eq!(
+        ids(
+            &stats,
+            RequestQuery {
+                completed_only: true,
+                ..Default::default()
+            }
+        ),
+        ["unknown", "failed", "test", "ok"]
+    );
+    let query = RequestQuery {
+        production_only: true,
+        completed_only: true,
         ..Default::default()
     };
-    stats.record(entry);
-    let options = stats.filter_options();
-    assert_eq!(values(&options, "models"), ["actual", "alias", "old"]);
-    assert_eq!(options["providers"][0]["id"], "new-provider");
-    assert!(values(&options, "clients").contains(&"fixture-client".to_owned()));
-    assert!(values(&options, "apiKeys").contains(&"key:fixture".to_owned()));
+    let page = stats.query_requests(&query);
+    assert_eq!(page["total"], 5);
+    assert_eq!(page["matched"], 3);
+    assert_eq!(page["running"], 0);
+    assert_eq!(ids(&stats, query), ["unknown", "failed", "ok"]);
 }
 
 #[test]
-fn upstream_compat_running_rows_refresh_filter_dimensions() {
-    let (_, stats) = store();
-    let _ = stats.filter_options();
-    stats.record_started("running-fixture", now_ms(), "alias", "", "", &RequestSource { client: "new-client".into(), ..Default::default() }, false);
-    let _ = stats.filter_options();
-    let progress = RunningProgress {
-        provider: "running-provider".into(), upstream_model: "running-actual".into(),
-        account_id: String::new(), account_name: String::new(), upstream_reasoning: String::new(),
-        attempts: 1, first_response_ms: None, phase: "connecting".into(), phase_started_at: None,
-        attempt_details: Vec::new(), route: None, sensitive_hits: Vec::new(),
+fn all_filters_compose_without_losing_the_new_fields() {
+    let (_dir, stats, now) = seed();
+    let query = RequestQuery {
+        offset: 0,
+        limit: Some(1),
+        model: Some("wire-model".into()),
+        provider: Some("test-provider".into()),
+        client: Some("zcode".into()),
+        api_key: Some("key:a".into()),
+        production_only: true,
+        completed_only: true,
+        status: Some("ok".into()),
+        start: Some(now),
+        end: Some(now + 5),
+        origin: None,
+        list_only: false,
     };
-    stats.update_running("running-fixture", &progress);
-    let options = stats.filter_options();
-    assert_eq!(values(&options, "models"), ["alias", "running-actual"]);
-    assert_eq!(options["providers"][0]["id"], "running-provider");
-    assert!(values(&options, "clients").contains(&"new-client".to_owned()));
+    let page = stats.query_requests(&query);
+    assert_eq!(page["total"], 5);
+    assert_eq!(page["matched"], 1);
+    assert_eq!(page["running"], 0);
+    assert_eq!(ids(&stats, query), ["ok"]);
 }
 
 #[test]
-fn upstream_compat_clear_and_prune_remove_obsolete_filter_values() {
-    let db = Db::open(std::path::Path::new(":memory:")).unwrap();
-    let stats = RequestStats::with_db(Some(db), || Retention { request_days: 7, ..Retention::default() });
-    stats.record(NewRequestEntry::new("old", 200));
-    let _ = stats.filter_options();
-    stats.clear_requests(&RequestQuery::default(), false).unwrap();
-    assert!(values(&stats.filter_options(), "models").is_empty());
-    let mut expired = NewRequestEntry::new("expired", 200);
-    expired.ts = Some(1);
-    stats.record(expired);
-    let _ = stats.filter_options();
-    stats.prune();
-    assert!(values(&stats.filter_options(), "models").is_empty());
-}
-
-#[test]
-fn upstream_compat_full_model_list_does_not_hide_other_new_dimensions() {
-    let (_, stats) = store();
-    for n in 0..201 { stats.record(NewRequestEntry::new(format!("model-{n:03}"), 200)); }
-    assert_eq!(values(&stats.filter_options(), "models").len(), 200);
-    let mut entry = NewRequestEntry::new("model-000", 200);
-    entry.provider = Some("new-provider".into());
-    entry.source.client = "new-client".into();
-    stats.record(entry);
-    let options = stats.filter_options();
-    assert_eq!(options["providers"][0]["id"], "new-provider");
-    assert!(values(&options, "clients").contains(&"new-client".to_owned()));
-}
-
-#[test]
-fn upstream_compat_filter_cache_sees_other_writes_on_the_shared_connection() {
-    let (db, stats) = store();
-    stats.record(NewRequestEntry::new("old", 200));
-    assert_eq!(values(&stats.filter_options(), "models"), ["old"]);
-    // Migration and administrative operations can write through Db directly.
-    db.with(|conn| conn.execute("UPDATE requests SET model = 'imported'", []).unwrap());
-    assert_eq!(values(&stats.filter_options(), "models"), ["imported"]);
-}
-
-#[test]
-fn upstream_compat_filter_cache_rechecks_external_commits_after_the_short_window() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let directory = std::env::temp_dir().join(format!("agent2api-filter-external-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    std::fs::create_dir_all(&directory).unwrap();
-    {
-        let db = Db::open(&directory.join("agent2api.db")).unwrap();
-        let stats = RequestStats::with_db(Some(db.clone()), Retention::default);
-        stats.record(NewRequestEntry::new("old", 200));
-        let now = Instant::now();
-        let original = db.with(|conn| stats.filters.read_or_compute(conn, now, db.request_revision()).unwrap()).unwrap();
-        assert_eq!(original.models, ["old"]);
-        let external = rusqlite::Connection::open(db.file()).unwrap();
-        external.execute("UPDATE requests SET model = 'external'", []).unwrap();
-        assert_eq!(stats.filters.read_fast(now + Duration::from_secs(14), db.request_revision()).unwrap().models, ["old"]);
-        assert!(stats.filters.read_fast(now + Duration::from_secs(15), db.request_revision()).is_none());
-        let refreshed = db.with(|conn| stats.filters.read_or_compute(conn, now + Duration::from_secs(15), db.request_revision()).unwrap()).unwrap();
-        assert_eq!(refreshed.models, ["external"]);
-        assert!(stats.filters.read_fast(now + Duration::from_secs(29), db.request_revision()).is_some(), "an unchanged DB check must renew the lock-free window");
+fn success_error_and_running_filters_match_the_displayed_state() {
+    let (_dir, stats, _) = seed();
+    for (status, expected) in [
+        ("ok", vec!["unknown", "test", "ok"]),
+        ("error", vec!["failed"]),
+        ("running", vec!["running"]),
+    ] {
+        assert_eq!(
+            ids(
+                &stats,
+                RequestQuery {
+                    status: Some(status.into()),
+                    ..Default::default()
+                }
+            ),
+            expected
+        );
     }
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
-fn upstream_compat_filter_cache_refreshes_ranking_after_active_traffic() {
-    use std::time::Instant;
-    let (db, stats) = store();
-    stats.record(NewRequestEntry::new("alpha", 200));
-    stats.record(NewRequestEntry::new("beta", 200));
-    let now = Instant::now();
-    let original = db.with(|conn| stats.filters.read_or_compute(conn, now, db.request_revision()).unwrap()).unwrap();
-    assert_eq!(original.models, ["alpha", "beta"]);
-    for _ in 0..3 { stats.record(NewRequestEntry::new("beta", 200)); }
-    let cached = db.with(|conn| stats.filters.read_or_compute(conn, now + Duration::from_secs(299), db.request_revision()).unwrap()).unwrap();
-    assert_eq!(cached.models, ["alpha", "beta"]);
-    let refreshed = db.with(|conn| stats.filters.read_or_compute(conn, now + Duration::from_secs(300), db.request_revision()).unwrap()).unwrap();
-    assert_eq!(refreshed.models, ["beta", "alpha"]);
+fn model_filter_matches_both_public_and_upstream_names() {
+    let (_dir, stats, _) = seed();
+    let query = |model: &str| RequestQuery {
+        model: Some(model.into()),
+        completed_only: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        ids(&stats, query("public-model")),
+        ids(&stats, query("wire-model"))
+    );
+    assert!(ids(&stats, query("unrelated-model")).is_empty());
+}
+
+#[test]
+fn time_range_is_start_inclusive_and_end_exclusive() {
+    let (_dir, stats) = temp_stats();
+    let now = crate::server::logging::now_ms();
+    for (id, ts) in [
+        ("before", now - 3),
+        ("start", now - 2),
+        ("inside", now - 1),
+        ("end", now),
+    ] {
+        stats.record(entry(id, ts));
+    }
+    assert_eq!(
+        ids(
+            &stats,
+            RequestQuery {
+                start: Some(now - 2),
+                end: Some(now),
+                ..Default::default()
+            }
+        ),
+        ["inside", "start"]
+    );
+}
+
+#[test]
+fn pagination_is_stable_for_equal_timestamps_and_preserves_counts() {
+    let (_dir, stats) = temp_stats();
+    let now = crate::server::logging::now_ms();
+    for id in ["first", "second", "third"] {
+        stats.record(entry(id, now));
+    }
+    assert_eq!(
+        ids(
+            &stats,
+            RequestQuery {
+                offset: 1,
+                limit: Some(1),
+                ..Default::default()
+            }
+        ),
+        ["second"]
+    );
+    assert_eq!(
+        ids(
+            &stats,
+            RequestQuery {
+                limit: Some(0),
+                ..Default::default()
+            }
+        ),
+        ["third"]
+    );
+    let page = stats.query_requests(&RequestQuery {
+        offset: 9,
+        ..Default::default()
+    });
+    assert_eq!(page["entries"], json!([]));
+    assert_eq!(page["matched"], 3);
+}
+
+#[test]
+fn finishing_a_running_request_reuses_the_row_and_is_idempotent() {
+    let (_dir, stats) = temp_stats();
+    let now = crate::server::logging::now_ms();
+    let item = entry("same-request", now);
+    stats.record_started(
+        &item.id,
+        now,
+        &item.model,
+        &item.model,
+        "",
+        &item.source,
+        false,
+    );
+    stats.record_started(
+        &item.id,
+        now,
+        &item.model,
+        &item.model,
+        "",
+        &item.source,
+        false,
+    );
+    let started = stats.query_requests(&RequestQuery::default());
+    assert_eq!(started["total"], 1);
+    assert_eq!(started["running"], 1);
+    stats.record(item.clone());
+    stats.record(item);
+    let page = stats.query_requests(&RequestQuery::default());
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["running"], 0);
+    assert_eq!(page["entries"][0]["totalTokens"], 10);
+    let summary = stats.usage_summary("all", None, None, None, None);
+    assert_eq!(summary["overview"]["requests"], 1);
+    assert_eq!(summary["overview"]["tokens"], 10);
+}
+
+#[test]
+fn model_tests_and_running_requests_do_not_inflate_usage_reports() {
+    let (_dir, stats, _) = seed();
+    let summary = stats.usage_summary("all", None, None, None, None);
+    assert_eq!(summary["overview"]["requests"], 3);
+    assert_eq!(summary["overview"]["successful"], 2);
+    assert_eq!(summary["overview"]["tokens"], 20);
+}
+
+#[test]
+fn legacy_cache_write_json_remains_compatible_with_creation_tokens() {
+    let record = entry("legacy-cache", crate::server::logging::now_ms()).normalize();
+    let mut payload = serde_json::to_value(record).unwrap();
+    let fields = payload.as_object_mut().unwrap();
+    fields.remove("cacheCreationTokens");
+    fields.remove("cacheCreation1hTokens");
+    fields.insert("cacheWriteTokens".into(), json!(120));
+    fields.insert("cacheWrite1hTokens".into(), json!(30));
+    let loaded: super::record::RequestEntry = serde_json::from_value(payload).unwrap();
+    assert_eq!(loaded.cache_creation_tokens, 120);
+    assert_eq!(loaded.cache_creation_1h_tokens, 30);
+    let encoded = serde_json::to_value(loaded).unwrap();
+    assert_eq!(encoded["cacheCreationTokens"], 120);
+    assert_eq!(encoded["cacheCreation1hTokens"], 30);
+}
+
+#[test]
+fn historical_pricing_evidence_and_cny_survive_sql_and_reports() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::server::db::schema::migrate(&conn).unwrap();
+    let mut historical = entry("historical-quote", crate::server::logging::now_ms()).normalize();
+    historical.cost_usd = Some(2.0);
+    historical.pricing_evidence = json!({"quote":{"fx":{"rate":7.25},"source":"historical"}});
+    super::sql::insert_request(&conn, &historical).unwrap();
+    let loaded = conn.query_row(&format!("SELECT {} FROM requests", super::sql::REQUEST_COLUMNS), [], super::sql::decode_request).unwrap();
+    assert_eq!(loaded.pricing_evidence, historical.pricing_evidence);
+    let settings = crate::server::core::model_pricing::ModelPricingSettings::default();
+    let detail = super::report::entry_json(&loaded, &settings);
+    assert_eq!(detail["costUsd"], 2.0);
+    assert_eq!(detail["costCny"], 14.5);
+    let list = conn.query_row(&format!("SELECT {} FROM requests", super::sql::REQUEST_LIST_SELECT), [], super::sql::decode_request_list).unwrap();
+    let listed = super::report::list_entry_json(&list, &settings);
+    assert_eq!(listed["pricingEvidence"], historical.pricing_evidence);
+    assert_eq!(listed["costCny"], 14.5);
+    let key = super::clock::date_key(super::clock::day_of(historical.ts));
+    let mut day = super::record::DailyEntry::new(key.clone());
+    super::aggregate::fold_into_daily(&mut day, &historical);
+    let mut auxiliary = historical.clone();
+    auxiliary.route = json!({"visionParent":"main-request"});
+    super::aggregate::fold_into_daily(&mut day, &auxiliary);
+    assert_eq!(day.requests, 1);
+    assert_eq!(day.auxiliary_requests, 1);
+    assert_eq!(day.priced_requests, 2);
+    assert_eq!(day.cost_cny, 29.0);
+    super::daily::upsert_daily(&conn, &day).unwrap();
+    let reloaded = super::daily::select_daily_row(&conn, &key).unwrap().unwrap();
+    assert_eq!(reloaded.cost_cny, 29.0);
+    assert_eq!(reloaded.priced_requests, 2);
+    assert_eq!(reloaded.auxiliary_requests, 1);
+}
+
+#[test]
+fn client_detail_returns_api_keys_and_models() {
+    let (_dir, stats, _) = seed();
+    let zcode = stats.usage_summary("all", None, None, Some("zcode"), None);
+    let detail = &zcode["clientDetail"];
+    assert_eq!(detail["id"], "zcode");
+    assert_eq!(detail["requests"], 1);
+    assert_eq!(detail["totalTokens"], 10);
+    assert_eq!(detail["apiKeysComplete"], true);
+    assert_eq!(detail["modelsComplete"], true);
+    assert_eq!(detail["apiKeys"][0]["filterValue"], "key:a");
+    assert_eq!(detail["models"][0]["model"], "wire-model");
+
+    let unknown = stats.usage_summary("all", None, None, Some(""), None);
+    assert_eq!(unknown["clientDetail"]["id"], "");
+    assert_eq!(unknown["clientDetail"]["requests"], 1);
+    assert_eq!(unknown["clientDetail"]["apiKeys"][0]["filterValue"], "unknown");
+    assert_eq!(unknown["clientDetail"]["models"][0]["model"], "wire-model");
+}
+
+#[test]
+fn failed_rows_clear_usage_but_keep_failure_and_first_response() {
+    let (_dir, stats) = temp_stats();
+    let now = crate::server::logging::now_ms();
+    for (id, status, error) in [
+        ("http-error", 429, None),
+        ("stream-error", 200, Some("中途断流".to_string())),
+    ] {
+        let mut item = entry(id, now);
+        item.status = status;
+        item.error = error.clone();
+        item.cache_read_tokens = 4;
+        item.credit = Some(1.5);
+        item.first_response_ms = Some(12);
+        stats.record(item);
+    }
+    let page = stats.query_requests(&RequestQuery::default());
+    for row in page["entries"].as_array().unwrap() {
+        for field in [
+            "promptTokens",
+            "completionTokens",
+            "totalTokens",
+            "cacheReadTokens",
+        ] {
+            assert_eq!(row[field], 0);
+        }
+        assert!(row["credit"].is_null());
+        assert_eq!(row["firstResponseMs"], 12);
+    }
+    assert_eq!(page["entries"][0]["error"], "中途断流");
+}
+
+#[test]
+fn missing_database_returns_the_same_empty_query_shape() {
+    let stats = RequestStats::with_db(None, Retention::default);
+    let page: Value = stats.query_requests(&RequestQuery::default());
+    assert_eq!(
+        page,
+        json!({
+            "entries": [],
+            "total": 0,
+            "matched": 0,
+            "running": 0,
+            "currency": "usd",
+            "exchangeRate": 7.2
+        })
+    );
 }

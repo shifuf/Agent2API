@@ -3,7 +3,7 @@ import { Alert, Button, Checkbox, Label } from '@ui'
 import { SearchableSelect } from './searchable-select'
 import { PluginPermissions } from './plugins-permissions'
 import type { PackProvider } from './plugins'
-import type { PluginTranslate } from './plugin-controls'
+import type { PluginTranslate } from './plugins-store'
 
 type Candidate = { id: string; pack: string; provider: string; version: string; digest: string; operations: string[] }
 type Grant = Candidate & { callerPack: string; callerDigest: string }

@@ -64,6 +64,11 @@ impl Fixture {
         let saved = store.plugin_upsert_account("wasm-tools-user", provider, "Tools acceptance",
             &secret, &json!({"uid":"wasm-tools-user", "hasSession":true}), false).unwrap();
         let account = saved["id"].as_str().unwrap().to_string();
+        if provider == "chatglm" {
+            let refreshed = adapter.refresh_models(&store, &account, true).await;
+            assert!(refreshed.refreshed, "refresh the official guest's account catalog: {:?}; requests: {:?}",
+                refreshed.message, http.requests.lock().unwrap());
+        }
         let key = api_keys::add("official-tools-acceptance", None, vec![provider.into()], Vec::new()).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {}", key.key).parse().unwrap());
@@ -130,7 +135,7 @@ impl Fixture {
     async fn close(mut self) {
         self.adapter.take();
         plugin_host::shutdown_all().await;
-        assert!(self.host.wasm_shutdown_complete(), "complete tools must release the actual host lease");
+        assert!(self.host.local_shutdown_complete(), "complete tools must release the actual host lease");
         registry::remove(self.provider);
     }
 }
@@ -176,6 +181,7 @@ fn emulated_reply(request: &RecordedRequest) -> Reply {
 
 async fn read_outcome(outcome: ForwardOutcome, public: &str) -> (Value, Value, String) {
     match outcome {
+        ForwardOutcome::Native(_) => panic!("official tool fixture must produce the standard chat protocol"),
         ForwardOutcome::Completion {body} => {
             assert_eq!(body["model"], public);
             assert!(body.get("error").is_none());
@@ -324,8 +330,9 @@ async fn official_chatglm_invalid_tool_response_preserves_no_retry() {
     let body = tool_body("glm-5.3-flash");
     let telemetry = Arc::new(RequestTelemetry::with_id());
     let source = config::model_key_source::capture(&fixture.headers).unwrap();
-    let outcome = config::model_key_source::scope(source,fixture.adapter.as_ref().unwrap()
-        .forward_conversation(&fixture.store,&fixture.account,&body,&fixture.headers,None,false,&telemetry)).await;
+    telemetry.install_model_key_source(Ok(source));
+    let outcome = fixture.adapter.as_ref().unwrap()
+        .forward_conversation(&fixture.store,&fixture.account,&body,&fixture.headers,None,false,&telemetry).await;
     let error = match outcome {Err(error) => error,Ok(_) => panic!("wrong nonce must not become executable tools")};
     assert_eq!(error.status_code,502,"the guest request must reach the actual response validator: {error:?}");
     assert_eq!(error.code.as_deref(),Some("web_tools_invalid_response"));
@@ -364,7 +371,7 @@ async fn original_rpc_stream_final_error_overrides_the_preliminary_public_frame(
         tx.send(plugin_host::StreamEvent::Chunk(b"data: {\"error\":{\"message\":\"preliminary public error\"}}\n\n".to_vec())).unwrap();
         tx.send(plugin_host::StreamEvent::Done(Err(proto::WireError::with_code("original terminal failure", code)))).unwrap();
         drop(tx);
-        let source = plugin_host::RpcStream::with_pending("chatglm", fixture.host.clone(), -1, events, None,
+        let source = plugin_host::RpcStream::with_pending("chatglm", fixture.host.clone(), -1, events.into(), None,
             Arc::new(RequestTelemetry::new()), Some(failure.clone()), None, fixture.host.activity.acquire().unwrap());
         let _: Vec<_> = source.collect().await;
         let guard = failure.lock().unwrap();

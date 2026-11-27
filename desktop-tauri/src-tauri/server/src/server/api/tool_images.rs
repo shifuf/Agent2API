@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::{body::Bytes, extract::{Path, State}, http::{header, HeaderMap}, response::Response};
+use axum::{extract::{Path, State}, http::{header, HeaderMap}, response::Response};
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -15,29 +15,17 @@ pub(super) fn database(state: &ServerState) -> Result<Db, GatewayError> {
     state.db().cloned().ok_or_else(|| GatewayError::with_status(503, "图片任务数据库不可用，未发送生图请求"))
 }
 
-async fn manage(state: ServerState, headers: HeaderMap, update: Option<Option<Bytes>>) -> Response {
-    if !crate::server::access::session_valid(&headers) { return crate::server::errors::management_error(403, "需要管理员登录"); }
-    let result = blocking::run(move || match update {
-        None => Ok(image_config::view(state.store())),
-        Some(bytes) => {
-            let config = bytes.map(|bytes| serde_json::from_slice(&bytes).map_err(|_| GatewayError::bad_request("仅可指定已发布的图片路由组与限额"))).transpose()?;
-            image_config::save(state.store(), config)
-        }
-    }).await.and_then(|result| result);
-    match result { Ok(value) => crate::server::http::ok_json(value), Err(error) => crate::server::errors::management_error(error.status_code, error.message) }
-}
-pub async fn config(State(state): State<ServerState>, headers: HeaderMap) -> Response { manage(state, headers, None).await }
-pub async fn save(State(state): State<ServerState>, headers: HeaderMap, bytes: Bytes) -> Response { manage(state, headers, Some(Some(bytes))).await }
-pub async fn clear(State(state): State<ServerState>, headers: HeaderMap) -> Response { manage(state, headers, Some(None)).await }
-
 pub(super) fn owner(headers: &HeaderMap) -> Result<String, GatewayError> {
     use hmac::{Hmac, Mac};
     let key = headers.get("x-api-key").and_then(|value| value.to_str().ok()).or_else(|| {
         headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok()).map(crate::server::http::strip_bearer_prefix)
     }).filter(|key| !key.is_empty()).ok_or_else(|| GatewayError::with_status(401, "图片任务需要网关 Key"))?;
-    let secret = crate::server::core::crypto::secret_key(crate::server::core::crypto::SecretScope::Accounts).map_err(|_| GatewayError::with_status(503, "图片任务归属不可用"))?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| GatewayError::new("图片任务归属不可用"))?;
-    mac.update(b"tool-image-owner\0"); mac.update(key.as_bytes()); Ok(format!("{:x}", mac.finalize().into_bytes()))
+    let secret = crate::server::core::crypto::secret_key(crate::server::core::crypto::SecretScope::Accounts)
+        .map_err(|_| GatewayError::with_status(503, "图片任务身份密钥不可用"))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&secret).map_err(|_| GatewayError::new("图片任务身份密钥不可用"))?;
+    mac.update(b"tool-image-owner\0");
+    mac.update(key.as_bytes());
+    Ok(format!("{:x}", mac.finalize().into_bytes()))
 }
 
 pub(super) fn validate_origin(headers: &HeaderMap) -> Result<(), GatewayError> {
@@ -52,13 +40,24 @@ pub(super) fn validate_origin(headers: &HeaderMap) -> Result<(), GatewayError> {
     if valid { Ok(()) } else { Err(GatewayError::with_status(403, "图片 MCP 拒绝不受信任的网页来源")) }
 }
 
-fn authorize(state: &ServerState, job: &ImageJob, owner: &str, scope: Option<&KeyScope>) -> Result<(), GatewayError> {
-    let operation = if job.operation == "edit" { ImageOperation::Edit } else { ImageOperation::Generate };
-    if job.owner != owner || job.result.as_ref().and_then(|result| result["actual_provider"].as_str()).is_some_and(|provider| !crate::server::core::key_scope::allows_provider(scope, provider))
-        || image_config::allowed(state.store(), &job.model, scope, operation).is_err() {
+pub(super) fn authorize(store: &crate::server::core::account_store::AccountStore, job: &ImageJob, owner: &str, scope: Option<&KeyScope>) -> Result<(), GatewayError> {
+    let target = image_config::ImageTarget { provider: job.provider.clone(), model: job.model.clone(), account_id: job.account_id.clone() };
+    let provider_allowed = if image_config::is_group(&target) {
+        image_config::validate_scope(store, &target, scope, if job.operation == "edit" { ImageOperation::Edit } else { ImageOperation::Generate }).is_ok()
+    } else { crate::server::core::key_scope::allows_provider(scope, &job.provider) };
+    let actual_allowed = job.result.as_ref().and_then(|result| result["actual_provider"].as_str())
+        .is_none_or(|provider| crate::server::core::key_scope::allows_provider(scope, provider));
+    if job.owner != owner || !provider_allowed || !actual_allowed
+        || !crate::server::core::key_scope::allows_model(scope, &job.model) {
         return Err(GatewayError::with_status(404, "图片任务不存在或无权访问").with_code("image_job_not_found"));
     }
     Ok(())
+}
+
+fn authorize_current(store: &crate::server::core::account_store::AccountStore, job: &ImageJob,
+    headers: &HeaderMap, owner: &str) -> Result<(), GatewayError> {
+    let current = super::model_access::authenticate(headers, "image-generation")?;
+    authorize(store, job, owner, current.scope.as_ref())
 }
 
 fn text<'a>(args: &'a Value, key: &str) -> &'a str {
@@ -118,7 +117,7 @@ pub(crate) async fn call(name: &str, args: &Value, ctx: &McpRequestContext) -> R
     } else {
         submit(name, args, ctx, &db).await?
     };
-    authorize(&ctx.state, &job, &ctx.owner, ctx.scope.as_ref())?;
+    authorize(&ctx.store, &job, &ctx.owner, ctx.scope.as_ref())?;
     if !text(args, "request_id").is_empty() && text(args, "request_id") != job.request_id {
         return Err(GatewayError::bad_request("job_id 与 request_id 不属于同一任务"));
     }
@@ -129,9 +128,8 @@ pub(crate) async fn call(name: &str, args: &Value, ctx: &McpRequestContext) -> R
         let id = job.id.clone();
         job = blocking::run(move || image_jobs::get(&db_copy, &id)).await??;
     }
-    let current = super::model_access::authenticate(&ctx.headers, "image-generation")?;
-    authorize(&ctx.state, &job, &ctx.owner, current.scope.as_ref())?;
-    super::tool_image_results::mcp_result(&db, &job, "", preview).await
+    authorize_current(&ctx.store, &job, &ctx.headers, &ctx.owner)?;
+    super::tool_image_results::mcp_result(&db, &job, &ctx.base_url, preview).await
 }
 
 async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> Result<ImageJob, GatewayError> {
@@ -152,13 +150,12 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
     let owner = ctx.owner.clone();
     let request_copy = request_id.clone();
     if let Some(job) = blocking::run(move || image_jobs::find_request(&db_copy, &owner, &request_copy)).await?? {
-        authorize(&ctx.state, &job, &ctx.owner, ctx.scope.as_ref())?;
+        authorize(&ctx.store, &job, &ctx.owner, ctx.scope.as_ref())?;
         return same_request(job, &hash);
     }
     let config = image_config::load().ok_or_else(|| GatewayError::with_status(503, "尚未配置图片生成服务"))?;
     let target = image_config::target(&config, operation)?.clone();
-    let scope = ctx.scope.clone();
-    image_config::allowed(&ctx.store, &target.model, scope.as_ref(), operation)?;
+    let scope = image_config::restrict_scope(ctx.scope.as_ref(), &target)?;
     let mut payload = json!({ "model": target.model, "response_format": "b64_json", "output_format": "png" });
     for key in ["prompt", "n", "size", "quality", "output_format"] {
         if let Some(value) = args.get(key) { payload[key] = value.clone(); }
@@ -170,17 +167,17 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
         let mut images = Vec::new();
         let mut inline_bytes = 0usize;
         for reference in references {
-            let reference = reference.as_str().ok_or_else(|| GatewayError::bad_request("参考图必须是同一 Key 的图片 ID 或 data URI"))?;
+            let reference = reference.as_str().ok_or_else(|| GatewayError::bad_request("参考图必须是图片 ID、URL 或 data URI"))?;
             if let Some(id) = reference.strip_prefix("image:") {
                 let id = id.to_string();
                 let db_copy = db.clone();
                 let (job, file) = blocking::run(move || image_jobs::read_file(&db_copy, &id)).await??;
-                authorize(&ctx.state, &job, &ctx.owner, ctx.scope.as_ref())?;
+                authorize(&ctx.store, &job, &ctx.owner, ctx.scope.as_ref())?;
                 if file.bytes.len() > 10 * 1024 * 1024 { return Err(GatewayError::bad_request("参考图片超过 10 MiB，请先缩小图片")); }
                 images.push(json!({ "image_url": format!("data:{};base64,{}", file.mime, base64::engine::general_purpose::STANDARD.encode(file.bytes)) }));
             } else {
-                if !reference.starts_with("data:image/") {
-                    return Err(GatewayError::bad_request("仅接受内联图片或同一网关 Key 生成的图片编号"));
+                if !(reference.starts_with("https://") || reference.starts_with("http://") || reference.starts_with("data:image/")) {
+                    return Err(GatewayError::bad_request("HTTP MCP 不能读取本机文件路径，请使用本地桥接"));
                 }
                 images.push(json!({ "image_url": reference }));
             }
@@ -196,6 +193,13 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
     if count > config.max_images.clamp(1, 10) {
         return Err(GatewayError::bad_request("生成数量超过管理员设置的单次上限"));
     }
+    let store = ctx.store.clone();
+    let target_copy = target.clone();
+    let scope_copy = scope.clone();
+    blocking::run(move || {
+        image_config::validate_target(&store, &target_copy, operation)?;
+        image_config::validate_scope(&store, &target_copy, Some(&scope_copy), operation)
+    }).await??;
     let timeout = tool_services::timeout_seconds(tool_services::IMAGE_GENERATION_SERVICE_ID);
     let db = db.clone();
     let db_copy = db.clone();
@@ -204,7 +208,6 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
     let state = ctx.state.clone();
     let source = ctx.source.clone();
     let key_source = ctx.key_source.clone();
-    let headers = ctx.headers.clone();
     // 受理落库与启动独立于 HTTP 请求生命周期，断线不能只留下占位记录。
     let acceptance = tokio::spawn(async move {
         let (job, created) = blocking::run(move || image_jobs::create(&db_copy, &config, image_jobs::NewJob {
@@ -214,8 +217,8 @@ async fn submit(name: &str, args: &Value, ctx: &McpRequestContext, db: &Db) -> R
         if created {
             let id = job.id.clone();
             tokio::spawn(async move {
-                run_job(state, db, id, payload, ImageExecution { operation, headers,
-                    scope, key_source: Some(key_source), source, started_at: logging::now_ms(), is_assistant: false }, timeout).await;
+                run_job(state, db, id, payload, ImageExecution { operation, headers: HeaderMap::new(),
+                    scope: Some(scope), key_source, source, started_at: logging::now_ms(), is_assistant: false }, timeout).await;
             });
         }
         Ok::<_, GatewayError>(job)
@@ -235,13 +238,37 @@ fn name_for(operation: ImageOperation) -> &'static str {
     match operation { ImageOperation::Generate => "generate", ImageOperation::Edit => "edit" }
 }
 
-async fn run_job(state: ServerState, db: Db, id: String, payload: Value, input: ImageExecution, timeout: u64) {
-    let mut telemetry = RequestTelemetry::new();
+fn image_job_telemetry(source: Option<Arc<crate::server::config::model_key_source::Source>>) -> Arc<RequestTelemetry> {
+    let mut telemetry = RequestTelemetry::new_with_model_key(source);
     telemetry.ephemeral_image = true;
-    let telemetry = Arc::new(telemetry);
+    Arc::new(telemetry)
+}
+
+fn safe_failure(error: &GatewayError) -> String {
+    format!("图片任务失败（HTTP {}），未再次提交", error.status_code)
+}
+
+async fn run_job(state: ServerState, db: Db, id: String, mut payload: Value, input: ImageExecution, timeout: u64) {
+    let telemetry = image_job_telemetry(input.key_source.clone());
     telemetry.ensure_id(&id);
-    let result = tokio::time::timeout(Duration::from_secs(timeout), images::execute_with_telemetry(&state, payload, input, telemetry.clone())).await
-        .unwrap_or_else(|_| Err(GatewayError::with_status(504, "图片请求超时；未重新提交")));
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let preparation = async {
+        if payload.get("images").is_some() { super::image_input::prepare(&mut payload).await?; }
+        Ok::<_, GatewayError>(())
+    };
+    match tokio::time::timeout(Duration::from_secs(timeout), preparation).await {
+        Ok(Ok(())) => {}
+        result => {
+            let message = match result {
+                Ok(Err(error)) => format!("读取参考图失败（HTTP {}），尚未发起生图请求", error.status_code),
+                _ => "读取参考图超时，尚未发起生图请求".to_string(),
+            };
+            let _ = blocking::run(move || image_jobs::fail(&db, &id, false, &message)).await;
+            return;
+        }
+    }
+    let budget = deadline.saturating_duration_since(Instant::now());
+    let result = images::execute_with_telemetry(&state, payload, input, telemetry.clone(), Some(budget)).await;
     let outcome = match result {
         Ok(response) => {
             let snapshot = telemetry.snapshot();
@@ -250,6 +277,7 @@ async fn run_job(state: ServerState, db: Db, id: String, payload: Value, input: 
             match blocking::run(move || {
                 let (mut metadata, files) = prepare_files(response)?;
                 metadata["actual_account_id"] = json!(snapshot.account_id);
+                metadata["actual_account_name"] = json!(snapshot.account_name);
                 metadata["actual_provider"] = json!(snapshot.provider);
                 metadata["actual_model"] = json!(snapshot.upstream_model);
                 metadata["credit"] = json!(snapshot.credit);
@@ -261,7 +289,7 @@ async fn run_job(state: ServerState, db: Db, id: String, payload: Value, input: 
         }
         Err(error) => {
             let uncertain = telemetry.snapshot().attempts > 0 && !matches!(error.status_code, 400 | 401 | 403 | 404 | 422 | 429);
-            Err((uncertain, format!("图片请求失败（HTTP {}）；未重新提交", error.status_code)))
+            Err((uncertain, safe_failure(&error)))
         }
     };
     if let Err((uncertain, message)) = outcome {
@@ -289,11 +317,8 @@ fn prepare_files(response: Value) -> Result<(Value, Vec<ImageFile>), GatewayErro
         files.push(ImageFile { id: image_jobs::random_id()?, mime, width, height, bytes });
     }
     let mut metadata = json!({});
-    for key in ["created", "points_consumed"] {
-        if let Some(value) = response.get(key).filter(|value| value.is_number()) { metadata[key] = value.clone(); }
-    }
-    for key in ["input_tokens", "output_tokens", "total_tokens"] {
-        if let Some(value) = response["usage"][key].as_u64() { metadata["usage"][key] = json!(value); }
+    for key in ["created", "usage", "points_consumed", "size", "quality", "output_format"] {
+        if let Some(value) = response.get(key) { metadata[key] = value.clone(); }
     }
     Ok((metadata, files))
 }
@@ -304,8 +329,73 @@ pub async fn download(State(state): State<ServerState>, Path(id): Path<String>, 
         let access = super::model_access::authenticate(&headers, "image-generation")?;
         let db = database(&state)?;
         let (job, file) = blocking::run(move || image_jobs::read_file(&db, &id)).await??;
-        authorize(&state, &job, &owner(&headers)?, access.scope.as_ref())?;
+        authorize(state.store(), &job, &owner(&headers)?, access.scope.as_ref())?;
         Ok(super::tool_image_results::file_response(file))
     }
     match run(state, id, headers).await { Ok(response) => response, Err(error) => error.payload_response() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_job_failure_retains_status_without_echoing_private_upstream_diagnostics() {
+        let error = GatewayError::with_status(400, "private-fixture-prompt and upstream account diagnostic");
+        let summary = safe_failure(&error);
+        assert!(summary.contains("400"));
+        assert!(!summary.contains("private-fixture-prompt"));
+        assert!(!summary.contains("upstream account diagnostic"));
+    }
+
+    #[test]
+    fn image_job_telemetry_excludes_raw_capture_without_creating_model_key_authority() {
+        let telemetry = image_job_telemetry(None);
+        assert!(telemetry.ephemeral_image);
+        assert!(telemetry.model_key_source().is_none());
+    }
+
+    #[test]
+    fn image_owner_keeps_the_server_keyed_identity_of_existing_jobs() {
+        let previous = crate::test_support::with_key("account.key", |key| key.replace([7; 32]));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer isolated-owner-key".parse().unwrap());
+        let identity = owner(&headers);
+        crate::test_support::with_key("account.key", |key| *key = previous);
+        assert_eq!(identity.unwrap(), "84a87f35f1f7581d7f571863c408ec9b9989c1739ee75f093bca19704b988a5b");
+        assert!(owner(&HeaderMap::new()).is_err(), "anonymous callers must not get a shared image owner");
+    }
+
+    #[test]
+    fn revoked_key_cannot_receive_an_image_result_authorized_before_waiting() {
+        crate::test_support::isolated(concat!(module_path!(), "::revoked_key_cannot_receive_an_image_result_authorized_before_waiting"), || {
+            use crate::server::{config, core::{account_store::AccountStore, api_keys}};
+            let (db, _temp) = crate::server::db::test_temp::TempDb::open("image-result-key-revocation");
+            config::init(Some(db.clone()));
+            let store = AccountStore::with_db(Some(db));
+            let key = |enabled| json!([{
+                "id":"isolated-image-key", "name":"isolated", "key":"isolated-image-owner-key",
+                "enabled":enabled, "allowedProviders":["isolated-image-provider"], "allowedModels":["Public/Image"]
+            }]);
+            assert!(config::update_raw_field(api_keys::KEY_API_KEYS, key(true)));
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, "Bearer isolated-image-owner-key".parse().unwrap());
+            let source = super::super::model_access::authenticate(&headers, "image-generation").unwrap().key_source.unwrap();
+            let telemetry = image_job_telemetry(Some(source.clone()));
+            assert!(Arc::ptr_eq(&source, telemetry.model_key_source().unwrap()), "image privacy must retain the original model Key authority");
+            let image_owner = owner(&headers).unwrap();
+            let job = ImageJob {
+                id:"isolated-job".into(), owner:image_owner.clone(), request_id:"isolated-request".into(),
+                request_hash:"isolated-hash".into(), operation:"generate".into(), provider:"isolated-image-provider".into(),
+                model:"Public/Image".into(), account_id:String::new(), state:"succeeded".into(),
+                created_at:1, updated_at:2, expires_at:i64::MAX, result:None, error:None,
+            };
+            assert!(authorize_current(&store, &job, &headers, &image_owner).is_ok());
+            assert!(config::update_raw_field(api_keys::KEY_API_KEYS, key(false)));
+            assert!(!source.is_current());
+            let error = authorize_current(&store, &job, &headers, &image_owner).unwrap_err();
+            assert_eq!(error.status_code, 401);
+            assert_eq!(error.code.as_deref(), Some("invalid_api_key"));
+        });
+    }
 }

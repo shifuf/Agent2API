@@ -38,7 +38,7 @@ A estratégia de ordem tenta o primeiro membro disponível e só avança após u
 - [Servidor (Windows / Linux, sem interface)](#servidor-windows--linux-sem-interface)
 - [Docker](#docker)
 - [Verificação e conexão do cliente](#verificação-e-conexão-do-cliente)
-- [Acesso pela rede local](#acesso-pela-rede-local)
+- [Acesso pela rede](#acesso-pela-rede)
 - [Celular](#celular)
 
 ## Qual forma escolher
@@ -75,7 +75,7 @@ Fechar a janela apenas minimiza para a bandeja, e o gateway continua encaminhand
 >
 > **Notas do desktop Linux**: a bandeja depende de `libayatana-appindicator3` (a maioria dos ambientes traz; instale `libayatana-appindicator3-1` e reabra se o ícone não aparecer). Um AppImage precisa do bit de execução antes da primeira execução (`chmod +x`; o app o define automaticamente ao escolher "Abrir instalador"). Atualizações: o deb passa pelo instalador do sistema (ele pede sua senha uma vez), enquanto o AppImage é atualizado substituindo o arquivo.
 >
-> **Diferenças do desktop**: o "importar o estado de login desta máquina" do AutoClaw e do ChatGLM (智谱清言) só existe no Windows (ele lê texto cifrado do DPAPI, então essa seção fica oculta no macOS / Linux); os demais (Raccoon / CatPaw / Cline) leem arquivos em texto puro sob `HOME` e funcionam nas três plataformas. Bandeja, início automático, acesso pela rede local e hospedagem do painel web também funcionam no macOS / Linux.
+> **Diferenças do desktop**: o "importar o estado de login desta máquina" do AutoClaw e do ChatGLM (智谱清言) só existe no Windows (ele lê texto cifrado do DPAPI, então essa seção fica oculta no macOS / Linux); os demais (Raccoon / CatPaw / Cline) leem arquivos em texto puro sob `HOME` e funcionam nas três plataformas. Bandeja, início automático, acesso pela rede e hospedagem do painel web também funcionam no macOS / Linux.
 
 ## Servidor (Windows / Linux, sem interface)
 
@@ -147,7 +147,7 @@ Início no boot, reinício automático após travamento (`Restart=always`) e des
 >
 > Em instalações antigas, baixe um novo pacote do servidor que inclua esse recurso e execute `sudo bash install.sh --upgrade` uma vez na pasta extraída para instalar o componente. Contas de serviço ou caminhos personalizados não são sobrescritos; mantenha seu procedimento de implantação. Use `AGENT2API_SYSTEMD_UPDATE=0` para desativar a opção no painel, ou desative `agent2api-updater.socket` para desativar o componente. `AGENT2API_SELF_UPDATE` continua exclusivo do Docker.
 >
-> O componente usa um socket local, sem abrir portas de rede. Por padrão, valida o repositório de releases pelo índice oficial. Para fixar um repositório ou configurar um proxy para a validação independente, configure `AGENT2API_UPDATER_REPO=owner/repo` ou `HTTPS_PROXY` em `/etc/agent2api/updater.env`. Falhas na substituição restauram os arquivos antigos. Se a nova inicialização não for confirmada, os arquivos de recuperação ficam em `/opt/agent2api/.before-update-*` e a falha é informada; o banco de dados nunca é revertido automaticamente.
+> O componente usa um socket local, sem abrir portas de rede. As políticas de publicação e os dados de verificação vêm somente do site oficial. Se a validação independente precisar de um proxy, configure `HTTPS_PROXY` em `/etc/agent2api/updater.env`. Falhas na substituição restauram os arquivos antigos. Se a nova inicialização não for confirmada, os arquivos de recuperação ficam em `/opt/agent2api/.before-update-*` e a falha é informada; o banco de dados nunca é revertido automaticamente.
 
 ### Depois de instalar
 
@@ -181,6 +181,8 @@ Tanto o administrador quanto a chave de gateway podem ser predefinidos por vari�
 No Linux coloque-as em `/etc/agent2api/agent2api.env`; no Windows edite a chave de registro do serviço `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment` (o `install-service.ps1` grava as configurações básicas e, nas execuções seguintes, preserva as existentes, alterando apenas as opções informadas explicitamente como parâmetros).
 
 > **Contas não podem ser predefinidas**: elas exigem leitura de QR code / código por SMS / credenciais coladas, o que é decidido pelos protocolos do upstream — não há como contornar. Para implantação em massa, copie um **diretório de dados** já configurado (o banco SQLite e o `account.key` ficam lado a lado) e as contas vão junto.
+
+**Verificação de integridade da resposta do Trae (desktop / servidor / Docker)**: ativada por padrão. Somente ao investigar falsos positivos de compatibilidade, defina `AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1` no ambiente do processo do gateway (`true`, `yes` e `on` também são aceitos) e reinicie o gateway para que o plugin herde o novo ambiente. Desativá-la pode voltar a aceitar respostas parciais sem o sinal de conclusão do upstream como bem-sucedidas; remova a variável e reinicie para restaurar a verificação. Essa opção exige o pacote de provedores que contém esta correção.
 
 ## Docker
 
@@ -229,7 +231,8 @@ Variáveis de ambiente (todas opcionais):
 | `AGENT2API_SELF_UPDATE` | Atualização interna: este fork usa `0` por padrão; atualize pelo Compose com sua própria imagem. Configure sua fonte de Release antes de habilitar explicitamente com `1` |
 | `AGENT2API_IMAGE_CACHE_MB` | Limite do cache em memória de download das imagens geradas (MiB, padrão `128`, faixa 8–4096). Valores inválidos ou fora da faixa voltam ao padrão |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | Limite do cache em memória do resultado da compactação de imagens de sessão (MiB, padrão `128`, faixa 8–4096, mesmas regras) |
-| `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | Avançado: aponte "verificar atualizações / baixar atualizações" para a sua própria fonte. O primeiro troca o repositório (por padrão segue o upstream `aimod-cc/Agent2API`; em fork, sobrescreva), o segundo troca a raiz da API (padrão `https://api.github.com`; deve devolver um JSON de release no formato do GitHub). Com uma fonte própria configurada, a lista de permissões de download passa a aceitar, além disso, apenas **o próprio host dessa fonte** (o esquema segue a fonte: uma fonte `http://` também permite download em texto puro — só para ensaios locais / espelhos internos) |
+
+As atualizações de software e plugins consultam versões e baixam pacotes somente pelo [site oficial do Agent2API](https://agent2api.dev/downloads). Fontes personalizadas e aceleradores do GitHub não são mais aceitos, e nenhum token do GitHub é necessário. O proxy de saída para acessar o site pode ser escolhido nas configurações de atualização.
 
 Para compilar do código, clone este repositório e execute `docker compose up -d --build --pull never`. O Dockerfile instala dependências pelos lockfiles e recompila a interface. A imagem final contém o gateway e o painel, sem as toolchains Node ou Rust.
 
@@ -362,11 +365,13 @@ print(resp.choices[0].message.content)
 
 **Páginas no navegador** (uma interface web própria, …) que chamam este endpoint com `fetch` esbarram no preflight cross-origin — o gateway **não** responde CORS por padrão, então o preflight cai na verificação de API key e recebe 401. Duas saídas: ① ative "Segurança → Acesso cross-origin do gateway" nas Configurações (origem `*`; com `*` qualquer página pode acionar o seu gateway, então configure também uma "Gateway Key"); ② coloque a página na mesma origem — sirva-a de um pequeno servidor estático local que faz proxy reverso de `/v1` para `127.0.0.1:3065`.
 
-## Acesso pela rede local
+<a id="acesso-pela-rede-local"></a>
 
-Por padrão o gateway escuta apenas `127.0.0.1`. Ao ativar "Configurações → Geral → Acesso pela rede local" ele passa a escutar todos os adaptadores e os dispositivos da rede só precisam apontar o endereço da API para o IP desta máquina (a interface mostra o endereço completo). Por segurança, é obrigatório registrar um administrador do painel antes de ativar: a API de gerenciamento passa a exigir sessão de administrador ou uma Gateway Key e, sem chave ativa, a API de encaminhamento também recusa (o fluxo cria uma chave "padrão" automaticamente). O painel web pode ser exposto à rede local opcionalmente (fechado por padrão). As mudanças valem após reiniciar.
+## Acesso pela rede
 
-Os instaladores de desktop (Windows / macOS) já incluem a pasta `ui/` do painel web: ao ativar também a opção de expor o painel de gerenciamento à rede local, dispositivos da rede podem abrir o mesmo endereço no navegador e ver a interface de gerenciamento — a mesma interface da versão Docker. **A janela do desktop em si nunca passa pelo login web** (não existe página de login no app): ela se autentica com a primeira Gateway Key desta máquina, então ligar esse interruptor não pede login no app. A página de login web só aparece quando um navegador abre o painel.
+O aplicativo desktop escuta apenas em `127.0.0.1` por padrão. Em "Configurações → Gateway → Acesso pela rede", ative "Permitir que outros dispositivos acessem o gateway" para escutar em todas as interfaces IPv4 (`0.0.0.0`). **Isso não restringe o acesso à rede local nem expõe o gateway automaticamente à internet**. O alcance real depende de rotas, encaminhamento de portas e firewall. A interface exibe separadamente os endereços da API e do painel web desta máquina. Use um endereço alcançável pelo dispositivo que vai se conectar; o endereço exibido não garante acesso pela internet. É necessário registrar um administrador do painel antes. A API de gerenciamento exige uma sessão de administrador ou chave do gateway; chamadas à API exigem uma chave ativa, criada automaticamente como padrão se necessário. O painel web fica desativado por padrão. Alterar qualquer uma das opções exige reiniciar o aplicativo.
+
+Os pacotes desktop incluem os recursos `ui/` do painel web. Ao ativar "Também expor o painel de gerenciamento web", dispositivos que alcançam o gateway podem abrir o painel no navegador e entrar. O alcance de acesso é o mesmo do gateway. Desativar essa opção apenas interrompe o fornecimento da interface web; o encaminhamento da API e o gerenciamento desktop local continuam disponíveis. **A janela desktop usa uma sessão local independente e não exige um login web adicional**. O acesso pelo navegador exige uma conta de administrador.
 
 ## Celular
 
@@ -375,17 +380,17 @@ Há três formas — escolha a que precisar:
 | Forma | Como instalar | Indicada para |
 | --- | --- | --- |
 | **Navegador / PWA** | Abra `/m` no navegador do celular; opcionalmente "Adicionar à tela inicial" | Consulta rápida, sem instalar nada, opção mais simples no iPhone |
-| **APK Android** | Instale `Agent2API-<versão>.apk` | Ícone na tela inicial, tela cheia, vários servidores |
-| **IPA iOS** | Instale `Agent2API-<versão>.ipa` (não assinado — você reassina) | Ícone na tela inicial, tela cheia |
+| **APK Android** | Instale `Agent2API-<versão>.apk` pela [página de downloads](https://agent2api.dev/downloads) ou pelo Release | Ícone na tela inicial, tela cheia, vários servidores |
+| **IPA iOS** | Instale `Agent2API-<versão>.ipa` pela [página de downloads](https://agent2api.dev/downloads) ou pelo Release (não assinado — você reassina) | Ícone na tela inicial, tela cheia |
 
 As três rodam o mesmo código de interface. A diferença é quem serve a página: o PWA é servido pelo gateway (então "também expor o painel de gerenciamento web" precisa estar ligado), enquanto o APK / IPA levam a interface dentro do pacote (então conseguem abrir a interface offline e não precisam dessa opção).
 
 ### Pré-requisitos (por forma)
 
-**Desktop (Windows / macOS / Linux)**: as duas opções precisam estar ligadas; uma sem a outra não funciona.
+**Desktop (Windows / macOS / Linux)**: ative primeiro o acesso pela rede. Navegador / PWA também exige o painel web.
 
-1. "Configurações → Geral → Acesso pela rede local" — permite que dispositivos da rede acessem o gateway. O fluxo de ativação pede o registro de um administrador do painel e cria automaticamente uma chave chamada "padrão".
-2. "Configurações → Geral → Acesso pela rede local → também expor o painel de gerenciamento web" — serve a pasta estática `ui/`. **Necessária para a forma navegador / PWA** (`/m` é servido pelo gateway, então retorna 404 enquanto esta opção estiver desligada). **O APK / IPA não precisam dela** (a interface está no pacote), mas ainda precisam da opção 1 — sem ela o gateway escuta apenas em `127.0.0.1` e o celular não alcança.
+1. "Configurações → Gateway → Acesso pela rede → Permitir que outros dispositivos acessem o gateway" — permite conexões de outros dispositivos, conforme as configurações de rede e firewall. Registre um administrador do painel antes; uma chave padrão será criada automaticamente se não houver nenhuma chave do gateway ativa.
+2. "Configurações → Gateway → Acesso pela rede → também expor o painel de gerenciamento web" — serve a pasta estática `ui/`. **Necessária para a forma navegador / PWA** (`/m` é servido pelo gateway, então retorna 404 enquanto esta opção estiver desligada). **O APK / IPA não precisam dela** (a interface está no pacote), mas ainda precisam da opção 1 — sem ela o gateway escuta apenas em `127.0.0.1` e o celular não alcança.
 
 Ambas exigem reinício para valer.
 
@@ -404,7 +409,7 @@ A primeira visita redireciona para a página de login; entre com o administrador
 Na primeira execução aparece uma tela "Servidores". São três passos:
 
 1. Toque em "Adicionar" e informe o `IP ou domínio:porta` do gateway (por exemplo `192.168.1.23:3065`). O protocolo pode ser `http://` ou `https://` (http é assumido se omitido); sem porta, http usa 3065 e https usa a 443 padrão;
-2. Toque em "Conectar e salvar" — ele testa o gateway antes, então endereço errado ou gateway sem acesso pela rede local são reportados ali mesmo;
+2. Toque em "Conectar e salvar" — ele testa o gateway antes, então endereço errado ou gateway sem acesso pela rede são reportados ali mesmo;
 3. Aparece a página de login. Informe a conta de administrador e a senha deste gateway (se ainda não houver administrador, vira "Criar conta de administrador").
 
 **Vários servidores**: toque em "Adicionar" de novo. Cada servidor guarda o próprio login — trocar não exige entrar de novo, e voltar também não. O ponto de entrada é "Configurações → Servidores"; toque em uma linha para trocar. **A página de login também tem "Trocar de servidor"**, então depois de sair da conta (ou ser desconectado) você não precisa entrar de novo só para chegar a essa lista.
@@ -430,7 +435,7 @@ Para fazer sideload: arraste o `.ipa` para o AltStore (ou SideStore), reassine c
 
 **Limitações conhecidas do IPA**:
 
-- **Atualização dentro do app só abre um link**: o iOS não permite que um app baixe e instale código executável, então "Atualização de software" nas configurações mostra um botão "Baixar" que abre a página do Release, em vez de baixar como no Android. A forma PWA atualiza pelo Service Worker — basta recarregar.
+- **Atualização dentro do app abre o download**: o iOS não permite que um app baixe e instale código executável diretamente, então "Verificar atualizações" nas configurações exibe o botão "Baixar IPA" (baixando o `.ipa` direto da CDN oficial para reassinar via AltStore / SideStore ou certificado próprio) e o link para a página oficial de downloads, em vez de instalar internamente como no Android. A forma PWA atualiza pelo Service Worker — basta recarregar.
 - Gateways `http://` em texto claro: o `Info.plist` já relaxa o ATS e declara o uso de rede local. Na primeira conexão o sistema pede "permitir acesso à rede local" — é obrigatório aceitar, senão toda requisição falha sem explicação visível.
 - O resto é igual ao APK: a interface segue a versão do pacote e o esquema padrão é http.
 
@@ -451,29 +456,27 @@ Quando há uma nova versão, uma barra "Reiniciar e atualizar" surge na parte de
 
 ### O que pode e não pode fazer
 
-| Pode | Não pode (use o app de desktop) |
+| Recurso | Suporte no celular |
 | --- | --- |
-| Relatórios, status das contas, saldos, logs de requisições, logs de execução | Adicionar contas (QR / colar token / importar login do cliente) |
-| Ativar/desativar contas, atualizar credenciais, excluir contas | Editar credenciais, proxy ou regras de limite de uma conta |
-| Check-in com um toque, ver histórico de check-in | Resgatar recompensas de integração e planos individualmente |
-| Consultar, buscar e ativar modelos upstream; selecionar modelos personalizados por grupo de Key; consultar credenciais salvas | Testes de modelos upstream, raciocínio e recursos; edição das credenciais da conta |
-| Copiar gateway keys, ativar/desativar keys | Criar keys, definir listas de provedores/modelos permitidos |
-| Gerenciar e testar proxies HTTP / SOCKS5 e nós de assinaturas; sincronizar endpoints do Clash Verge; baixar, importar e iniciar/parar o kernel | Adicionar, editar e atualizar assinaturas de proxy; importar arquivos de assinatura |
-| Ativar/desativar tarefas agendadas, alterar intervalos; criar, editar, visualizar e gerenciar grupos de roteamento | Alterar porta, retries globais, timeouts globais, retenção de dados |
-| Consultas rápidas do assistente (saldos / modelos duplicados / uso de hoje / contas limitadas) | Conversa livre e chamada de ferramentas do assistente |
-| Ver status do takeover de Agent, restaurar | Reescrever configurações de clientes (um celular não lê arquivos locais) |
+| Relatórios e registros | Relatórios, estado das contas, saldos, logs de requisições e de execução |
+| Contas e check-in | Adicionar por navegador, SMS ou credenciais conforme o provedor; ativar, renomear, selecionar proxy, atualizar credenciais, limpar limites, excluir, fazer check-in e consultar histórico; administradores podem revelar credenciais salvas |
+| Modelos upstream | Buscar e ativar catálogos, gerenciar grupos de Key e modelos de canais personalizados; selecionar explicitamente conta e gateway Key nos testes online; telas de modelos upstream e testes/preços |
+| Gateway Keys | Criar, editar, copiar, ativar e excluir; configurar listas de canais/modelos permitidos preservando restrições salvas ocultas |
+| Proxies e assinaturas | Gerenciar e testar HTTP / SOCKS5, nós e grupos; adicionar, editar, atualizar e importar assinaturas; sincronizar Clash Verge; baixar, importar e iniciar/parar o kernel na máquina do gateway |
+| Roteamento | Criar, editar, compartilhar, importar e pré-visualizar grupos; configurar requisições especiais e tratamento de erros |
+| Assistente e chat | Conversa completa, imagens/arquivos, ferramentas, histórico e seleção explícita de Key; chat upstream também disponível, respeitando as permissões da Key selecionada |
+| Plugins e tarefas agendadas | Página completa de plugins; criar, editar, ativar e executar instâncias de plugins de tarefas instalados; escrever scripts no desktop ou painel web completo |
+| Privacidade e configurações | Mascaramento completo, palavras/regras, limpeza de impressão digital e prévias; prompts condicionais, identificação do cliente, marca e login; retries e timeouts de encaminhamento |
+| Sincronização em nuvem | Configurar WebDAV / S3, testar conexões, consultar dados remotos, enviar, baixar e importar a chave de sincronização |
+| Ainda exige desktop ou painel web completo | Importação de login local, configurações de takeover, edição de credenciais originais e regras completas de limites, resgate individual de benefícios, edição completa de recursos do modelo, porta e retenção de dados |
 
 A barra lateral do desktop tem uma entrada "Abrir no celular" no rodapé que leva à mesma página.
 
-### Opcional: diagnóstico isolado de plugins da comunidade (Linux)
+### Runtimes de plugins e tarefas agendadas
 
-Em uma máquina Linux amd64 confiável, execute `python3 scripts/prepare-community-probe-kit.py --help`. Forneça o QEMU x86-64 da distribuição, kernel amd64, SeaBIOS, firmware QEMU e o ZIP Bun 1.4.2 x64 baseline verificado. São necessários também `/bin/busybox` estático e `/usr/bin/setpriv`. Instale o kit em um diretório de propriedade de root sem permissão de escrita para o gateway; defina `AGENT2API_COMMUNITY_GUEST_DIR` com seu caminho absoluto. Execute sem root e sem capabilities. Em contêineres, monte somente o kit para leitura; não forneça dispositivos, sockets de controle do host nem modo privilegiado.
+A página de plugins instala diretamente pacotes compatíveis com Magpie / OpenCode v1 e mostra o estado do download do Bun 1.4.2. O runtime é baixado e verificado quando necessário; os plugins compartilham um processo Bun. A instalação e a execução são completas. O antigo diagnóstico com QEMU para arquivos da comunidade não se aplica mais.
 
-O administrador escolhe o SHA-256 atual do arquivo retido para testar o `server()` do OpenCode de um JS/ESM independente. Cada execução usa uma máquina virtual descartável sem rede nem diretórios do host, não instala dependências, não executa scripts de ciclo de vida, não importa contas nem concede permissões. Sem os pré-requisitos, a execução é recusada, sem recorrer ao Bun do host.
-
-Só é aceito um único arquivo de entrada, de até 256 KiB. Os limites padrão são 80 segundos de tempo total e 65 de CPU. Em hosts lentos, o operador pode definir `AGENT2API_COMMUNITY_GUEST_TIMEOUT_SECS` no ambiente do gateway como um inteiro decimal de 30 a 300; o limite de CPU é 15 segundos menor. Um valor inválido desativa o teste. Só uma máquina virtual de 768 MiB é executada por vez; ela termina se a conexão cair. O diagnóstico relatado pela máquina virtual não certifica a segurança nem concede autorização.
-
-Em caso de `503`, verifique o kit e o limite configurado. `422` indica que a máquina virtual não confirmou a conclusão, mas não identifica a causa: pode haver erro no script ou encerramento pelo kernel, inclusive por limite de CPU. Só o prazo de tempo total do gateway gera `504`.
+As tarefas agendadas usam QuickJS integrado, sem instalar Node.js ou Bun separadamente. Os scripts podem usar HTTP completo nos domínios declarados pelo plugin. Cada redirecionamento é verificado, e destinos locais ou de redes privadas são bloqueados. Notificações exigem a declaração do plugin e a permissão do usuário. As tarefas usam o proxy selecionado na instância; falhas do proxy nunca mudam para conexão direta. Confira a configuração e as permissões antes de ativar ou executar uma tarefa.
 
 ### Restaurar a chave de conta do WebDAV ou S3
 
@@ -481,12 +484,16 @@ A sincronização só instala a chave remota quando não há chave de conta loca
 
 ### Opções de login no painel: OAuth e Cloudflare Turnstile
 
-Para Google ou GitHub, abra Configurações → Segurança → Login com identidade externa. Configure uma origem HTTPS fixa sob seu controle; o proxy reverso deve preservar `Host`. Registre no provedor o callback exato exibido (`/api/panel/oauth/{google|github}/callback`), salve o client ID e o secret e vincule a identidade usando o cookie da sessão administrativa no navegador nessa origem. Somente o `sub` do Google ou o `id` numérico do GitHub conta; um e-mail igual não autoriza acesso. Mudar a origem ou o client ID remove o vínculo correspondente. Após alterar a senha administrativa, desvincule e vincule novamente. Use senha em shells nativos, APKs, proxies que bloqueiam cookies ou sem vínculo; não há tíquetes de login na URL.
+A nova interface upstream fica em Configurações → Conta → Login externo no desktop e Configurações → Login externo (OAuth) no celular. Registre um administrador e configure client ID, secret do Google / GitHub e o endereço público do painel. Com proxy reverso, use um endereço HTTPS fixo e registre o callback comum `/api/panel/oauth/callback`. Vincule contas ou configure uma lista de e-mails verificados do Google / nomes de usuário do GitHub. Na web, o login pode redirecionar na mesma aba; shells desktop e apps móveis podem abrir o navegador externo, consultar o resultado e trocar um tíquete temporário de uso único por uma sessão administrativa. Este fluxo é independente da configuração antiga abaixo.
+
+As configurações antigas permanecem em Configurações → Conta → Configurações de login existentes no desktop, com editores correspondentes no celular. O OAuth antigo ainda exige origem HTTPS fixa sob seu controle, `/api/panel/oauth/{google|github}/callback` e vínculo explícito pelo Cookie administrativo nessa origem. Só Google `sub` / GitHub `id` numérico autoriza acesso; e-mail igual não basta. Alterar a origem ou client ID remove o vínculo. O fluxo antigo não entrega tíquetes a shells nativos, APKs ou intermediários que bloqueiam cookies; use senha ou configure a nova entrada separadamente. Configurações e vínculos não são migrados nem sobrescritos entre os dois fluxos. Escritas de OAuth, verificação e marca exigem sessão administrativa; uma gateway Key comum não configura métodos de login.
+
+O novo painel Configurações → Conta → Verificação de bots, também disponível no celular, aceita ALTCHA ou Turnstile de mesma origem e controles separados para desktop/web. Informe os hosts reais do widget na lista de permissões. A configuração antiga permanece ativa até salvar a nova configuração do provedor de verificação; depois vale a nova. Alterar apenas os controles de desktop/web não muda o provedor. O procedimento de site estático separado abaixo se aplica apenas ao Turnstile antigo em Configurações de login existentes.
 
 O ALTCHA padrão dispensa serviços externos. O Turnstile exige **um site HTTPS estático separado e sob seu controle**. Não use o host do painel ou do gateway, não encaminhe a API e não armazene cookies do painel nem credenciais nesse site.
 
 1. Baixe o HTML em `/api/panel/turnstile-widget` no painel. Publique-o sem alterações em `/turnstile-widget.html` no site estático, como `text/html`, permitindo a incorporação pelo painel. A URL de download não é a URL do iframe.
 2. Crie um widget Turnstile na Cloudflare e autorize o **host do site estático**, não o do painel. O cliente precisa acessar o site estático e `challenges.cloudflare.com`; o gateway precisa acessar este último por HTTPS.
-3. Mantenha uma sessão administrativa aberta. Em Configurações → Segurança → Método de verificação do login, selecione Turnstile, informe a site key, a secret key e `https://host` do site estático (sem porta ou caminho). Ative a verificação nesse ambiente e teste o login por senha em uma janela privativa.
+3. Mantenha uma sessão administrativa aberta. Em Configurações → Conta → Configurações de login existentes → Método de verificação do login, selecione Turnstile, informe a site key, a secret key e `https://host` do site estático (sem porta ou caminho). Ative a verificação nesse ambiente e teste o login por senha em uma janela privativa.
 
 O servidor exige sucesso, correspondência exata do host estático e `action=agent2api_panel`. Falhas de rede ou validação não ignoram a verificação nem mudam para ALTCHA. Use a sessão aberta para voltar ao ALTCHA. As chaves públicas de teste da Cloudflare não retornam a ação exigida e não validam o login de produção.

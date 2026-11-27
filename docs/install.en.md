@@ -38,7 +38,7 @@ Order tries the first eligible member and advances only after a failure that per
 - [Server (Windows / Linux, headless)](#server-windows--linux-headless)
 - [Docker](#docker)
 - [Verification and client setup](#verification-and-client-setup)
-- [LAN access](#lan-access)
+- [Network access](#network-access)
 - [Mobile](#mobile)
 
 ## Which form to pick
@@ -75,7 +75,7 @@ Closing the window minimizes to the tray by default and the gateway keeps forwar
 >
 > **Linux desktop notes**: the tray needs `libayatana-appindicator3` (most desktops ship it; install `libayatana-appindicator3-1` if the tray icon does not appear, then restart). An AppImage needs the executable bit before its first run (`chmod +x`; the app sets it automatically when you pick "Open installer"). Updates: deb goes through the system installer (it asks for your password once), while an AppImage is upgraded by replacing the file.
 >
-> **Desktop differences**: "import desktop login state" for AutoClaw and ChatGLM (智谱清言) is Windows-only (it reads Windows DPAPI ciphertext, so that section is hidden on macOS / Linux); the others (Raccoon / CatPaw / Cline) read plaintext files under `HOME` and work on all three platforms. Tray, launch-at-login, LAN access and web-panel hosting are supported on macOS / Linux too.
+> **Desktop differences**: "import desktop login state" for AutoClaw and ChatGLM (智谱清言) is Windows-only (it reads Windows DPAPI ciphertext, so that section is hidden on macOS / Linux); the others (Raccoon / CatPaw / Cline) read plaintext files under `HOME` and work on all three platforms. Tray, launch-at-login, network access and web-panel hosting are supported on macOS / Linux too.
 
 ## Server (Windows / Linux, headless)
 
@@ -147,7 +147,7 @@ Launch at boot, automatic restart after a crash (`Restart=always`) and graceful 
 >
 > For an older installation, download a new server package containing this feature and run `sudo bash install.sh --upgrade` from that package once. This installs the update helper. Custom service accounts or paths are not overwritten; keep using your existing deployment procedure. Set `AGENT2API_SYSTEMD_UPDATE=0` to hide the panel entry, or disable `agent2api-updater.socket` to disable the helper. `AGENT2API_SELF_UPDATE` remains Docker-only; do not enable it on bare metal.
 >
-> The helper uses a local socket, not a network port. It verifies the release repository through the official index by default. Administrators may set `AGENT2API_UPDATER_REPO=owner/repo` or `HTTPS_PROXY` in `/etc/agent2api/updater.env` to pin a repository or configure a proxy for independent verification. Replacement failures restore the old files. If the new service cannot be confirmed ready, recovery files remain in `/opt/agent2api/.before-update-*` and failure is reported; the database is never rolled back automatically.
+> The helper uses a local socket, not a network port. Release policies and checksums come only from the official website. Set `HTTPS_PROXY` in `/etc/agent2api/updater.env` if independent verification needs a proxy. Replacement failures restore the old files. If the new service cannot be confirmed ready, recovery files remain in `/opt/agent2api/.before-update-*` and failure is reported; the database is never rolled back automatically.
 
 ### After installing
 
@@ -181,6 +181,8 @@ Both the administrator and the gateway key can be preset with environment variab
 On Linux put them in `/etc/agent2api/agent2api.env`; on Windows edit the service registry key `HKLM\SYSTEM\CurrentControlSet\Services\Agent2API\Environment` (`install-service.ps1` writes the basic settings and preserves existing configuration on reruns, changing only settings explicitly supplied as parameters).
 
 > **Accounts cannot be preset**: they need a QR scan / SMS code / pasted credentials, which the upstream protocols decide, so there is no way around it. For bulk deployment, copy a fully configured **data directory** over (the SQLite database and `account.key` live side by side), and the accounts move with it.
+
+**Trae response completeness check (desktop / server / Docker)**: enabled by default. Only when investigating compatibility false positives, set `AGENT2API_TRAE_NO_REQUIRE_TERMINAL=1` in the gateway process environment (`true`, `yes` and `on` are also accepted), then restart the gateway so the plugin inherits the new environment. Disabling it may once again accept partial replies without an upstream completion signal as successful; remove the variable and restart to restore the check. This switch requires the provider plugin package containing this fix.
 
 ## Docker
 
@@ -229,7 +231,8 @@ Environment variables (all optional):
 | `AGENT2API_SELF_UPDATE` | In-container update entry: this fork defaults to `0`; update by pulling your own image with Compose. Configure your own Release source before explicitly enabling it with `1` |
 | `AGENT2API_IMAGE_CACHE_MB` | Upper bound of the in-memory download cache for generated images (MiB, default `128`, range 8–4096). Invalid or out-of-range values fall back to the default |
 | `AGENT2API_IMAGE_COMPRESS_CACHE_MB` | Upper bound of the in-memory cache for compressed session images (MiB, default `128`, range 8–4096, same rules) |
-| `WORKBUDDY_UPDATE_REPO` + `WORKBUDDY_UPDATE_API_BASE` | Advanced: point update checks/downloads at your own source. The first swaps the repository (defaults to the upstream `aimod-cc/Agent2API`; forks should override it), the second swaps the API root (default `https://api.github.com`, must return a GitHub-shaped release JSON). With a custom source set, the download allowlist additionally admits only **that source's own host** (scheme follows the source: an `http://` source also allows plaintext downloads — for local drills / internal mirrors only) |
+
+Software and plugin updates check versions and download packages only through the [Agent2API website](https://agent2api.dev/downloads). Custom update sources and GitHub accelerators are no longer supported, and no GitHub token is required. Select an outbound proxy for website access in Update settings.
 
 Build from source: clone this repository and run `docker compose up -d --build --pull never`. The Dockerfile installs dependencies from lockfiles and rebuilds the UI. The final image contains the gateway and panel, without the Node or Rust toolchains.
 
@@ -362,11 +365,13 @@ print(resp.choices[0].message.content)
 
 **Pages running in a browser** (a self-built web UI, …) that call this endpoint with `fetch` hit a cross-origin preflight rejection — the gateway does **not** answer CORS by default, so the preflight lands on the API-key check and gets a 401. Two ways out: ① turn on "Security → Gateway CORS" in Settings (origin `*`; with `*` any web page could drive your local gateway, so set a "Gateway Key" too); ② make the page same-origin — serve it from a small local static server that reverse-proxies `/v1` to `127.0.0.1:3065`.
 
-## LAN access
+<a id="lan-access"></a>
 
-By default the gateway only listens on `127.0.0.1`. After turning on "Settings → General → LAN access" it listens on all adapters, and devices on the LAN just point their API base URL at this machine's IP (the UI shows the full address) to share the accounts. For safety, enabling it requires registering a panel administrator first: the management API then demands an admin session or a gateway key, and with no key enabled the forwarding API refuses service too (the enable flow adds a "default" key automatically). The web panel can optionally be exposed to the LAN as well (off by default). Changes take effect after a restart.
+## Network access
 
-The desktop installers (Windows / macOS) already ship the web panel's `ui/` folder: once you turn on "expose the web management panel to the LAN" as well, devices on the LAN can open the same address in a browser to get the management UI — the same interface as the Docker form. **The desktop window itself never goes through web login** (there is no login page in the app): it authenticates with this machine's first gateway key, so flipping that switch never asks you to sign in from the desktop app. The web login page only appears when a browser opens the panel.
+The desktop app listens only on `127.0.0.1` by default. Under "Settings → Gateway → Network access", enable "Allow other devices to access the gateway" to listen on all IPv4 interfaces (`0.0.0.0`). **This does not restrict access to the LAN or automatically expose the gateway to the internet**; actual reachability depends on routing, port forwarding, and firewall settings. The UI displays separate API and web management addresses for this machine. Use an address reachable from the connecting device; the displayed address does not guarantee public internet access. A panel administrator must be registered first. Management endpoints require an admin session or gateway key; API calls require an enabled gateway key, with a default key created automatically if needed. The web management panel is off by default. Either switch requires an app restart.
+
+Desktop packages include the web panel's `ui/` resources. Enabling "Also expose the web management panel" lets devices that can reach the gateway open the panel in a browser and sign in. Its access scope is the same as the gateway's. Disabling it only stops serving the web UI; API forwarding and local desktop management remain available. **The desktop window uses its own local session and does not require a separate web sign-in**; browser access requires an administrator account.
 
 ## Mobile
 
@@ -375,17 +380,17 @@ There are three forms — pick what you need:
 | Form | How to install | Good for |
 | --- | --- | --- |
 | **Browser / PWA** | Open `/m` in a phone browser; optionally "Add to Home Screen" | Quick look, nothing to install, the easiest option on iPhone |
-| **Android APK** | Install `Agent2API-<version>.apk` | Home-screen icon, full screen, multiple servers |
-| **iOS IPA** | Install `Agent2API-<version>.ipa` (unsigned — you re-sign it) | Home-screen icon, full screen |
+| **Android APK** | Install `Agent2API-<version>.apk` from [Downloads](https://agent2api.dev/downloads) or Release | Home-screen icon, full screen, multiple servers |
+| **iOS IPA** | Install `Agent2API-<version>.ipa` from [Downloads](https://agent2api.dev/downloads) or Release (unsigned — you re-sign it) | Home-screen icon, full screen |
 
 All three run the same UI code. The difference is who serves the page: the PWA is served by the gateway (so "also expose the web management panel" must be on), while the APK / IPA ship the UI inside the package (so they can start the UI offline and do not need that switch).
 
 ### Prerequisites (by form)
 
-**Desktop (Windows / macOS / Linux)**: both switches, one without the other will not work.
+**Desktop (Windows / macOS / Linux)**: enable network access first. Browser / PWA use also requires the web management panel.
 
-1. "Settings → General → LAN access" — lets devices on the LAN reach the gateway. The enable flow asks you to register a panel administrator first and adds a key named "default" automatically.
-2. "Settings → General → LAN access → also expose the web management panel" — serves the `ui/` static folder. **Required for the browser / PWA form** (`/m` is served by the gateway, so it returns 404 while this switch is off). **The APK / IPA do not need it** (the UI is inside the package), but they still need switch 1 — otherwise the gateway only listens on `127.0.0.1` and the phone cannot reach it.
+1. "Settings → Gateway → Network access → Allow other devices to access the gateway" — lets other devices connect, subject to network and firewall settings. Register a panel administrator first; a default gateway key is created automatically if no enabled key exists.
+2. "Settings → Gateway → Network access → also expose the web management panel" — serves the `ui/` static folder. **Required for the browser / PWA form** (`/m` is served by the gateway, so it returns 404 while this switch is off). **The APK / IPA do not need it** (the UI is inside the package), but they still need switch 1 — otherwise the gateway only listens on `127.0.0.1` and the phone cannot reach it.
 
 Both require a restart to take effect.
 
@@ -404,7 +409,7 @@ The first visit redirects to the login page; sign in with the panel administrato
 On first launch you get a "Servers" screen. Three steps:
 
 1. Tap "Add" and enter the gateway's `IP or domain:port` (e.g. `192.168.1.23:3065`). The scheme may be `http://` or `https://` (http is assumed if omitted); without a port, http gets 3065 and https uses the standard 443;
-2. Tap "Connect & save" — it probes the gateway first, so a wrong address or a gateway without LAN access is reported right there;
+2. Tap "Connect & save" — it probes the gateway first, so a wrong address or a gateway without network access is reported right there;
 3. A login page appears. Enter this gateway's administrator account and password (if none exists yet, it becomes "Create admin account").
 
 **Multiple servers**: tap "Add" again. Each server keeps its own sign-in — switching over does not require signing in again, and neither does switching back. The entry point is "Settings → Servers"; tap a row to switch to it. **The login page also has a "Switch server" link**, so after signing out (or being signed out) you don't have to log in first just to reach that list.
@@ -430,7 +435,7 @@ To sideload: drop the `.ipa` into AltStore (or SideStore), re-sign with your App
 
 **Known limitations of the IPA**:
 
-- **In-app updates can only link out**: iOS does not allow an app to download and install executable code, so "Software update" in settings shows a "Get it" button that opens the Release page instead of downloading like Android does. The PWA form updates through the Service Worker — just refresh.
+- **In-app updates link to download**: iOS does not allow an app to download and install executable code directly, so checking for updates in settings offers a "Download IPA" button (fetching the `.ipa` from the official CDN for re-signing with AltStore / SideStore or your own certificate) and a link to the official downloads page, instead of installing in-place like Android does. The PWA form updates through the Service Worker — just refresh.
 - Cleartext `http://` gateways: `Info.plist` already relaxes ATS and declares the local-network usage. The first connection triggers an "allow local network" prompt — you must accept it, otherwise every request fails with no visible explanation.
 - Everything else matches the APK: the UI follows the package version, and http is the default scheme.
 
@@ -451,29 +456,27 @@ When a new version is available, a "Restart & update" bar floats at the bottom: 
 
 ### What it can and cannot do
 
-| Can | Cannot (use the desktop app) |
+| Feature | Mobile support |
 | --- | --- |
-| Reports, account status, balances, request logs, runtime logs | Add accounts (QR / paste token / import client login) |
-| Enable/disable accounts, refresh credentials, delete accounts | Edit an account's credentials, proxy or rate-limit rules |
-| One-tap check-in, view check-in history | Claim onboarding rewards and plans one by one |
-| Browse, fetch and enable/disable upstream models; select custom models per Key group; view saved account credentials | Upstream model testing, reasoning and capability settings; editing account credentials |
-| Copy gateway keys, enable/disable keys | Create keys, set provider/model allowlists |
-| Manage and test HTTP / SOCKS5 proxies and subscription nodes; sync Clash Verge endpoints; download, import and start/stop the kernel | Add, edit and refresh proxy subscriptions; import subscription files |
-| Enable/disable scheduled tasks, change intervals; create, edit, preview and manage routing groups | Change port, global retries, global timeouts, data retention |
-| Assistant quick queries (balances / duplicate models / today's usage / rate-limited accounts) | Free-form assistant chat and tool calling |
-| View Agent takeover status, restore | Rewrite client configs (a phone cannot read local files) |
+| Reports and records | Reports, account status, balances, request logs and runtime logs |
+| Accounts and check-in | Add accounts with provider-supported browser login, SMS or credentials; enable/disable, rename, select proxies, refresh credentials, clear rate limits, delete, check in and view history; administrators can reveal saved credentials |
+| Upstream models | Fetch and enable catalogs; manage custom-channel Key groups and models; explicitly select an account and gateway Key for online tests; separate upstream-model and testing/pricing views |
+| Gateway Keys | Create, edit, copy, enable/disable and delete; configure channel/model allowlists while retaining hidden saved restrictions |
+| Proxies and subscriptions | Manage and test HTTP / SOCKS5 proxies, nodes and groups; add, edit, refresh and import subscriptions; sync Clash Verge endpoints; download, import and start/stop the kernel on the gateway machine |
+| Routing | Create, edit, share, import and preview routing groups; configure special requests and error handling |
+| Assistant and chat | Full assistant conversations, images/files, tool calls, history and explicit Key selection; the upstream chat view is also available; selected-Key permissions still apply |
+| Plugins and scheduled tasks | Full plugin management page; create, edit, enable/disable and run instances of installed task plugins; author script plugins on desktop or the full web panel |
+| Privacy and settings | Full privacy masking, words/rules, fingerprint sanitization and previews; conditional prompts, client identification, branding and login settings; forwarding retry and timeout parameters |
+| Cloud sync | Configure WebDAV / S3, test connections, inspect remote snapshots, upload, download and import the sync key |
+| Desktop or full web panel still required | Local-client login imports, client takeover configuration, raw account credential/full rate-limit editing, individual reward claims, complete model capability editing, port and data-retention settings |
 
 The desktop sidebar has an "Open on phone" entry at the bottom that leads to the same page.
 
-### Optional: isolated community plugin probe (Linux)
+### Plugin and scheduled-task runtimes
 
-On a trusted Linux amd64 build machine, run `python3 scripts/prepare-community-probe-kit.py --help`. Supply distro QEMU x86-64, an amd64 kernel, SeaBIOS, QEMU firmware and the pinned Bun 1.4.2 x64 baseline ZIP. The builder also uses static `/bin/busybox` and `/usr/bin/setpriv`. Install the kit in a root-owned directory not writable by the gateway. Run the gateway as non-root with no capabilities, and set `AGENT2API_COMMUNITY_GUEST_DIR` to the absolute kit path. Containers only need the kit mounted read-only; do not grant devices, host control sockets or privileged mode.
+The plugin page installs compatible Magpie / OpenCode v1 packages directly and displays the Bun 1.4.2 download status. The runtime is downloaded and verified when needed; plugins share one Bun process. This provides full installation and execution. The old QEMU diagnostic flow for community archives no longer applies.
 
-An administrator selects the current retained SHA-256 to probe a standalone JS/ESM OpenCode `server()` hook. Every probe gets a disposable guest with no NIC or host mounts. It installs no dependencies, runs no package lifecycle scripts, imports no accounts and grants no permissions. Unavailable prerequisites mean refusal, never execution in host Bun.
-
-Only a standalone entry of up to 256 KiB is accepted. The default wall/CPU limits are 80/65 seconds. On slower hosts, an operator can set `AGENT2API_COMMUNITY_GUEST_TIMEOUT_SECS` in the gateway environment to a decimal integer from 30 to 300; the CPU limit is 15 seconds less. An invalid setting disables probing. Only one 768 MiB guest runs at a time; disconnecting terminates it. A guest-reported diagnostic is neither a safety certification nor an authorization credential.
-
-For `503`, check the kit and budget settings first. `422` means the guest did not confirm completion; a script failure or kernel termination (including a CPU limit) can cause it. It does not identify the cause. Only the gateway's wall-clock deadline returns `504`.
+Scheduled tasks use embedded QuickJS; no separate Node.js or Bun installation is needed. Scripts can use full HTTP within the domains declared by the plugin. Every redirect is checked, and local or private-network destinations are blocked. Notifications require both a plugin declaration and user permission. Tasks use the instance's selected proxy; proxy failure never falls back to a direct connection. Review configuration and permissions before enabling or running a task.
 
 ### Recovering the account key from WebDAV or S3
 
@@ -481,12 +484,16 @@ Cloud sync installs the remote key only if no local account key exists. A matchi
 
 ### Optional panel login methods: OAuth and Cloudflare Turnstile
 
-For Google or GitHub, open Settings → Security → Third-party identity login. Set a fixed HTTPS origin you control; reverse proxies must preserve its `Host`. Register the exact callback shown (`/api/panel/oauth/{google|github}/callback`), save the client ID and secret, then bind the identity using an authenticated admin browser cookie on that origin. Only the Google `sub` or numeric GitHub `id` counts; matching email never grants access. Changing the origin or client ID clears the affected binding; after changing the admin password, unbind and bind again. Use the password in native shells, APKs, cookie-blocking proxies, or when no identity is bound; there are no login tickets in URLs.
+The upstream interface is under Settings → Account → Third-party login on desktop and Settings → Third-party login (OAuth) on mobile. Register an administrator first, then configure Google/GitHub client credentials and the panel's public address. For a reverse proxy, use a fixed HTTPS address and register the shared callback shown: `/api/panel/oauth/callback`. Bind accounts or configure a verified Google email / GitHub username allowlist. Web login can redirect in the same tab; desktop shells and mobile apps can open an external browser, poll the result and exchange a short-lived, single-use ticket for an admin session. This flow is independent of the legacy configuration below.
+
+Legacy settings remain under Settings → Account → Existing login settings on desktop, with corresponding editors retained in mobile settings. Legacy OAuth still requires a controlled fixed HTTPS origin, `/api/panel/oauth/{google|github}/callback`, and explicit binding from an admin browser cookie on that origin. Only Google `sub` / numeric GitHub `id` authorizes access; matching email does not. Changing the origin or client ID clears the binding. Legacy flows do not deliver login tickets to native shells, APKs or cookie-blocking proxies; use a password or configure the upstream entry separately. Settings and bindings are not migrated or overwritten between the two flows. OAuth, captcha settings and branding writes require an admin session; an ordinary gateway Key cannot configure login methods.
+
+The upstream Settings → Account → Bot verification panel, also available on mobile, supports ALTCHA or same-origin Turnstile with separate desktop/web switches. Enter the actual widget hostnames in Turnstile's allowlist. Legacy captcha settings stay active until upstream captcha provider settings are saved; saving those selects the new provider configuration. Changing only the desktop/web switches does not select a provider. The separate-static-site procedure below applies only to legacy Turnstile under Existing login settings.
 
 The default ALTCHA verifier needs no external service. Turnstile requires a **separate HTTPS static site you control**. Do not use the panel or gateway hostname, proxy its API, set panel cookies, or store credentials on that site.
 
 1. Download the HTML from `/api/panel/turnstile-widget` on the panel. Serve it unchanged at `/turnstile-widget.html` on the static site as `text/html`, allowing the panel to embed it. The panel download URL is not the iframe URL.
 2. Create a Turnstile widget in Cloudflare. Allow the **static site's hostname**, not the panel's. Clients must reach the static site and `challenges.cloudflare.com`; the gateway must reach the latter over HTTPS.
-3. Keep an admin session open. Under Settings → Security → Login verification method, select Turnstile and enter the site key, secret key and static site's `https://hostname` (no port or path). Enable the captcha switch for this deployment and test password login in a private window.
+3. Keep an admin session open. Under Settings → Account → Existing login settings → Login verification method, select Turnstile and enter the site key, secret key and static site's `https://hostname` (no port or path). Enable the captcha switch for this deployment and test password login in a private window.
 
 The server requires successful verification, the exact static hostname and `action=agent2api_panel`. Network or validation failures never bypass verification or fall back to ALTCHA. Use the existing admin session to switch back. Cloudflare's public test secrets omit the required action; they cannot validate production login.

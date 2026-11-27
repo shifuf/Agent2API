@@ -12,6 +12,7 @@ export const sameRequest = (left: ReplayRow, right: ReplayRow) => left.traceKey 
   ? left.traceKey === right.traceKey : left.id === right.id && left.ts === right.ts
 export const requestModel = (row: ReplayRow) => row.clientModel || row.model || t('模型未记录')
 export const isTraceRunning = (row: ReplayRow) => row.status === 0 && row.error == null
+export const isTraceCancelled = (row: ReplayRow) => row.status === 499
 export const isTraceSuccess = (row: ReplayRow) => row.status >= 200 && row.status < 300 && row.error == null
 export const traceProvider = (id?: string, label?: string) => label || (id ? host().wbProviders?.labelOf(id) || id : t('提供商未记录'))
 export function traceAttempts(row: ReplayRow): TraceAttempt[] {

@@ -1,5 +1,5 @@
 export type {
-  AutoState, CheckinAccount, CheckinCenter, CheckinResult, CheckinSection, GrowthEntry, HistoryRow,
+  AutoState, BenefitKind, CheckinAccount, CheckinCenter, CheckinResult, CheckinSection, GrowthEntry, HistoryRow,
   KeepaliveState, OnboardingEntry, OnboardingSettlement, OnboardingTask, OutOfScope, PlanEntry,
   ProviderGroup, RecordsPage, RecordRow, ScheduleEntry, TravelAction,
   TravelRunResult, TravelState,
@@ -47,7 +47,7 @@ export function formatTime(value: unknown): string {
   if (!Number.isFinite(stamp) || stamp <= 0) return '—'
   const date = new Date(stamp)
   if (Number.isNaN(date.getTime())) return '—'
-  return date.toLocaleString('zh-CN', { hour12: false })
+  return date.toLocaleString(typeof document === 'undefined' ? undefined : document.documentElement.lang || undefined, { hour12: false })
 }
 
 /** 毫秒 → `HH:MM`（只关心当天时刻的场合） */
@@ -78,5 +78,7 @@ declare global {
       readonly currentPage?: string
     }
     wbZcodePlans?: { open(options: { id: string; name?: string }): void }
+    /** 提供商目录（providers.js）：把 provider id 翻成展示名 */
+    wbProviders?: { labelOf?: (id: string) => string }
   }
 }

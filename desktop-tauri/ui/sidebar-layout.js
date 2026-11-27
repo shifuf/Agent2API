@@ -69,7 +69,7 @@
    * `icon` 是 icons.js 里的键。
    */
   const MENUS = [
-    { key: 'assistant', label: wbI18n.t('AI 助手'), icon: 'spark' },
+    { key: 'assistant', label: wbI18n.t('对话'), icon: 'spark' },
     { key: 'overview', label: wbI18n.t('报表'), icon: 'overview' },
     { key: 'accounts', label: wbI18n.t('账号'), icon: 'accounts' },
     // 签到中心：**固定项**，与「账号」「模型管理」同级，不随插件装没装而消失。
@@ -82,15 +82,16 @@
     { key: 'checkin', label: wbI18n.t('签到中心'), icon: 'checkin' },
     { key: 'gateway', label: wbI18n.t('模型管理'), icon: 'gateway' },
     { key: 'routing', label: wbI18n.t('路由'), icon: 'route' },
-    // 工具服务：给客户端装上的可选能力（网络搜索 / 视觉分析），排在客户端
+    // MCP & Skills：给客户端装上的可选能力（网络搜索 / 视觉分析），排在客户端
     // 配置之后、出网代理之前 —— 前者是「接哪些客户端」，这一项是「接了能用什么」。
-    { key: 'tools', label: wbI18n.t('工具服务'), icon: 'tools' },
+    { key: 'tools', label: wbI18n.t('MCP & Skills'), icon: 'tools' },
     { key: 'proxies', label: wbI18n.t('网络代理'), icon: 'proxies' },
     { key: 'keys', label: wbI18n.t('网关 Key'), icon: 'key' },
     { key: 'docs', label: wbI18n.t('文档'), icon: 'logs' },
     { key: 'requests', label: wbI18n.t('请求日志'), icon: 'requests' },
     { key: 'logs', label: wbI18n.t('日志'), icon: 'logs' },
-    { key: 'tasks', label: wbI18n.t('定时任务'), icon: 'tasks' },
+    { key: 'scheduled', label: wbI18n.t('定时任务'), icon: 'scheduled' },
+    { key: 'tasks', label: wbI18n.t('自动维护'), icon: 'tasks' },
     // 提供商插件：各家 provider 的转发与账号实现都在插件包里，这一页是装插件的
     // 唯一入口。排在「设置」上面 —— 它是「让软件能用起来」的前置步骤，与设置同级
     // 但更靠前（没装插件时账号页与模型页都是空的）。
@@ -232,7 +233,7 @@
         { id: 'g-forward', label: '转发链路', custom: false, hidden: false,
           items: ['gateway', 'routing', 'tools', 'proxies', 'keys', 'docs'] },
         { id: 'g-diag', label: '诊断', custom: false, hidden: false,
-          items: ['requests', 'logs', 'tasks'] },
+          items: ['requests', 'logs', 'scheduled', 'tasks'] },
         { id: 'g-system', label: '系统', custom: false, hidden: false,
           items: ['plugins', 'settings'] },
       ],

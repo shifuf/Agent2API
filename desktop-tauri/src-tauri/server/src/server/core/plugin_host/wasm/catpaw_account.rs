@@ -69,9 +69,10 @@ fn authorize_desktop(account: &RowSource) -> Result<(), proto::WireError> {
         return Err(proto::WireError::with_code("当前 CatPaw 插件未声明本家固定本机读取能力", "forbidden"));
     }
     let store = plugin_accounts::shared().ok_or_else(unavailable)?;
-    let record = store.plugin_host_account(account.account()).ok_or_else(invalid_binding)?;
-    if record.provider != "catpaw" || record.id != account.account()
-        || !record.enabled || !record.desktop || record.identity != DESKTOP_ID {
+    let record = store.plugin_account(account.account()).ok_or_else(invalid_binding)?;
+    if record["provider"] != "catpaw" || record["id"].as_str() != Some(account.account())
+        || record["public"]["enabled"] != true || record["desktop"] != true
+        || record["identity"].as_str() != Some(DESKTOP_ID) {
         return Err(invalid_binding());
     }
     Ok(())
@@ -186,7 +187,9 @@ pub(in crate::server::core::plugin_host::wasm) fn credentials(
     if user_uid == DESKTOP_ID || account.desktop.is_none() && account.identity() != user_uid || user_uid.contains(token) {
         return Err(invalid_credentials());
     }
-    let raw_ua = account.user_agent().unwrap_or("");
+    let raw_ua = crate::server::core::user_agent::override_value(
+        "catpaw", account.user_agent().unwrap_or(""),
+    );
     if raw_ua.len() > MAX_UA_BYTES || !raw_ua.bytes().all(|byte| matches!(byte, 0x20..=0x7e)) {
         return Err(missing_user_agent());
     }

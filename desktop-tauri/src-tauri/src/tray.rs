@@ -11,23 +11,82 @@
 //! 不额外引入托盘专用图片资源。
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    AppHandle, Emitter, Manager,
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
 };
 
+use crate::native_ui::{self, Locale, TextKey};
 use crate::state::AppState;
 
 pub const TRAY_ID: &str = "main-tray";
 const MENU_SHOW: &str = "tray-show";
+const MENU_CHECK_UPDATE: &str = "tray-check-update";
 const MENU_QUIT: &str = "tray-quit";
+#[cfg(target_os = "linux")]
+const MENU_COMPATIBILITY: &str = "tray-compatibility";
+
+/// 同一份结构用于首次创建和语言切换；locale 快照保证一次重建内文案一致。
+fn build_menu(app: &AppHandle, locale: Locale) -> tauri::Result<Menu<tauri::Wry>> {
+    let show_item = MenuItem::with_id(
+        app,
+        MENU_SHOW,
+        native_ui::text_for(locale, TextKey::TrayShowMain),
+        true,
+        None::<&str>,
+    )?;
+    let check_update_item = MenuItem::with_id(
+        app,
+        MENU_CHECK_UPDATE,
+        native_ui::text_for(locale, TextKey::TrayCheckUpdate),
+        true,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(
+        app,
+        MENU_QUIT,
+        native_ui::text_for(locale, TextKey::TrayQuit),
+        true,
+        None::<&str>,
+    )?;
+    #[cfg(target_os = "linux")]
+    let compatibility_item = MenuItem::with_id(
+        app,
+        MENU_COMPATIBILITY,
+        native_ui::text_for(locale, TextKey::CompatibilityRestart),
+        true,
+        None::<&str>,
+    )?;
+    #[cfg(target_os = "linux")]
+    return Menu::with_items(
+        app,
+        &[
+            &show_item,
+            &check_update_item,
+            &compatibility_item,
+            &separator,
+            &quit_item,
+        ],
+    );
+    #[cfg(not(target_os = "linux"))]
+    Menu::with_items(
+        app,
+        &[&show_item, &check_update_item, &separator, &quit_item],
+    )
+}
+
+/// 前端每次词典初始化和语言切换都会调用。托盘尚未创建时无副作用。
+pub(crate) fn refresh_menu(app: &AppHandle) -> tauri::Result<()> {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return Ok(());
+    };
+    tray.set_menu(Some(build_menu(app, native_ui::current())?))
+}
 
 /// 创建托盘图标。应用启动时调用一次即可。
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, MENU_SHOW, "显示主窗口", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, MENU_QUIT, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-
+    let menu = build_menu(app, native_ui::current())?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         // 提示文字与窗口标题同一份（开发版带 "Dev" 标记，见 lib.rs 的 app_title）：
         // 两个实例同时跑时，托盘图标是唯一能一眼分清谁是谁的地方
@@ -37,6 +96,9 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_SHOW => show_main_window(app),
+            MENU_CHECK_UPDATE => request_update_check(app),
+            #[cfg(target_os = "linux")]
+            MENU_COMPATIBILITY => crate::graphics::confirm_compatibility_restart(app),
             MENU_QUIT => request_exit(app),
             _ => {}
         })
@@ -75,17 +137,19 @@ pub fn show_main_window(app: &AppHandle) {
     let _ = window.set_focus();
 }
 
-/// 真正退出应用。
-///
-/// 先置位「正在退出」标志再 `exit(0)`：开启关闭到托盘时，`exit(0)` 同样会走
-/// `RunEvent::ExitRequested`，没有这个标志就会被当成「用户关窗」再拦一次，
-/// 表现为「托盘点了退出但进程还在」。
-///
-/// 这里还要显式回收后端：`exit(0)` 这种程序化退出不保证触发 `RunEvent::Exit`
-/// （Tauri 已知行为），只靠 lib.rs 的兜底分支会漏掉，node 会带着 3065 端口
-/// 残留在后台。shutdown 是幂等的，多调一次无害。
+fn request_update_check(app: &AppHandle) {
+    app.state::<AppState>().window.request_update_check();
+    show_main_window(app);
+    let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "tray:check-update", ());
+}
+
+#[tauri::command]
+pub fn take_update_check_request(app: AppHandle, window: tauri::WebviewWindow) -> bool {
+    window.label() == crate::MAIN_WINDOW_LABEL
+        && app.state::<AppState>().window.take_update_check_request()
+}
+
+/// 托盘退出只提交意图；后台清理成功后才由统一协调器请求真正退出。
 pub fn request_exit(app: &AppHandle) {
-    app.state::<AppState>().begin_exit();
-    crate::backend::shutdown(&app.state::<AppState>());
-    app.exit(0);
+    let _ = crate::exit::request_quit(app, 0);
 }

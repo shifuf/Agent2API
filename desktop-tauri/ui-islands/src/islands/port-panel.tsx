@@ -214,7 +214,8 @@ function getSnapshot(): PortSnapshot {
 }
 
 export function useGatewayBase(): string {
-  return React.useSyncExternalStore(subscribe, getSnapshot).gatewayBase
+  const current = React.useSyncExternalStore(subscribe, getSnapshot).gatewayBase
+  return (window as unknown as { wbMobileBase?: () => string }).wbMobileBase?.() || current
 }
 
 function subscribe(listener: () => void): () => void {

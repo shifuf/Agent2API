@@ -278,8 +278,10 @@ async fn classify(service: &UpstreamService, ctx: &ProviderContext<'_>, group: &
     telemetry.mark_classifier_defaults();
     if let Some(cancel) = &cancel { telemetry.set_cancel_token(cancel.clone()); }
     let headers = classifier_headers();
-    let classifier = ProviderContext { body:&body, routing:route, compact_routed:false, stream:true, images:None,
+    let classifier = ProviderContext { body:&body, native:None, routing:route, error_policy:ctx.error_policy.clone(),
+        vision:None, direct_provider:None, direct_model:None, compact_routed:false, title_routed:false, stream:true, images:None,
         client_headers:&headers, telemetry:&telemetry, sanitize:ctx.sanitize, developer_role_compat:ctx.developer_role_compat,
+        privacy:ctx.privacy.clone(),
         image_compress:ctx.image_compress, prompt:ctx.prompt, preserve_system_prompt:true, key_scope:ctx.key_scope,
         pinned_account:None, ignore_model_gate:false, proxy_override:ctx.proxy_override };
     let mut slot = None;
@@ -321,6 +323,7 @@ async fn classify(service: &UpstreamService, ctx: &ProviderContext<'_>, group: &
                     }
                 }
             }
+            ForwardOutcome::Native(_) => return Err("classifier-protocol-mismatch".into()),
         }
         parse_classification(&content, &intents, effort)
     };
