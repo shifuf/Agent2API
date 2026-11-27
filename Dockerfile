@@ -42,6 +42,8 @@ COPY desktop-tauri/mobile/tsconfig.json desktop-tauri/mobile/vite.config.ts mobi
 COPY desktop-tauri/i18n i18n
 COPY desktop-tauri/ui-shared ui-shared
 COPY desktop-tauri/ui ui
+# /build mirrors desktop-tauri/, so ../../licenses imports resolve at /licenses.
+COPY licenses /licenses
 RUN npm --prefix ui-islands run build \
     && npm --prefix mobile run build \
     && npm --prefix i18n run build
