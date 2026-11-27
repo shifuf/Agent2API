@@ -18,7 +18,7 @@
 //! | 方案 | 打哪里 | 认证 | 主读数 |
 //! |---|---|---|---|
 //! | `sub2api` | `{base}/v1/usage` | 账号 API Key（Bearer） | 剩余额度（`quota.limit/used`，单位默认 USD） |
-//! | `new_api` | `{base}/api/user/self` + `{base}/api/status` | **控制台访问令牌**（Bearer + 可选 `new-api-user` 头） | `data.quota`，按 `/api/status` 的显示口径换算成货币 |
+//! | `new_api` | `/api/user/self`、`/api/subscription/self`、`/api/status` | **控制台访问令牌**（仅前两者） | 钱包和有效订阅按扣费偏好及站点口径换算 |
 //! | `deepseek` | `{base}/user/balance` | 账号 API Key（Bearer） | `balance_infos[].total_balance`（多币种） |
 //! | `opencode` | `{base}/v1/usage` | 账号 API Key（Bearer） | rolling / weekly / monthly 三窗口剩余百分比 |
 //! | `sensenova` | `platform.sensenova.cn` 控制面（与 base 无关） | **控制台账号密码**换 JWT（见 `sensenova_auth`） | 通用池 / Flash-Lite 池各 5 小时 / 7 天窗口剩余百分比 + 活动返赠 |
@@ -66,6 +66,7 @@ use crate::server::errors::GatewayError;
 use crate::server::logging;
 
 use super::balance_parse as parse;
+use super::balance_new_api;
 use super::sensenova_auth;
 
 /// 余额请求超时（与内置家的余额实现同一量级：15~20 秒）
@@ -220,6 +221,7 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
             let payload = get_json(&url, &bearer(&key), proxy, &what("用量")).await?;
             parse::parse_opencode(&payload).ok_or_else(|| invalid_response(label))
         }
+        Scheme::NewApi if credential.proxy_unavailable => Err(GatewayError::with_status(502, format!("{label} 账号所选代理不可用"))),
         Scheme::NewApi => query_new_api(&base_url, &query, proxy, label).await,
         Scheme::Zhipu => query_zhipu(&query, proxy, label).await,
         Scheme::ZhipuZai => query_zhipu_zai(&credential, proxy, label).await,
@@ -229,7 +231,7 @@ pub async fn query_usage(store: &AccountStore, account_id: &str) -> Result<Value
     Ok(report)
 }
 
-/// NewAPI：账户余额（`/api/user/self`）+ 显示口径（`/api/status`）。
+/// NewAPI：账户钱包、可选订阅、公开显示口径。旧站没有订阅接口时仍显示钱包。
 ///
 /// 状态接口是**公开**的（不鉴权），拿不到只影响「原始配额怎么显示成钱」，
 /// 不该让整次查询失败 —— 那时退回原始配额 + 单位 `quota`（源实现同口径）。
@@ -246,26 +248,24 @@ async fn query_new_api(
     }
     let self_url = build_url(base_url, Api::NewApiSelf)?;
     let status_url = build_url(base_url, Api::NewApiStatus)?;
+    let subscription_url = build_url(base_url, Api::NewApiSubscription)?;
+    let client = egress::resolved_client(proxy, false, "", &[])
+        .map_err(|_| GatewayError::with_status(502, format!("{label} 无法创建余额查询连接")))?;
     let mut headers = vec![("Authorization".to_string(), format!("Bearer {token}"))];
     let user_id = query.user_id.trim();
     if !user_id.is_empty() {
         headers.push(("new-api-user".to_string(), user_id.to_string()));
     }
-    let account = get_json(&self_url, &headers, proxy, &format!("{label} 账户余额")).await?;
+    let account = balance_new_api::get_json(&client, &self_url, &headers, label).await?;
     let Some((remaining, used)) = parse::parse_new_api_account(&account) else {
         return Err(invalid_response(label));
     };
-    let status = get_json(&status_url, &[], proxy, &format!("{label} 站点状态"))
-        .await
-        .ok();
-    let display = status.as_ref().and_then(parse::new_api_display);
-    Ok(parse::new_api_document(
-        remaining,
-        used,
-        display.as_ref(),
-        &account,
-        status.as_ref(),
-    ))
+    let (status, subscriptions) = tokio::join!(
+        balance_new_api::get_json(&client, &status_url, &[], label),
+        balance_new_api::get_json(&client, &subscription_url, &headers, label),
+    );
+    let display = status.ok().as_ref().and_then(parse::new_api_display);
+    Ok(balance_new_api::report(remaining, used, display.as_ref(), subscriptions.ok().as_ref(), logging::now_ms()))
 }
 
 /// 智谱：`bigmodel.cn` 控制台的账户余额（金额是人民币元）。
@@ -439,6 +439,7 @@ enum Api {
     NewApiSelf,
     /// `{base}/api/status`（NewAPI 站点状态，公开接口）
     NewApiStatus,
+    NewApiSubscription,
 }
 
 /// base + 目标接口 → 完整地址（base 非法时报 400，文案指向「提供商设置」）。
@@ -460,6 +461,10 @@ fn build_url(base_url: &str, api: Api) -> Result<String, GatewayError> {
     };
     let mut url = Url::parse(&candidate).map_err(|_| invalid())?;
     if url.host_str().unwrap_or("").is_empty() {
+        return Err(invalid());
+    }
+    if matches!(api, Api::NewApiSelf | Api::NewApiStatus | Api::NewApiSubscription)
+        && (!matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some()) {
         return Err(invalid());
     }
     let mut parts: Vec<String> = url
@@ -490,6 +495,7 @@ fn build_url(base_url: &str, api: Api) -> Result<String, GatewayError> {
         }
         Api::NewApiSelf => append_api_path(&mut parts, &["api", "user", "self"]),
         Api::NewApiStatus => append_api_path(&mut parts, &["api", "status"]),
+        Api::NewApiSubscription => append_api_path(&mut parts, &["api", "subscription", "self"]),
     }
     url.set_path(&format!("/{}", parts.join("/")));
     url.set_query(None);
@@ -499,13 +505,17 @@ fn build_url(base_url: &str, api: Api) -> Result<String, GatewayError> {
 
 /// NewAPI 的 `/api/...` 路径追加（末尾已是 `api` 时不重复那一段）
 fn append_api_path(parts: &mut Vec<String>, suffix: &[&str]) {
-    if ends_with(parts, suffix) {
-        return;
+    for endpoint in [&["api", "user", "self"][..], &["api", "subscription", "self"][..], &["api", "status"][..]] {
+        if parts.len() >= endpoint.len() && parts[parts.len() - endpoint.len()..].iter().zip(endpoint)
+            .all(|(part, expected)| part.eq_ignore_ascii_case(expected)) {
+            parts.truncate(parts.len() - endpoint.len());
+            break;
+        }
     }
-    if parts.last().map(String::as_str) == Some("v1") {
+    if parts.last().is_some_and(|part| part.eq_ignore_ascii_case("v1")) {
         parts.pop();
     }
-    if parts.last().map(String::as_str) == Some("api") && suffix.first() == Some(&"api") {
+    if parts.last().is_some_and(|part| part.eq_ignore_ascii_case("api")) && suffix.first() == Some(&"api") {
         parts.extend(suffix.iter().skip(1).map(|part| (*part).to_string()));
     } else {
         parts.extend(suffix.iter().map(|part| (*part).to_string()));

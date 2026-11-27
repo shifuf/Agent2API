@@ -1,15 +1,17 @@
 // Isolated gateway + real HTTP WebDAV regression. No production requests.
 import assert from "node:assert/strict";
-import { createHash, createHmac } from "node:crypto";
+import { createDecipheriv, createHash, createHmac, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from "node:timers/promises";
+import { createFixturePanelSession } from './fixtures/panel-session.mjs';
 const exe = path.resolve(process.argv[2]);
 const root = await mkdtemp(path.join(os.tmpdir(), "agent2api-cloud-daily-"));
 const provider = process.env.CLOUD_PROVIDER === "s3" ? "s3" : "webdav";
@@ -27,7 +29,7 @@ const key = "isolated-cloud-daily-admin",
   failed = [];
 let proc,
   output = "",
-  base;
+  base, panelToken;
 
 const escapeXml = (s) =>
   s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -241,6 +243,7 @@ async function ok(
     headers: {
       Authorization: "Bearer " + key,
       "Content-Type": "application/json",
+      ...(panelToken ? {'x-panel-token':panelToken} : {}),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(20000),
@@ -275,7 +278,8 @@ const manifests = () =>
       o.method === "PUT" &&
       o.path === "/agent2api-sync/v1/default/manifest.json",
   ).length;
-async function start() {
+async function start(home=root, accountKey='5'.repeat(64)) {
+  panelToken=null;
   const portServer = http.createServer();
   portServer.listen(0, "127.0.0.1");
   await once(portServer, "listening");
@@ -284,17 +288,19 @@ async function start() {
   base = "http://127.0.0.1:" + port;
   const env = {
     ...process.env,
-    AGENT2API_PROXY_HOME: root,
+    AGENT2API_PROXY_HOME: home,
     AGENT2API_HOST: "127.0.0.1",
     AGENT2API_PROXY_PORT: String(port),
     AGENT2API_PROXY_API_KEY: key,
-    AGENT2API_ACCOUNT_KEY: "5".repeat(64),
+    AGENT2API_ACCOUNT_KEY: accountKey,
+    AGENT2API_CAPTCHA_ENABLED: "0",
     AGENT2API_SELF_UPDATE: "0",
     AGENT2API_PANEL_PORT: "",
     AGENT2API_ADMIN_USER: "",
     AGENT2API_ADMIN_PASSWORD: "",
     AGENT2API_ADMIN_PASSWORD_HASH: "",
   };
+  if(!accountKey)delete env.AGENT2API_ACCOUNT_KEY;
   for (const k of [
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -305,7 +311,7 @@ async function start() {
   ])
     delete env[k];
   proc = spawn(exe, [], {
-    cwd: root,
+    cwd: home,
     env,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -319,6 +325,50 @@ async function stop() {
     const end = once(proc, "exit");
     proc.kill();
     await end;
+  }
+}
+async function checkKeyImport(config) {
+  const incoming=Buffer.from('5'.repeat(64),'hex');
+  const settings={...config,autoSync:false};
+  const payload={password:config.syncPassword};
+  for(const mode of ['different-file','same-file','different-env','same-env','fresh']){
+    await stop();const home=await mkdtemp(path.join(root,mode+'-'));const keyPath=path.join(home,'account.key');const file=mode==='different-file'?Buffer.alloc(32,119):mode==='same-file'?incoming:null;
+    if(file)await writeFile(keyPath,file);
+    await start(home,mode==='same-env'?'5'.repeat(64):mode==='different-env'?'8'.repeat(64):null);
+    const credentials={username:'cloud-key-fixture',password:randomUUID()+'aA!'};panelToken=(await createFixturePanelSession(base,credentials)).accessToken;
+    await ok('/api/cloud-sync',settings,'PUT');
+    const word='local-only-'+randomUUID();
+    if(mode==='fresh')assert.ok(!(await readdir(home)).includes('account.key'),'blank deployment must not need a pre-generated key');
+    else {
+      await ok('/api/privacy',{enabled:true,words:[word]},'PUT');
+      await ok('/api/notifications',{enabled:false,channels:{webhook:{enabled:true,url:`http://127.0.0.1:1/${word}`}}},'PUT');
+      await ok('/api/captcha/turnstile',{provider:'turnstile',siteKey:'fixture-site',secret:word,widgetOrigin:'https://fixture.invalid',hostnames:['fixture.invalid']},'PUT');
+      await ok('/api/panel-oauth',{origin:'https://panel.fixture.invalid',provider:'github',clientId:'fixture-client',secret:word,enabled:true},'PUT');
+      const db=new DatabaseSync(path.join(home,'agent2api.db'));try {
+        const saved=key=>JSON.parse(db.prepare('SELECT value FROM kv WHERE key=?').get(key).value).settingsEnc;
+        db.prepare("INSERT INTO task_plugins(id,name,enabled,created_at,updated_at) VALUES ('import-fixture','Fixture',0,0,0)").run();
+        db.prepare("INSERT INTO task_jobs(id,plugin_id,name,cron_expression,enabled,secrets_enc,storage_enc,created_at,updated_at) VALUES ('job','import-fixture','Fixture','0 9 * * *',0,?,?,0,0)").run(saved('panelOauth'),saved('panelTurnstile'));
+      }finally{db.close()}
+    }
+    const response=await fetch(base+'/api/cloud-sync/import-key',{method:'POST',headers:{'x-panel-token':panelToken,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(30000)});
+    assert.equal(response.status,mode.startsWith('different')?400:200,mode+' must not replace any established local Accounts key');
+    const files=await readdir(home);
+    assert.ok(!files.some(name=>name.startsWith('account.key.bak')),mode+' must not move the current key');
+    if(mode.endsWith('-env'))assert.ok(!files.includes('account.key'));
+    else assert.deepEqual(await readFile(keyPath),file??incoming);
+    if(mode!=='fresh'){
+      const preview=await ok('/api/privacy/test',{text:word});assert.ok(!JSON.stringify(preview).includes(word));
+      assert.equal((await ok('/api/notifications')).channels.webhook.urlSet,true);
+      assert.equal((await ok('/api/captcha/turnstile')).hasSecret,true);
+      assert.equal((await ok('/api/panel-oauth')).github.hasSecret,true);
+      const db=new DatabaseSync(path.join(home,'agent2api.db'));try{
+        const job=db.prepare("SELECT secrets_enc,storage_enc FROM task_jobs WHERE id='job'").get();
+        const actualKey=mode.endsWith('-env')?(mode==='same-env'?incoming:Buffer.alloc(32,136)):await readFile(keyPath);
+        for(const envelope of Object.values(job)){assert.ok(envelope.startsWith('enc1:'));const data=Buffer.from(envelope.slice(5),'base64');const cipher=createDecipheriv('aes-256-gcm',actualKey,data.subarray(0,12));cipher.setAuthTag(data.subarray(-16));assert.ok(Buffer.concat([cipher.update(data.subarray(12,-16)),cipher.final()]).includes(word))}
+      }finally{db.close()}
+    }
+    if(mode==='fresh'){const download=await ok('/api/cloud-sync/download',{});assert.equal(download.status,'downloaded');}
+    console.log('PASS',provider,'Accounts key import',mode);
   }
 }
 try {
@@ -355,6 +405,8 @@ try {
   };
   await ok("/api/cloud-sync", config, "PUT");
   await ok("/api/cloud-sync/upload", {});
+  if(process.argv.includes('--key-import-only'))await checkKeyImport(config);
+  else {
   await delay(1500);
   await test("same-day routine settings changes do not upload again", async () => {
     const n = manifests();
@@ -712,6 +764,7 @@ try {
       old + 1,
     );
   });
+  }
 } finally {
   await stop();
   dav.closeAllConnections();

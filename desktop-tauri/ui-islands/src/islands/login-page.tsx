@@ -29,6 +29,12 @@ import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { Button, Card, Input, Label, Verification } from '@ui'
 import { t } from '../i18n'
+import { desktopBrand } from '../panel-branding'
+import { useBranding, useBrandDocument } from '../../../ui-shared/panel-branding'
+import { mountTurnstile } from '../../../ui-shared/turnstile-widget'
+import { beginOAuth } from '../../../ui-shared/panel-oauth'
+
+Object.assign(window, { mountPanelTurnstile: mountTurnstile, beginPanelOAuth: beginOAuth })
 
 /** 挂载点 id：login.html 里唯一的岛容器 */
 const HOST_ID = 'login-app'
@@ -60,6 +66,7 @@ function CaptchaControl() {
     <Verification state={state} className='mx-auto mt-5' onClick={() => { void ref.current?.start?.() }}>
       {state === 'verifying' ? t('验证中…') : state === 'verified' ? t('验证成功') : state === 'error' ? t('验证失败，请重试') : t('我不是机器人')}
     </Verification>,
+    <div data-widget-host='' />,
   )
 }
 
@@ -70,11 +77,13 @@ function CaptchaControl() {
  * 脚本填，这里只提供位置与占位高度（min-h-5 让错误行出现前后布局不跳）。
  */
 function LoginPage() {
+  const brand = useBranding(desktopBrand)
+  useBrandDocument(`${brand.displayName} · ${t('登录')}`, brand.logoUrl)
   return (
     <Card className='w-[min(400px,100%)] p-[36px_34px_30px] shadow-3'>
       {/* 品牌标与桌面端 / 面板侧栏同一造型（icons.js 的 brand 项），底色是品牌色常量而非主题令牌 */}
       <div className='mb-[26px] flex flex-col items-center gap-3 text-center'>
-        <svg
+        {brand.logoUrl ? <img src={brand.logoUrl} width={52} height={52} alt='' style={{ objectFit: 'contain' }} /> : <svg
           viewBox='0 0 24 24'
           role='img'
           aria-label='Agent2API'
@@ -87,14 +96,15 @@ function LoginPage() {
             <path d='M18.77 14.76H8.06' />
             <path d='M8.06 12.24 5.23 14.76 8.06 17.28' />
           </g>
-        </svg>
+        </svg>}
         <div>
-          <h1 className='m-0 text-[21px] font-bold tracking-[0.2px]'>Agent2API</h1>
+          <h1 className='m-0 text-[21px] font-bold tracking-[0.2px]'>{brand.displayName}</h1>
           <div className='text-[12.5px] text-muted-foreground'>{t('OpenAI 兼容网关 · 管理面板')}</div>
         </div>
       </div>
 
       <div id='mode-tip' className='mb-[18px] text-center text-[13px] text-muted-foreground' />
+      <div id='oauth-buttons' />
 
       <form id='form' autoComplete='on'>
         <Label htmlFor='username' className='mt-3.5 mb-[5px] text-[12.5px]'>

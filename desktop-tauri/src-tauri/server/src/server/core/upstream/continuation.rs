@@ -371,6 +371,8 @@ pub fn sum_tokens(rounds: &[usage::UsageTokens]) -> usage::UsageTokens {
         acc.completion += round.completion;
         acc.total += round.total;
         acc.cache_read += round.cache_read;
+        acc.cache_write = acc.cache_write.saturating_add(round.cache_write);
+        acc.cache_write_1h = acc.cache_write_1h.saturating_add(round.cache_write_1h);
         acc.credit = match (acc.credit, round.credit) {
             (None, None) => None,
             (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
@@ -392,6 +394,10 @@ pub fn usage_json(tokens: &usage::UsageTokens) -> Value {
         "total_tokens": tokens.total,
         "prompt_tokens_details": { "cached_tokens": tokens.cache_read },
     });
+    if tokens.cache_write > 0 {
+        value["cache_creation_input_tokens"] = json!(tokens.cache_write);
+        value["cache_creation"] = json!({ "ephemeral_1h_input_tokens": tokens.cache_write_1h, "ephemeral_5m_input_tokens": tokens.cache_write.saturating_sub(tokens.cache_write_1h) });
+    }
     // 积分只在真有读数时写：拼出 `"credit": null` 会让下游误以为这一家
     // 「报了一个没有值」，而缺键与 null 在 `extract_usage` 里本来就等价。
     if let (Some(credit), Some(object)) = (tokens.credit, value.as_object_mut()) {
@@ -1337,8 +1343,8 @@ mod truncation_criteria {
         assert_eq!(9, round.completion, "同一轮里后到的 usage 是最终值");
 
         let rounds = [
-            usage::UsageTokens { prompt: 10, completion: 9, total: 19, cache_read: 4, credit: Some(0.25) },
-            usage::UsageTokens { prompt: 20, completion: 5, total: 25, cache_read: 0, credit: Some(0.5) },
+            usage::UsageTokens { prompt: 10, completion: 9, total: 19, cache_read: 4, credit: Some(0.25), ..Default::default() },
+            usage::UsageTokens { prompt: 20, completion: 5, total: 25, cache_read: 0, credit: Some(0.5), ..Default::default() },
         ];
         let merged = sum_tokens(&rounds);
         assert_eq!(30, merged.prompt, "每轮的 prompt 都含全部历史，真实成本按轮求和");

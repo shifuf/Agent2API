@@ -10,6 +10,9 @@ import { adoptAccountSorting } from './accounts-sort'
 import { GroupSettingsDialog } from './accounts-group-settings'
 import { RoutingSettingsDialog } from './routing-settings'
 import { RoutingStickyDialog } from './routing-sticky'
+import { TitleRouteSettings } from './routing-title-dialog'
+import { VisionAssistSettings } from './routing-vision-dialog'
+import { callJson } from './assistant-api'
 import { RoutingConfigPanel } from './routing-config-panel'
 import { RoutingGroupPanel } from './routing-group-panel'
 import { RoutingGroupsDashboard } from './routing-groups-dashboard'
@@ -171,6 +174,7 @@ export function RoutingPage() {
         ? workspace && !groupOverview ? `${groups.draft && strategy === 'provider' ? t('成员内轮询') : strategyLabel(strategy)} · ${t('粘滞 {mode}', { mode: stickyLabel(sticky) })}` : ''
         : t('历史只读，不影响当前配置')}</span>
       <div className='routing-page-actions'>
+        {mode === 'config' ? <><TitleRouteSettings /><VisionAssistSettings api={callJson} /></> : null}
         {mode === 'config' ? <div className='routing-overview-tabs'><Button variant='ghost' size='sm' data-active={groupOverview ? '' : undefined} aria-pressed={groupOverview} onClick={() => { setGroupOverview(true); void groups.load() }}>{t('路由组概览')}</Button>
           <Button variant='ghost' size='sm' data-active={!groupOverview ? '' : undefined} aria-pressed={!groupOverview} onClick={() => openScope('')}>{t('全局网关设置')}</Button></div> : null}
         {mode === 'replay' ? <Button variant='ghost' size='sm' onClick={() => host().wbApp?.showPage('requests')}><RouteIcon name='requests' />{t('请求日志')}</Button> : null}

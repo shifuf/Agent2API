@@ -131,7 +131,8 @@ pub async fn chat_completions(
     // 两边前后一致，见 client_reasoning_of 的说明）
     let client_reasoning = pipeline::client_reasoning_of(&payload);
     let compact_client = compact_routing::client_for_request(&request_source.behavior_client, &payload, RequestFormat::Chat);
-    let requested_model = match super::request_prepare::resolve_client_model(&state, &mut payload, scope.as_ref(), compact_client).await {
+    let title = crate::server::core::title_routing::client_for_request(&request_source.behavior_client, &headers, &payload, false);
+    let requested_model = match super::request_prepare::resolve_client_model(&state, &mut payload, scope.as_ref(), compact_client, title).await {
         Ok(model) => model,
         Err(error) => {
             record_early_failure(
@@ -484,7 +485,8 @@ pub fn spawn_catalog_refresh(state: &ServerState) {
         return;
     }
     let store = state.store().clone();
+    let update = state.update().clone();
     crate::spawn_task(async move {
-        crate::server::core::providers::adapter::refresh_implemented(&store).await;
+        let _ = crate::server::core::scheduled_tasks::refresh_catalog_if_due(&store,&update).await;
     });
 }

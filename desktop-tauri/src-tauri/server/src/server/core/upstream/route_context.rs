@@ -18,6 +18,7 @@ pub(crate) struct RequestRouting {
     pub turn_id: String,
     pub account_snapshot: Vec<Value>,
     pub classifier_stack: Vec<String>,
+    pub(super) vision_target: Option<String>,
     pub(super) retry_candidate: Option<String>,
     pub(super) attempt_health: std::sync::Arc<std::sync::Mutex<Option<super::route_health::ChannelLease>>>,
     /// Shared by this request's clones: a fallback consumes a pool only on its
@@ -68,7 +69,7 @@ impl RequestRouting {
         };
         Self { settings: profiles.settings_for(model, base), profile: profiles.effective(model).cloned(),
             scope: profiles.scope(model).to_string(), captured_at: crate::server::logging::now_ms(), group: None,
-            group_projection: Default::default(), source_test: None, profiles: profiles.clone(), excluded: Vec::new(), rule_trace: Vec::new(), turn_id: String::new(),
+            group_projection: Default::default(), vision_target: None, source_test: None, profiles: profiles.clone(), excluded: Vec::new(), rule_trace: Vec::new(), turn_id: String::new(),
             account_snapshot: accounts.to_vec(), classifier_stack: Vec::new(), retry_candidate: None, attempt_health: Default::default(), rotation_cursors: Default::default(), configuration_profiles, configuration_settings: base, positions: ordered.iter().enumerate().filter_map(|(index, account)|
                 routing::account_id(account).map(|id| (id.to_string(), index))).collect() }
     }
@@ -108,14 +109,7 @@ impl RequestRouting {
                         false
                     });
                 }
-                for candidate in &mut routing.group_projection.accounts {
-                    if let Some(model) = routing_groups::candidate_model(candidate).map(str::to_owned) {
-                        if let Some(item) = routing_groups::catalog_model(routing::provider_of(candidate), &model) {
-                            if let Some(cost) = item.get("cost").filter(|cost| cost.is_object()) { candidate["routingCost"] = cost.clone(); }
-                            if let Some(free) = item.get("free").and_then(Value::as_bool) { candidate["routingFree"] = free.into(); }
-                        }
-                    }
-                }
+                routing.apply_candidate_prices();
                 if let Some(continuation) = body.get("_wb_route_continue") {
                     routing.group_projection.accounts.retain(|account| {
                         continuation.get("candidateId").and_then(Value::as_str) == Some(routing_groups::attempt_key(account).as_str())
@@ -130,6 +124,15 @@ impl RequestRouting {
             }
         }
         Ok(routing)
+    }
+
+    pub(super) fn apply_candidate_prices(&mut self) {
+        for candidate in &mut self.group_projection.accounts {
+            if let Some(item) = routing_groups::candidate_model(candidate).and_then(|model| routing_groups::catalog_model(routing::provider_of(candidate), model)) {
+                if let Some(cost) = item.get("cost").filter(|cost| cost.is_object()) { candidate["routingCost"] = cost.clone(); }
+                if let Some(free) = item.get("free").and_then(Value::as_bool) { candidate["routingFree"] = free.into(); }
+            }
+        }
     }
 
     pub fn providers(&self, available: Vec<String>) -> Vec<String> {

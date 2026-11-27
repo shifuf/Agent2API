@@ -181,6 +181,14 @@ function componentSources() {
 
 /** 域解析：先精确名、再前缀；都命不中返回 null（调用方归 common + warning） */
 function domainOf(file) {
+  if (file === path.join(SHARED_SRC, 'community-inspector.tsx')) return 'common'
+  if (file === path.join(SHARED_SRC, 'local-task-plugins.tsx')) return 'tasks'
+  if (file === path.join(SHARED_SRC, 'notification-settings.tsx')) return 'settings'
+  if (file === path.join(SHARED_SRC, 'panel-branding.tsx')) return 'settings'
+  if (file === path.join(SHARED_SRC, 'privacy-settings.tsx')) return 'settings'
+  if (file === path.join(SHARED_SRC, 'turnstile-settings.tsx')) return 'settings'
+  if (file === path.join(SHARED_SRC, 'panel-oauth.tsx')) return 'settings'
+  if (file === path.join(SHARED_SRC, 'maintenance-history.tsx')) return 'tasks'
   if (file.startsWith(`${UI_KIT_SRC}${path.sep}`)) return 'common'
   const base = path.basename(file)
   for (const rule of DOMAIN_RULES) {
@@ -293,6 +301,16 @@ function scan() {
     path.join(UI, 'm.html'),
     ...islandSources(),
     path.join(SHARED_SRC, 'provider-docs-view.tsx'),
+    path.join(SHARED_SRC, 'community-inspector.tsx'),
+    path.join(SHARED_SRC, 'local-task-plugins.tsx'),
+    path.join(SHARED_SRC, 'notification-settings.tsx'),
+    path.join(SHARED_SRC, 'panel-branding.tsx'),
+    path.join(SHARED_SRC, 'privacy-settings.tsx'),
+    path.join(SHARED_SRC, 'turnstile-settings.tsx'),
+    path.join(SHARED_SRC, 'panel-oauth.tsx'),
+    path.join(SHARED_SRC, 'maintenance-history.tsx'),
+    path.join(SHARED_SRC, 'tools-provider-keys-view.tsx'),
+    path.join(SHARED_SRC, 'settings-pricing.tsx'),
     ...componentSources(),
     ...mobileSources(),
   ]

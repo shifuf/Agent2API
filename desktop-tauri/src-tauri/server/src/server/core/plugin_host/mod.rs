@@ -36,6 +36,7 @@ mod callbacks;
 pub mod catalog;
 mod compatibility;
 mod errors;
+pub(crate) mod community;
 mod gemini_signatures;
 mod install;
 mod leased_stream;
@@ -67,6 +68,8 @@ pub use wasm::owns as is_wasm_provider;
 mod tests;
 
 pub use callbacks::GatewayCallbacks;
+#[cfg(feature = "task-plugins")]
+pub(crate) use install::OFFICIAL_PUBKEYS;
 pub use bootstrap::{
     reload as reload_host, set_loopback_port, spawn as spawn_bootstrap, start as bootstrap_host,
     StoreCallbacks,

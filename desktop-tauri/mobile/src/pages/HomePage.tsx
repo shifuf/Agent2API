@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { mobileBrand } from '../lib/panel-branding'
+import { useBranding } from '../../../ui-shared/panel-branding'
 import { PageHead, IconButton, SectionHead, Empty, ErrorNote, copyWithToast } from '../components/ui'
 import { ProviderLogo, GlyphLogo } from '../components/ProviderLogo'
 import { HiddenAccountsNotice } from '../components/HiddenAccountsNotice'
@@ -28,6 +30,7 @@ import { Card, Button } from '@ui'
  * 其余细节点进去看。
  */
 export function HomePage() {
+  const brand = useBranding(mobileBrand)
   const state = useStore()
   const session = state.session
   const accounts = session?.accounts?.accounts || []
@@ -82,7 +85,7 @@ export function HomePage() {
     <div className='m-page' ref={pull.bindRef}>
       <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
       <PageHead
-        title={t('网关运行中')}
+        title={brand.displayName === 'Agent2API' ? t('网关运行中') : brand.displayName}
         subtitle={t('{n} 个账号启用 · {m} 个限流中', { n: enabled, m: limited })}
         actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void store.refresh(true)} />}
       />
@@ -103,6 +106,7 @@ export function HomePage() {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {brand.logoUrl && <img src={brand.logoUrl} alt='' width={28} height={28} style={{ objectFit: 'contain' }} />}
             <span
               style={{
                 display: 'inline-flex',

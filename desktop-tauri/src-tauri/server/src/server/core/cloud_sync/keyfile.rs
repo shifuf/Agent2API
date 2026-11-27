@@ -209,52 +209,6 @@ pub(crate) fn open_key(raw: &[u8], password: &str) -> Result<[u8; KEY_LEN], Stri
     Ok(key)
 }
 
-/// 把解出的密钥装到本机：写 `account.key`，旧文件改名保留。
-///
-/// ── 为什么要先备份旧文件 ────────────────────────────────────
-/// 下载可能是「用户想换回旧机器的状态」，也可能是「误操作」。旧密钥一旦被覆盖
-/// 且没有副本，本机原有账号的密文就再也解不开了。改名成
-/// `account.key.bak-<时间戳>` 而不是删除：出问题时用户能手工换回来。
-///
-/// ── 为什么必须重置 crypto 缓存 ──────────────────────────────
-/// 见 `crypto::reset_cache` 的说明：不重置的话，本次运行剩余时间用的还是旧密钥。
-pub(crate) fn install_key(key_bytes: &[u8]) -> Result<Option<String>, String> {
-    if key_bytes.len() != KEY_LEN {
-        return Err("账号密钥长度异常".to_string());
-    }
-    let path = crypto::key_file_path(crypto::SecretScope::Accounts);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|error| format!("创建配置目录失败: {error}"))?;
-    }
-    let backup_name = if path.exists() {
-        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let backup = path.with_file_name(format!("account.key.bak-{stamp}"));
-        std::fs::rename(&path, &backup).map_err(|error| {
-            format!(
-                "备份原账号密钥失败（{}）：{error}",
-                path.display()
-            )
-        })?;
-        Some(
-            backup
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default(),
-        )
-    } else {
-        None
-    };
-    std::fs::write(&path, key_bytes)
-        .map_err(|error| format!("写入账号密钥失败（{}）：{error}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    crypto::reset_cache(crypto::SecretScope::Accounts);
-    Ok(backup_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

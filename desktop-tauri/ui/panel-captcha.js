@@ -117,6 +117,7 @@
       /** 求解代次：reset / 重连会 +1，旧的一轮跑完直接丢弃结果 */
       this.generation = 0
       this.timer = null
+      this.closeWidget = null
       this.onClick = () => { void this.start() }
     }
 
@@ -129,6 +130,7 @@
 
     disconnectedCallback() {
       this.removeEventListener('click', this.onClick)
+      if (this.closeWidget) this.closeWidget()
       clearTimeout(this.timer)
       this.generation += 1
     }
@@ -136,6 +138,7 @@
     /** 作废当前答案并重新领题求解（登录页在提交失败后调用） */
     reset() {
       this.dropPayload()
+      this.setState('idle')
       void this.start()
     }
 
@@ -149,6 +152,9 @@
     async start() {
       if (this.state === 'verifying') return
       var generation = ++this.generation
+      clearTimeout(this.timer)
+      this.dropPayload()
+      if (this.closeWidget) { this.closeWidget(); this.closeWidget = null }
       this.setState('verifying')
       var challenge
       try {
@@ -160,6 +166,21 @@
         return
       }
       try {
+        if (generation !== this.generation) return
+        if (challenge.provider === 'turnstile') {
+          this.closeWidget = window.mountPanelTurnstile(this.querySelector('[data-widget-host]'), challenge.widgetOrigin, location.href, challenge.siteKey, result => {
+            if (generation !== this.generation) return
+            if (result.state === 'verified') {
+              this.payload = result.token
+              this.setState('verified')
+              this.dispatchEvent(new CustomEvent('verified', { detail: { payload: result.token } }))
+            } else {
+              this.dropPayload()
+              this.setState('error')
+            }
+          })
+          return
+        }
         var number = await this.solve(challenge, generation)
         if (generation !== this.generation) return
         // 服务端要的是 base64(JSON)（std 与 url-safe 都认，btoa 给的是 std）。

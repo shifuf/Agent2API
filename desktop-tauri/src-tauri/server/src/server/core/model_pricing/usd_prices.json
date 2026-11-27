@@ -1,0 +1,3067 @@
+{
+  "generatedAt": 1795378275717,
+  "prices": {
+    "aion20": {
+      "input": 0.8,
+      "output": 1.6,
+      "cacheRead": 0.2
+    },
+    "aion30": {
+      "input": 3,
+      "output": 6,
+      "cacheRead": 0.75
+    },
+    "aion30mini": {
+      "input": 0.7,
+      "output": 1.4,
+      "cacheRead": 0.18
+    },
+    "aionrpllama318b": {
+      "input": 0.8464,
+      "output": 1.6928
+    },
+    "allam27b": {
+      "input": 0,
+      "output": 0
+    },
+    "apertus70b": {
+      "input": 0.82,
+      "output": 2.92
+    },
+    "apertus8b": {
+      "input": 0.1,
+      "output": 0.2
+    },
+    "apertusv1570b": {
+      "input": 1.16,
+      "output": 3.94
+    },
+    "apertusv158b": {
+      "input": 0.0238,
+      "output": 0.119,
+      "cacheRead": 0.0036
+    },
+    "apodex11mini": {
+      "input": 0,
+      "output": 0
+    },
+    "arrow2": {
+      "input": 4,
+      "output": 20,
+      "cacheRead": 0.4,
+      "cacheWrite": 5
+    },
+    "arrow2telos": {
+      "input": 6,
+      "output": 30,
+      "cacheRead": 0.6,
+      "cacheWrite": 7.5
+    },
+    "asure12b": {
+      "input": 0.1,
+      "output": 0.5,
+      "cacheRead": 0.025
+    },
+    "autoglmphone9bmultilingual": {
+      "input": 0.035,
+      "output": 0.138
+    },
+    "baichuanm232b": {
+      "input": 0.07,
+      "output": 0.07
+    },
+    "beam10501ba23b": {
+      "input": 0,
+      "output": 0
+    },
+    "c4aiayaexpanse32b": {
+      "input": 0.5,
+      "output": 1.5
+    },
+    "claude35haiku20241022": {
+      "input": 0.8,
+      "output": 4,
+      "cacheRead": 0.08,
+      "cacheWrite": 1,
+      "cacheWrite1h": 1.6
+    },
+    "claude35sonnet20241022": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75,
+      "cacheWrite1h": 6
+    },
+    "claude37sonnet20250219": {
+      "input": 3,
+      "output": 15
+    },
+    "claude3haiku20240307": {
+      "input": 0.25,
+      "output": 1.25,
+      "cacheRead": 0.03,
+      "cacheWrite": 0.3,
+      "cacheWrite1h": 0.5
+    },
+    "claudefable5": {
+      "input": 10,
+      "output": 50,
+      "cacheRead": 1,
+      "cacheWrite": 12.5,
+      "cacheWrite1h": 20
+    },
+    "claudefable51": {
+      "input": 10,
+      "output": 50,
+      "cacheRead": 0.25,
+      "cacheWrite": 12.5,
+      "cacheWrite1h": 20
+    },
+    "claudefable52": {
+      "input": 8,
+      "output": 40,
+      "cacheRead": 0.2,
+      "cacheWrite": 10,
+      "cacheWrite1h": 16
+    },
+    "claudehaiku45": {
+      "input": 1,
+      "output": 5,
+      "cacheRead": 0.1,
+      "cacheWrite": 1.25,
+      "cacheWrite1h": 2
+    },
+    "claudehaiku4520251001": {
+      "input": 1,
+      "output": 5
+    },
+    "claudehaiku55": {
+      "input": 0.1,
+      "output": 0.5,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125,
+      "cacheWrite1h": 0.2,
+      "tiers": [
+        {
+          "above": 100000,
+          "input": 0.5,
+          "output": 2.5,
+          "cacheRead": 0.05,
+          "cacheWrite": 0.625,
+          "cacheWrite1h": 1
+        }
+      ]
+    },
+    "claudemythos5": {
+      "input": 10,
+      "output": 50,
+      "cacheRead": 1,
+      "cacheWrite": 12.5,
+      "cacheWrite1h": 20
+    },
+    "claudeopus40": {
+      "input": 15,
+      "output": 75,
+      "cacheRead": 1.5,
+      "cacheWrite": 18.75,
+      "cacheWrite1h": 30
+    },
+    "claudeopus41": {
+      "input": 15,
+      "output": 75,
+      "cacheRead": 1.5,
+      "cacheWrite": 18.75,
+      "cacheWrite1h": 30
+    },
+    "claudeopus4120250805": {
+      "input": 15,
+      "output": 75,
+      "cacheRead": 1.5,
+      "cacheWrite": 18.75,
+      "cacheWrite1h": 30
+    },
+    "claudeopus420250514": {
+      "input": 15,
+      "output": 75
+    },
+    "claudeopus45": {
+      "input": 5,
+      "output": 25,
+      "cacheRead": 0.5,
+      "cacheWrite": 6.25,
+      "cacheWrite1h": 10
+    },
+    "claudeopus4520251101": {
+      "input": 5,
+      "output": 25
+    },
+    "claudeopus46": {
+      "input": 5,
+      "output": 25
+    },
+    "claudeopus47": {
+      "input": 5,
+      "output": 25,
+      "cacheRead": 0.5,
+      "cacheWrite": 6.25,
+      "cacheWrite1h": 10,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 10,
+          "output": 37.5,
+          "cacheRead": 1,
+          "cacheWrite": 12.5,
+          "cacheWrite1h": 20
+        }
+      ]
+    },
+    "claudeopus48": {
+      "input": 5,
+      "output": 25,
+      "cacheRead": 0.5,
+      "cacheWrite": 6.25,
+      "cacheWrite1h": 10
+    },
+    "claudeopus5": {
+      "input": 5,
+      "output": 25,
+      "cacheRead": 0.5,
+      "cacheWrite": 6.25,
+      "cacheWrite1h": 10
+    },
+    "claudeopus55": {
+      "input": 4,
+      "output": 20,
+      "cacheRead": 0.2,
+      "cacheWrite": 5,
+      "cacheWrite1h": 8
+    },
+    "claudesonnet40": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75,
+      "cacheWrite1h": 6
+    },
+    "claudesonnet420250514": {
+      "input": 3,
+      "output": 15
+    },
+    "claudesonnet45": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75,
+      "cacheWrite1h": 6
+    },
+    "claudesonnet4520250929": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75,
+      "cacheWrite1h": 6,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 6,
+          "output": 22.5,
+          "cacheRead": 0.3,
+          "cacheWrite": 3.75,
+          "cacheWrite1h": 12
+        }
+      ]
+    },
+    "claudesonnet46": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3.75,
+      "cacheWrite1h": 6,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 6,
+          "output": 22.5,
+          "cacheRead": 0.3,
+          "cacheWrite": 3.75,
+          "cacheWrite1h": 12
+        }
+      ]
+    },
+    "claudesonnet5": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.2,
+      "cacheWrite": 2.5,
+      "cacheWrite1h": 4
+    },
+    "claudesonnet55": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.1,
+      "cacheWrite": 2.5,
+      "cacheWrite1h": 4
+    },
+    "cobuddy": {
+      "input": 0.28,
+      "output": 1.13,
+      "cacheRead": 0.07
+    },
+    "codestral2508": {
+      "input": 0.3,
+      "output": 0.9,
+      "cacheRead": 0.03
+    },
+    "codestrallatest": {
+      "input": 0.3,
+      "output": 0.9,
+      "cacheRead": 0.03
+    },
+    "commanda": {
+      "input": 2.645,
+      "output": 10.58
+    },
+    "commanda032025": {
+      "input": 2.5,
+      "output": 10
+    },
+    "commandaplus052026": {
+      "input": 2.5,
+      "output": 10
+    },
+    "commandareasoning082025": {
+      "input": 2.5,
+      "output": 10
+    },
+    "commandatranslate082025": {
+      "input": 2.5,
+      "output": 10
+    },
+    "commandavision072025": {
+      "input": 2.5,
+      "output": 10
+    },
+    "commandr082024": {
+      "input": 0.15,
+      "output": 0.6
+    },
+    "commandr7b122024": {
+      "input": 0.0375,
+      "output": 0.15
+    },
+    "commandr7barabic022025": {
+      "input": 0.0375,
+      "output": 0.15
+    },
+    "commandrplus082024": {
+      "input": 2.5,
+      "output": 10
+    },
+    "cydonia24bv41": {
+      "input": 0.3174,
+      "output": 0.529,
+      "cacheRead": 0.1587
+    },
+    "deepresearchmaxpreview042026": {
+      "input": 2,
+      "output": 12,
+      "cacheRead": 0.2,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 18,
+          "cacheRead": 0.4
+        }
+      ]
+    },
+    "deepresearchpreview042026": {
+      "input": 2,
+      "output": 12,
+      "cacheRead": 0.2,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 18,
+          "cacheRead": 0.4
+        }
+      ]
+    },
+    "deepseekchat": {
+      "input": 0.15,
+      "output": 0.6,
+      "cacheRead": 0.003
+    },
+    "deepseekchatv30324": {
+      "input": 0.30682,
+      "output": 1.20612,
+      "cacheRead": 0.14812
+    },
+    "deepseekchatv31": {
+      "input": 0.25,
+      "output": 0.95,
+      "cacheRead": 0.13
+    },
+    "deepseekocr2": {
+      "input": 0.03,
+      "output": 0.03
+    },
+    "deepseekr1": {
+      "input": 3,
+      "output": 7
+    },
+    "deepseekr10528": {
+      "input": 0.574,
+      "output": 2.294
+    },
+    "deepseekr10528qwen38b": {
+      "input": 0.06,
+      "output": 0.09
+    },
+    "deepseekr1distillqwen32b": {
+      "input": 0.287,
+      "output": 0.861
+    },
+    "deepseekreasoner": {
+      "input": 0.56,
+      "output": 1.68,
+      "cacheRead": 0.07
+    },
+    "deepseekv3": {
+      "input": 0.287,
+      "output": 1.147
+    },
+    "deepseekv30324": {
+      "input": 0.25,
+      "output": 1
+    },
+    "deepseekv31": {
+      "input": 0.55,
+      "output": 1.66
+    },
+    "deepseekv32": {
+      "input": 0.29,
+      "output": 0.43
+    },
+    "deepseekv41flash": {
+      "input": 0.15,
+      "output": 0.6,
+      "cacheRead": 0.003
+    },
+    "deepseekv41flash1017": {
+      "input": 0.15,
+      "output": 0.6,
+      "cacheRead": 0.003
+    },
+    "deepseekv4flash": {
+      "input": 0.14,
+      "output": 0.28,
+      "cacheRead": 0.03
+    },
+    "deepseekv4flash0423": {
+      "input": 0.139,
+      "output": 0.278
+    },
+    "deepseekv4flash0731": {
+      "input": 0.04444,
+      "output": 0.13332,
+      "cacheRead": 0.001414
+    },
+    "deepseekv4flashvisionexp": {
+      "input": 0.155,
+      "output": 0.62,
+      "cacheRead": 0.0031
+    },
+    "deepseekv4pro": {
+      "input": 1.74,
+      "output": 3.48,
+      "cacheRead": 0.15
+    },
+    "deepseekv4pro0423": {
+      "input": 1.65,
+      "output": 3.3
+    },
+    "deepseekv4pro0813": {
+      "input": 0.66,
+      "output": 1.98,
+      "cacheRead": 0.022
+    },
+    "devstral2512": {
+      "input": 0.46552,
+      "output": 2.3276,
+      "cacheRead": 0.046552
+    },
+    "devstralmediumlatest": {
+      "input": 0.44,
+      "output": 2.2
+    },
+    "diffusiongemma26ba4bit": {
+      "input": 0.05,
+      "output": 0.15,
+      "cacheRead": 0.025
+    },
+    "dolphinmistral24bveniceedition": {
+      "input": 0.2116,
+      "output": 0.9522
+    },
+    "ember1": {
+      "input": 2.7,
+      "output": 13.5,
+      "cacheRead": 0.27
+    },
+    "ernie4521ba3b": {
+      "input": 0.07,
+      "output": 0.28
+    },
+    "ernie45300ba47b": {
+      "input": 0.28,
+      "output": 1.1
+    },
+    "ernie45vl424ba47b": {
+      "input": 0.42,
+      "output": 1.25
+    },
+    "flint": {
+      "input": 0,
+      "output": 0
+    },
+    "fugumax": {
+      "input": 2.116,
+      "output": 6.348,
+      "cacheRead": 0.2645
+    },
+    "fuguultra": {
+      "input": 5,
+      "output": 30,
+      "cacheRead": 0.5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 10,
+          "output": 45,
+          "cacheRead": 1
+        }
+      ]
+    },
+    "fuguultrav2": {
+      "input": 5.29,
+      "output": 31.74,
+      "cacheRead": 0.529
+    },
+    "gemini20flash": {
+      "input": 0.1,
+      "output": 0.42
+    },
+    "gemini20flashlite": {
+      "input": 0.075,
+      "output": 0.3
+    },
+    "gemini25computerusepreview102025": {
+      "input": 1.25,
+      "output": 10
+    },
+    "gemini25flash": {
+      "input": 0.3,
+      "output": 2.5,
+      "cacheRead": 0.03
+    },
+    "gemini25flashlite": {
+      "input": 0.1,
+      "output": 0.4,
+      "cacheRead": 0.01
+    },
+    "gemini25flashlitepreview0617": {
+      "input": 0.09,
+      "output": 0.36
+    },
+    "gemini25flashlitepreview092025": {
+      "input": 0.1,
+      "output": 0.4
+    },
+    "gemini25flashpreview0520": {
+      "input": 0.1425,
+      "output": 3.325,
+      "cacheRead": 0.0285
+    },
+    "gemini25pro": {
+      "input": 1.25,
+      "output": 10,
+      "cacheRead": 0.125,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 2.5,
+          "output": 15,
+          "cacheRead": 0.25
+        }
+      ]
+    },
+    "gemini25propreview": {
+      "input": 1.1875,
+      "output": 9.5,
+      "cacheRead": 0.1187
+    },
+    "gemini31flashlite": {
+      "input": 0.25,
+      "output": 1.5,
+      "cacheRead": 0.03
+    },
+    "gemini31flashlitepreview": {
+      "input": 0.25,
+      "output": 1.5
+    },
+    "gemini31propreview": {
+      "input": 2,
+      "output": 12,
+      "cacheRead": 0.2,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 18,
+          "cacheRead": 0.4
+        }
+      ]
+    },
+    "gemini31propreviewcustomtools": {
+      "input": 2,
+      "output": 12,
+      "cacheRead": 0.2,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 18,
+          "cacheRead": 0.4
+        }
+      ]
+    },
+    "gemini35flash": {
+      "input": 1.5,
+      "output": 9
+    },
+    "gemini35flashlite": {
+      "input": 0.3,
+      "output": 2.5,
+      "cacheRead": 0.03
+    },
+    "gemini36flash": {
+      "input": 0.75,
+      "output": 3.75,
+      "cacheRead": 0.075
+    },
+    "gemini37flash": {
+      "input": 0.75,
+      "output": 3.75,
+      "cacheRead": 0.075
+    },
+    "gemini38flash": {
+      "input": 0.75,
+      "output": 3.75,
+      "cacheRead": 0.075
+    },
+    "gemini3flashpreview": {
+      "input": 0.5,
+      "output": 3
+    },
+    "gemini3propreview": {
+      "input": 2,
+      "output": 12,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 18
+        }
+      ]
+    },
+    "gemini4argon": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.1
+    },
+    "gemini4carbon": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.1
+    },
+    "gemini4hydrogen": {
+      "input": 1.5,
+      "output": 7.5,
+      "cacheRead": 0.075
+    },
+    "gemini4neon": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.15
+    },
+    "geminiflashlatest": {
+      "input": 1.587,
+      "output": 9.522,
+      "cacheRead": 0.1587,
+      "cacheWrite": 0.088167
+    },
+    "geminiflashlitelatest": {
+      "input": 0.3,
+      "output": 2.5,
+      "cacheRead": 0.03
+    },
+    "geminiroboticser16preview": {
+      "input": 1,
+      "output": 5
+    },
+    "gemma227bit": {
+      "input": 0.6877,
+      "output": 0.6877
+    },
+    "gemma312bit": {
+      "input": 0.0529,
+      "output": 0.1587,
+      "cacheRead": 0.04232
+    },
+    "gemma327bit": {
+      "input": 0.1587,
+      "output": 0.48668,
+      "cacheRead": 0.07935
+    },
+    "gemma34bit": {
+      "input": 0.0529,
+      "output": 0.1058,
+      "cacheRead": 0.04232
+    },
+    "gemma412bit": {
+      "input": 0.045,
+      "output": 0.23,
+      "cacheRead": 0.0225
+    },
+    "gemma426ba4bit": {
+      "input": 0.0765,
+      "output": 0.255,
+      "cacheRead": 0.0425
+    },
+    "gemma431bit": {
+      "input": 0.14,
+      "output": 0.4
+    },
+    "gemma4e2bit": {
+      "input": 0.04,
+      "output": 0.08
+    },
+    "gemma4e4bit": {
+      "input": 0,
+      "output": 0
+    },
+    "gemmasealionv427bit": {
+      "input": 0.351,
+      "output": 0.555
+    },
+    "glm45": {
+      "input": 0.6,
+      "output": 2.2,
+      "cacheRead": 0.11
+    },
+    "glm45air": {
+      "input": 0.11952,
+      "output": 0.89637,
+      "cacheRead": 0.0239,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.17927,
+          "output": 1.19516,
+          "cacheRead": 0.03585
+        }
+      ]
+    },
+    "glm45flash": {
+      "input": 0,
+      "output": 0
+    },
+    "glm45v": {
+      "input": 0.29879,
+      "output": 0.89637,
+      "cacheRead": 0.05976,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.59758,
+          "output": 1.79274,
+          "cacheRead": 0.11952
+        }
+      ]
+    },
+    "glm46": {
+      "input": 0.6,
+      "output": 2.2,
+      "cacheRead": 0.11
+    },
+    "glm46v": {
+      "input": 0.1494,
+      "output": 0.44819,
+      "cacheRead": 0.02988,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.29879,
+          "output": 0.89637,
+          "cacheRead": 0.05976
+        }
+      ]
+    },
+    "glm46vflash": {
+      "input": 0,
+      "output": 0
+    },
+    "glm47": {
+      "input": 0.44819,
+      "output": 2.09153,
+      "cacheRead": 0.08964,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.59758,
+          "output": 2.39032,
+          "cacheRead": 0.11952
+        }
+      ]
+    },
+    "glm47flash": {
+      "input": 0,
+      "output": 0
+    },
+    "glm47flashx": {
+      "input": 0.0747,
+      "output": 0.44819,
+      "cacheRead": 0.01494
+    },
+    "glm5": {
+      "input": 0.59758,
+      "output": 2.68911,
+      "cacheRead": 0.1494,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.89637,
+          "output": 3.28669,
+          "cacheRead": 0.22409
+        }
+      ]
+    },
+    "glm51": {
+      "input": 0.89637,
+      "output": 3.58548,
+      "cacheRead": 0.19421,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 1.19516,
+          "output": 4.18306,
+          "cacheRead": 0.29879
+        }
+      ]
+    },
+    "glm52": {
+      "input": 1.19516,
+      "output": 4.18306,
+      "cacheRead": 0.29879
+    },
+    "glm53": {
+      "input": 1.19516,
+      "output": 4.18306,
+      "cacheRead": 0.29879
+    },
+    "glm53flash": {
+      "input": 0.29879,
+      "output": 1.04577,
+      "cacheRead": 0.08516
+    },
+    "glm5turbo": {
+      "input": 0.72,
+      "output": 3.2,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 1.1,
+          "output": 3.8
+        }
+      ]
+    },
+    "glm5vturbo": {
+      "input": 0.74698,
+      "output": 3.28669,
+      "cacheRead": 0.17927,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 1.04577,
+          "output": 3.88427,
+          "cacheRead": 0.26891
+        }
+      ]
+    },
+    "gpt35turbo": {
+      "input": 0.5,
+      "output": 1.5
+    },
+    "gpt4": {
+      "input": 30,
+      "output": 60
+    },
+    "gpt41": {
+      "input": 2,
+      "output": 8
+    },
+    "gpt41mini": {
+      "input": 0.4,
+      "output": 1.6
+    },
+    "gpt41nano": {
+      "input": 0.1,
+      "output": 0.4
+    },
+    "gpt4o": {
+      "input": 2.5,
+      "output": 10
+    },
+    "gpt4o20240513": {
+      "input": 5.29,
+      "output": 15.87
+    },
+    "gpt4o20240806": {
+      "input": 2.5,
+      "output": 10,
+      "cacheRead": 1.25
+    },
+    "gpt4o20241120": {
+      "input": 2.5,
+      "output": 10
+    },
+    "gpt4omini": {
+      "input": 0.15,
+      "output": 0.6
+    },
+    "gpt4turbo": {
+      "input": 10,
+      "output": 30
+    },
+    "gpt5": {
+      "input": 1.25,
+      "output": 10,
+      "cacheRead": 0.125
+    },
+    "gpt51": {
+      "input": 1.25,
+      "output": 10
+    },
+    "gpt51chatlatest": {
+      "input": 1.25,
+      "output": 10
+    },
+    "gpt51codex": {
+      "input": 1.25,
+      "output": 10,
+      "cacheRead": 0.125
+    },
+    "gpt51codexmax": {
+      "input": 1.25,
+      "output": 10
+    },
+    "gpt51codexmini": {
+      "input": 0.25,
+      "output": 2,
+      "cacheRead": 0.025
+    },
+    "gpt52": {
+      "input": 1.75,
+      "output": 14
+    },
+    "gpt52chatlatest": {
+      "input": 1.75,
+      "output": 14
+    },
+    "gpt52codex": {
+      "input": 1.75,
+      "output": 14,
+      "cacheRead": 0.175
+    },
+    "gpt52pro": {
+      "input": 22.218,
+      "output": 177.744
+    },
+    "gpt53chatlatest": {
+      "input": 1.75,
+      "output": 14
+    },
+    "gpt53codex": {
+      "input": 1.75,
+      "output": 14,
+      "cacheRead": 0.175
+    },
+    "gpt53codexspark": {
+      "input": 1.75,
+      "output": 14,
+      "cacheRead": 0.175
+    },
+    "gpt54": {
+      "input": 2.5,
+      "output": 15,
+      "cacheRead": 0.25,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 5,
+          "output": 22.5,
+          "cacheRead": 0.25
+        }
+      ]
+    },
+    "gpt54mini": {
+      "input": 0.75,
+      "output": 4.5,
+      "cacheRead": 0.075
+    },
+    "gpt54nano": {
+      "input": 0.2,
+      "output": 1.25,
+      "cacheRead": 0.02
+    },
+    "gpt54pro": {
+      "input": 31.74,
+      "output": 190.44
+    },
+    "gpt55": {
+      "input": 5,
+      "output": 30,
+      "cacheRead": 0.5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 10,
+          "output": 45,
+          "cacheRead": 0.5
+        }
+      ]
+    },
+    "gpt55instant": {
+      "input": 5,
+      "output": 30,
+      "cacheRead": 0.5
+    },
+    "gpt55pro": {
+      "input": 30,
+      "output": 180,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 60,
+          "output": 270
+        }
+      ]
+    },
+    "gpt56cyber": {
+      "input": 12.5,
+      "output": 75,
+      "cacheRead": 1.25,
+      "cacheWrite": 15.625
+    },
+    "gpt56luna": {
+      "input": 0.2,
+      "output": 1.2,
+      "cacheRead": 0.02,
+      "cacheWrite": 0.25,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 0.4,
+          "output": 1.8,
+          "cacheRead": 0.04,
+          "cacheWrite": 0.5
+        }
+      ]
+    },
+    "gpt56sol": {
+      "input": 4,
+      "output": 20,
+      "cacheRead": 0.4,
+      "cacheWrite": 5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 8,
+          "output": 30,
+          "cacheRead": 0.8,
+          "cacheWrite": 10
+        }
+      ]
+    },
+    "gpt56terra": {
+      "input": 2,
+      "output": 12,
+      "cacheRead": 0.2,
+      "cacheWrite": 2.5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 4,
+          "output": 18,
+          "cacheRead": 0.4,
+          "cacheWrite": 5
+        }
+      ]
+    },
+    "gpt5chatlatest": {
+      "input": 1.25,
+      "output": 10,
+      "cacheRead": 0.125
+    },
+    "gpt5codex": {
+      "input": 1.25,
+      "output": 10,
+      "cacheRead": 0.125
+    },
+    "gpt5mini": {
+      "input": 0.25,
+      "output": 2,
+      "cacheRead": 0.025
+    },
+    "gpt5nano": {
+      "input": 0.05,
+      "output": 0.4,
+      "cacheRead": 0.005
+    },
+    "gpt5pro": {
+      "input": 15,
+      "output": 120,
+      "cacheRead": 0.005
+    },
+    "gpt61sol": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.1,
+      "cacheWrite": 2.5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 4,
+          "output": 15,
+          "cacheRead": 0.2,
+          "cacheWrite": 5
+        }
+      ]
+    },
+    "gpt61terra": {
+      "input": 1,
+      "output": 5,
+      "cacheRead": 0.05,
+      "cacheWrite": 1.25,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 2,
+          "output": 7.5,
+          "cacheRead": 0.1,
+          "cacheWrite": 2.5
+        }
+      ]
+    },
+    "gpt62astra": {
+      "input": 8,
+      "output": 40,
+      "cacheRead": 0.4,
+      "cacheWrite": 10,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 16,
+          "output": 60,
+          "cacheRead": 0.8,
+          "cacheWrite": 20
+        }
+      ]
+    },
+    "gpt62sol": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.1,
+      "cacheWrite": 2.5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 4,
+          "output": 15,
+          "cacheRead": 0.2,
+          "cacheWrite": 5
+        }
+      ]
+    },
+    "gpt6astra": {
+      "input": 10,
+      "output": 50,
+      "cacheRead": 1,
+      "cacheWrite": 12.5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 20,
+          "output": 75,
+          "cacheRead": 2,
+          "cacheWrite": 25
+        }
+      ]
+    },
+    "gpt6astrafast": {
+      "input": 20,
+      "output": 100,
+      "cacheRead": 2,
+      "cacheWrite": 25
+    },
+    "gpt6luna": {
+      "input": 0.1,
+      "output": 0.5,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 0.2,
+          "output": 0.75,
+          "cacheRead": 0.02,
+          "cacheWrite": 0.25
+        }
+      ]
+    },
+    "gpt6sol": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.2,
+      "cacheWrite": 2.5,
+      "tiers": [
+        {
+          "above": 272000,
+          "input": 4,
+          "output": 15,
+          "cacheRead": 0.4,
+          "cacheWrite": 5
+        }
+      ]
+    },
+    "gptoss120b": {
+      "input": 0.037,
+      "output": 0.17
+    },
+    "gptoss20b": {
+      "input": 0.07935,
+      "output": 0.3174,
+      "cacheRead": 0.039675
+    },
+    "gptosssafeguard120b": {
+      "input": 0.15,
+      "output": 0.6
+    },
+    "gptosssafeguard20b": {
+      "input": 0.07935,
+      "output": 0.3174,
+      "cacheRead": 0.039675
+    },
+    "granite428b": {
+      "input": 0.06,
+      "output": 0.25,
+      "cacheRead": 0.015
+    },
+    "granite4hmicro": {
+      "input": 0.017,
+      "output": 0.112
+    },
+    "granite4hsmall": {
+      "input": 0.0636,
+      "output": 0.265
+    },
+    "grok41fast": {
+      "input": 0.2,
+      "output": 0.5,
+      "cacheRead": 0.05
+    },
+    "grok41fastreasoning": {
+      "input": 0.2,
+      "output": 0.5
+    },
+    "grok4200309nonreasoning": {
+      "input": 1.25,
+      "output": 2.5,
+      "cacheRead": 0.2
+    },
+    "grok4200309reasoning": {
+      "input": 2,
+      "output": 6
+    },
+    "grok43": {
+      "input": 1.25,
+      "output": 2.5
+    },
+    "grok45": {
+      "input": 2,
+      "output": 6,
+      "cacheRead": 0.3,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 12,
+          "cacheRead": 0.6
+        }
+      ]
+    },
+    "grok46": {
+      "input": 2,
+      "output": 6,
+      "cacheRead": 0.5,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 12,
+          "cacheRead": 1
+        }
+      ]
+    },
+    "grok47": {
+      "input": 2,
+      "output": 6,
+      "cacheRead": 0.5,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 4,
+          "output": 12,
+          "cacheRead": 1
+        }
+      ]
+    },
+    "grok4fastnonreasoning": {
+      "input": 0.2,
+      "output": 0.5
+    },
+    "grok4fastreasoning": {
+      "input": 0.2,
+      "output": 0.5
+    },
+    "grokbuild01": {
+      "input": 1,
+      "output": 2,
+      "cacheRead": 0.2
+    },
+    "grokcodefast1": {
+      "input": 0.2,
+      "output": 1.5
+    },
+    "hermes2prollama38b": {
+      "input": 0.14,
+      "output": 0.14
+    },
+    "hermes3llama31405b": {
+      "input": 1,
+      "output": 1
+    },
+    "hermes3llama3170b": {
+      "input": 0.7,
+      "output": 0.7
+    },
+    "hermes4405b": {
+      "input": 0.996,
+      "output": 2.989
+    },
+    "hy3": {
+      "input": 0.1562,
+      "output": 0.6248,
+      "cacheRead": 0.03905
+    },
+    "hy3preview": {
+      "input": 0.17,
+      "output": 0.566661,
+      "cacheRead": 0.051
+    },
+    "hy4": {
+      "input": 0.525,
+      "output": 1.5625,
+      "cacheRead": 0.025
+    },
+    "hy4flash": {
+      "input": 0.08,
+      "output": 0.32,
+      "cacheRead": 0.0032,
+      "cacheWrite": 0.08
+    },
+    "hy4preview": {
+      "input": 0.845,
+      "output": 2.535,
+      "cacheRead": 0.04225
+    },
+    "hymt218b": {
+      "input": 0.046552,
+      "output": 0.187266
+    },
+    "hymt230ba3b": {
+      "input": 0.078292,
+      "output": 0.31211
+    },
+    "hymt27b": {
+      "input": 0.078292,
+      "output": 0.31211
+    },
+    "inkling": {
+      "input": 1,
+      "output": 4.05,
+      "cacheRead": 0.17
+    },
+    "inkling2small": {
+      "input": 0.3,
+      "output": 1,
+      "cacheRead": 0.1
+    },
+    "inklingsmall": {
+      "input": 0.58,
+      "output": 1.44,
+      "cacheRead": 0.116
+    },
+    "jambalarge": {
+      "input": 2,
+      "output": 8
+    },
+    "jambamini": {
+      "input": 0.2,
+      "output": 0.4
+    },
+    "kimik2": {
+      "input": 0.60306,
+      "output": 2.4334
+    },
+    "kimik20905": {
+      "input": 0.62854,
+      "output": 2.5146
+    },
+    "kimik25": {
+      "input": 0.627,
+      "output": 3.3
+    },
+    "kimik26": {
+      "input": 0.95,
+      "output": 4,
+      "cacheRead": 0.16
+    },
+    "kimik27code": {
+      "input": 1.9,
+      "output": 8,
+      "cacheRead": 0.38
+    },
+    "kimik27codehighspeed": {
+      "input": 1.9,
+      "output": 7.999,
+      "cacheRead": 0.32167
+    },
+    "kimik28preview": {
+      "input": 0,
+      "output": 0
+    },
+    "kimik2instruct": {
+      "input": 0.5,
+      "output": 2
+    },
+    "kimik2thinking": {
+      "input": 0.575,
+      "output": 2.3
+    },
+    "kimik3": {
+      "input": 3,
+      "output": 15,
+      "cacheRead": 0.3,
+      "cacheWrite": 3
+    },
+    "kimik31pro": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.2,
+      "cacheWrite": 2
+    },
+    "kolibri1": {
+      "input": 0.167475,
+      "output": 0.614075,
+      "cacheRead": 0.0837375
+    },
+    "l31euryale70b": {
+      "input": 1.534523,
+      "output": 1.534523
+    },
+    "l33euryale70b": {
+      "input": 0.493,
+      "output": 0.493,
+      "cacheRead": 0.2465
+    },
+    "l3lunaris8b": {
+      "input": 0.0529,
+      "output": 0.0529
+    },
+    "lagunam1": {
+      "input": 0,
+      "output": 0
+    },
+    "lagunas21": {
+      "input": 0,
+      "output": 0
+    },
+    "lagunaxs21": {
+      "input": 0,
+      "output": 0
+    },
+    "lfm224ba2b": {
+      "input": 0.03,
+      "output": 0.12
+    },
+    "lightonocr21b": {
+      "input": 0.1785,
+      "output": 0.3465
+    },
+    "lightonocr308b": {
+      "input": 2.464,
+      "output": 0
+    },
+    "ling30flash": {
+      "input": 0,
+      "output": 0
+    },
+    "ling30flashfin": {
+      "input": 0.075,
+      "output": 0.22,
+      "cacheRead": 0.015
+    },
+    "ling30flashsante": {
+      "input": 0.075,
+      "output": 0.22,
+      "cacheRead": 0.015
+    },
+    "ling30flashvl": {
+      "input": 0.075,
+      "output": 0.224,
+      "cacheRead": 0.015
+    },
+    "ling30tiny": {
+      "input": 0.015,
+      "output": 0.045,
+      "cacheRead": 0.003
+    },
+    "ling31flash": {
+      "input": 0.3,
+      "output": 0.9,
+      "cacheRead": 0.06
+    },
+    "llama3170binstruct": {
+      "input": 0.72,
+      "output": 0.72
+    },
+    "llama318binstruct": {
+      "input": 0.02,
+      "output": 0.05
+    },
+    "llama31nemotron70binstruct": {
+      "input": 0,
+      "output": 0
+    },
+    "llama31nemotronsafetyguard8bv3": {
+      "input": 0,
+      "output": 0
+    },
+    "llama31nemotronultra253b": {
+      "input": 0,
+      "output": 0
+    },
+    "llama3211bvisioninstruct": {
+      "input": 0.0485,
+      "output": 0.676
+    },
+    "llama321b": {
+      "input": 0.027,
+      "output": 0.201
+    },
+    "llama321binstruct": {
+      "input": 0.027,
+      "output": 0.201
+    },
+    "llama323b": {
+      "input": 0.0509,
+      "output": 0.335
+    },
+    "llama323binstruct": {
+      "input": 0,
+      "output": 3
+    },
+    "llama3290bvisioninstruct": {
+      "input": 0.35,
+      "output": 0.4,
+      "cacheRead": 0.175,
+      "cacheWrite": 0.7
+    },
+    "llama3370binstruct": {
+      "input": 0.59,
+      "output": 0.79
+    },
+    "llama33nemotronsuper49bv15": {
+      "input": 0.4,
+      "output": 0.4
+    },
+    "llama4maverick17binstruct": {
+      "input": 0.14,
+      "output": 0.59
+    },
+    "llama4scout17binstruct": {
+      "input": 0.17,
+      "output": 0.66
+    },
+    "llamaguard38b": {
+      "input": 0.484,
+      "output": 0.03
+    },
+    "llamaguard412b": {
+      "input": 0.18,
+      "output": 0.18
+    },
+    "llamapromptguard222m": {
+      "input": 0.03,
+      "output": 0.03,
+      "cacheRead": 0.015
+    },
+    "llamapromptguard286m": {
+      "input": 0.04,
+      "output": 0.04,
+      "cacheRead": 0.02
+    },
+    "longcat20": {
+      "input": 0.7746,
+      "output": 3.0984,
+      "cacheRead": 0.015492
+    },
+    "longcat25": {
+      "input": 0,
+      "output": 0
+    },
+    "longcat25preview": {
+      "input": 0.3,
+      "output": 1.2,
+      "cacheRead": 0.006
+    },
+    "lyria3clippreview": {
+      "input": 0,
+      "output": 0
+    },
+    "lyria3propreview": {
+      "input": 0,
+      "output": 0
+    },
+    "macaronv1tall": {
+      "input": 0.2475,
+      "output": 1.43,
+      "cacheRead": 0.044
+    },
+    "macaronv1venti": {
+      "input": 0.825,
+      "output": 2.475,
+      "cacheRead": 0.165
+    },
+    "magistralmediumlatest": {
+      "input": 1.5,
+      "output": 7.5,
+      "cacheRead": 0.15
+    },
+    "magistralsmall2506": {
+      "input": 0.5,
+      "output": 1.5,
+      "cacheRead": 0.25,
+      "cacheWrite": 1
+    },
+    "magistralsmall2509": {
+      "input": 0.5,
+      "output": 1.5
+    },
+    "magnumv472b": {
+      "input": 3.174,
+      "output": 5.29
+    },
+    "maicode11flash": {
+      "input": 0.2,
+      "output": 1.2,
+      "cacheRead": 0.02
+    },
+    "maicode2": {
+      "input": 0.5,
+      "output": 2.5,
+      "cacheRead": 0.025
+    },
+    "maicode2flash": {
+      "input": 0.05,
+      "output": 0.25,
+      "cacheRead": 0.005
+    },
+    "mercury2": {
+      "input": 0.25,
+      "output": 0.75,
+      "cacheRead": 0.025
+    },
+    "mercury25": {
+      "input": 0.2,
+      "output": 0.75,
+      "cacheRead": 0.02
+    },
+    "mercury3": {
+      "input": 0.1,
+      "output": 0.35,
+      "cacheRead": 0.01
+    },
+    "mercuryedit2": {
+      "input": 0.25,
+      "output": 0.75,
+      "cacheRead": 0.025
+    },
+    "mimov25": {
+      "input": 0.14,
+      "output": 0.28,
+      "cacheRead": 0.0028
+    },
+    "mimov25pro": {
+      "input": 0.435,
+      "output": 0.87,
+      "cacheRead": 0.0036
+    },
+    "mimov25proultraspeed": {
+      "input": 1.305,
+      "output": 2.61,
+      "cacheRead": 0.0108
+    },
+    "mimov26flash": {
+      "input": 0.14,
+      "output": 0.28,
+      "cacheRead": 0.0028
+    },
+    "mimov26pro": {
+      "input": 0.435,
+      "output": 0.87,
+      "cacheRead": 0.0036
+    },
+    "mimov26proultraspeed": {
+      "input": 4.35,
+      "output": 8.7,
+      "cacheRead": 0.036
+    },
+    "mimov2flash": {
+      "input": 0.1,
+      "output": 0.3,
+      "cacheRead": 0.02
+    },
+    "mimov2omni": {
+      "input": 0,
+      "output": 0
+    },
+    "mimov2pro": {
+      "input": 1,
+      "output": 3,
+      "cacheRead": 0.2
+    },
+    "mineru25250912b": {
+      "input": 0.0238,
+      "output": 0.0714,
+      "cacheRead": 0.0036
+    },
+    "minicpm52b": {
+      "input": 0,
+      "output": 0
+    },
+    "minicpmv471b": {
+      "input": 0,
+      "output": 0
+    },
+    "minicpmv4735ba3b": {
+      "input": 0,
+      "output": 0
+    },
+    "minimaxm180k": {
+      "input": 0.55,
+      "output": 2.2
+    },
+    "minimaxm2": {
+      "input": 0.33,
+      "output": 1.32
+    },
+    "minimaxm21": {
+      "input": 0.3,
+      "output": 1.2
+    },
+    "minimaxm25": {
+      "input": 0.3,
+      "output": 1.2
+    },
+    "minimaxm25highspeed": {
+      "input": 0.6,
+      "output": 2.4,
+      "cacheRead": 0.03,
+      "cacheWrite": 0.375
+    },
+    "minimaxm27": {
+      "input": 0.3,
+      "output": 1.2
+    },
+    "minimaxm27highspeed": {
+      "input": 0.2,
+      "output": 0.2
+    },
+    "minimaxm2her": {
+      "input": 0.3,
+      "output": 1.2
+    },
+    "minimaxm3": {
+      "input": 0.72,
+      "output": 2.88,
+      "cacheRead": 0.144,
+      "cacheWrite": 0.9,
+      "tiers": [
+        {
+          "above": 512000,
+          "input": 1.44,
+          "output": 5.76,
+          "cacheRead": 0.144,
+          "cacheWrite": 0.9
+        }
+      ]
+    },
+    "minimaxm31flash": {
+      "input": 0.15,
+      "output": 0.6,
+      "cacheRead": 0.015
+    },
+    "minimaxm31flashpreview": {
+      "input": 0,
+      "output": 0
+    },
+    "minimaxtext01": {
+      "input": 0.2,
+      "output": 1.1
+    },
+    "ministral14b": {
+      "input": 0.15,
+      "output": 0.15,
+      "cacheRead": 0.15
+    },
+    "ministral14b2512": {
+      "input": 0.33,
+      "output": 0.33
+    },
+    "ministral314binstruct2512": {
+      "input": 0.2,
+      "output": 0.2,
+      "cacheRead": 0.02
+    },
+    "ministral33binstruct2512": {
+      "input": 0.1,
+      "output": 0.1,
+      "cacheRead": 0.01
+    },
+    "ministral38binstruct2512": {
+      "input": 0.15,
+      "output": 0.15,
+      "cacheRead": 0.015
+    },
+    "ministral3b": {
+      "input": 0.04,
+      "output": 0.04
+    },
+    "ministral3b2512": {
+      "input": 0.1587,
+      "output": 0.1587,
+      "cacheRead": 0.01058
+    },
+    "ministral8b2512": {
+      "input": 0.3174,
+      "output": 0.3174,
+      "cacheRead": 0.01587
+    },
+    "mistral7binstructv03": {
+      "input": 0,
+      "output": 0
+    },
+    "mistrallarge": {
+      "input": 2.116,
+      "output": 6.348,
+      "cacheRead": 0.2116
+    },
+    "mistrallarge2407": {
+      "input": 2.116,
+      "output": 6.348,
+      "cacheRead": 0.2116
+    },
+    "mistrallarge2411": {
+      "input": 2,
+      "output": 6
+    },
+    "mistrallarge2512": {
+      "input": 1.1,
+      "output": 3.3
+    },
+    "mistrallarge4": {
+      "input": 0.7,
+      "output": 2.1,
+      "cacheRead": 0.07
+    },
+    "mistrallargelatest": {
+      "input": 2,
+      "output": 6,
+      "cacheRead": 0.2
+    },
+    "mistralmedium2505": {
+      "input": 0.4,
+      "output": 2
+    },
+    "mistralmedium2604": {
+      "input": 1.5,
+      "output": 7.5,
+      "cacheRead": 0.15
+    },
+    "mistralmedium3": {
+      "input": 0.4232,
+      "output": 2.116,
+      "cacheRead": 0.04232
+    },
+    "mistralmedium31": {
+      "input": 0.4232,
+      "output": 2.116,
+      "cacheRead": 0.04232
+    },
+    "mistralmedium35": {
+      "input": 1.587,
+      "output": 7.935
+    },
+    "mistralmediumlatest": {
+      "input": 1.5,
+      "output": 7.5,
+      "cacheRead": 0.15
+    },
+    "mistralnemo": {
+      "input": 0.1587,
+      "output": 0.17986,
+      "cacheRead": 0.1587
+    },
+    "mistralsaba": {
+      "input": 0.2116,
+      "output": 0.6348,
+      "cacheRead": 0.02116
+    },
+    "mistralsmall24binstruct2501": {
+      "input": 0.0529,
+      "output": 0.08464
+    },
+    "mistralsmall2506": {
+      "input": 0.285,
+      "output": 0.912
+    },
+    "mistralsmall2603": {
+      "input": 0.198375,
+      "output": 0.7935,
+      "cacheRead": 0.01587
+    },
+    "mistralsmall3124binstruct": {
+      "input": 0.371358,
+      "output": 0.58719
+    },
+    "mistralsmall3124binstruct2503": {
+      "input": 0.351,
+      "output": 0.555
+    },
+    "mistralsmall3224binstruct": {
+      "input": 0.07935,
+      "output": 0.2116
+    },
+    "mistralsmalllatest": {
+      "input": 0.15,
+      "output": 0.6,
+      "cacheRead": 0.015
+    },
+    "mixtral8x22binstruct": {
+      "input": 2.116,
+      "output": 6.348,
+      "cacheRead": 0.2116
+    },
+    "mixtral8x7binstructv01": {
+      "input": 0.488,
+      "output": 0.758
+    },
+    "morphv3fast": {
+      "input": 0.8,
+      "output": 1.2
+    },
+    "morphv3large": {
+      "input": 0.9,
+      "output": 1.9
+    },
+    "motif3": {
+      "input": 0.5,
+      "output": 2,
+      "cacheRead": 0.2
+    },
+    "museember10": {
+      "input": 0.1,
+      "output": 0.5,
+      "cacheRead": 0.004,
+      "tiers": [
+        {
+          "above": 200000,
+          "input": 0.3,
+          "output": 1.5,
+          "cacheRead": 0.012
+        }
+      ]
+    },
+    "museglimmer30b": {
+      "input": 0.3703,
+      "output": 1.587,
+      "cacheRead": 0.04232
+    },
+    "musespark11": {
+      "input": 1.25,
+      "output": 4.25,
+      "cacheRead": 0.15
+    },
+    "musespark12": {
+      "input": 1.25,
+      "output": 4.25,
+      "cacheRead": 0.15
+    },
+    "musespark13": {
+      "input": 1.25,
+      "output": 4.25,
+      "cacheRead": 0.15
+    },
+    "musesparkopen": {
+      "input": 1.125,
+      "output": 3.825,
+      "cacheRead": 0.135
+    },
+    "musewonder10": {
+      "input": 4,
+      "output": 20,
+      "cacheRead": 0.2
+    },
+    "mythomaxl213b": {
+      "input": 1.98375,
+      "output": 1.98375,
+      "cacheRead": 1.98375
+    },
+    "nemotron35contentsafety": {
+      "input": 0,
+      "output": 0
+    },
+    "nemotron35lightning": {
+      "input": 0,
+      "output": 0
+    },
+    "nemotron35super120ba12b": {
+      "input": 0.2,
+      "output": 0.5,
+      "cacheRead": 0.04
+    },
+    "nemotron35supervl120ba12b": {
+      "input": 0,
+      "output": 0
+    },
+    "nemotron3nano30ba3b": {
+      "input": 0.06,
+      "output": 0.24
+    },
+    "nemotron3nanoomni30ba3breasoning": {
+      "input": 0,
+      "output": 0
+    },
+    "nemotron3super120ba12b": {
+      "input": 0,
+      "output": 0
+    },
+    "nemotron3ultra550ba55b": {
+      "input": 0,
+      "output": 0
+    },
+    "nemotronnano12bv2vl": {
+      "input": 0.2,
+      "output": 0.6
+    },
+    "nemotronnano9bv2": {
+      "input": 0.06,
+      "output": 0.23
+    },
+    "nemotronvoicechat": {
+      "input": 0,
+      "output": 0
+    },
+    "nexn2pro": {
+      "input": 0.5,
+      "output": 2.5,
+      "cacheRead": 0.25
+    },
+    "northminicode10": {
+      "input": 0,
+      "output": 0
+    },
+    "northsmalltranslate10": {
+      "input": 0,
+      "output": 0
+    },
+    "nova2lite": {
+      "input": 0.33,
+      "output": 2.75,
+      "cacheRead": 0.0825
+    },
+    "nova2litev1": {
+      "input": 0.3,
+      "output": 2.5
+    },
+    "novalite": {
+      "input": 0.06,
+      "output": 0.24,
+      "cacheRead": 0.015
+    },
+    "novalitev1": {
+      "input": 0.06348,
+      "output": 0.25392
+    },
+    "novamicro": {
+      "input": 0.04,
+      "output": 0.16,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.04
+    },
+    "novamicrov1": {
+      "input": 0.03703,
+      "output": 0.14812
+    },
+    "novapremier": {
+      "input": 2.5,
+      "output": 12.5,
+      "cacheRead": 0.625,
+      "cacheWrite": 2.5
+    },
+    "novapro": {
+      "input": 0.92,
+      "output": 3.68,
+      "cacheRead": 0.23,
+      "cacheWrite": 0.92
+    },
+    "novaprov1": {
+      "input": 0.8464,
+      "output": 3.3856
+    },
+    "o1": {
+      "input": 15,
+      "output": 60,
+      "cacheRead": 7.5
+    },
+    "o1pro": {
+      "input": 150,
+      "output": 600
+    },
+    "o3": {
+      "input": 2,
+      "output": 8
+    },
+    "o3deepresearch": {
+      "input": 9,
+      "output": 36,
+      "cacheRead": 2.2
+    },
+    "o3mini": {
+      "input": 1.1,
+      "output": 4.4,
+      "cacheRead": 0.55
+    },
+    "o3pro": {
+      "input": 20,
+      "output": 80
+    },
+    "o4mini": {
+      "input": 1.1,
+      "output": 4.4
+    },
+    "o4minideepresearch": {
+      "input": 1.8,
+      "output": 7.2,
+      "cacheRead": 0.45
+    },
+    "olmocr27b": {
+      "input": 0.0714,
+      "output": 0.3451,
+      "cacheRead": 0.0107
+    },
+    "openpangu20flash": {
+      "input": 0.11994,
+      "output": 0.23988,
+      "cacheRead": 0.02999
+    },
+    "openpangu20pro": {
+      "input": 0.47976,
+      "output": 2.17391,
+      "cacheRead": 0.11994,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.71964,
+          "output": 2.63868,
+          "cacheRead": 0.17991
+        }
+      ]
+    },
+    "ornith1035b": {
+      "input": 0,
+      "output": 0
+    },
+    "ornith15122b": {
+      "input": 0.16,
+      "output": 0.64,
+      "cacheRead": 0.02
+    },
+    "ornith1535ba3b": {
+      "input": 0.1,
+      "output": 0.4,
+      "cacheRead": 0.05
+    },
+    "paddleocrvl": {
+      "input": 0.02,
+      "output": 0.02
+    },
+    "palmyrax4": {
+      "input": 2.5,
+      "output": 10
+    },
+    "palmyrax5": {
+      "input": 0.6,
+      "output": 6
+    },
+    "pareto": {
+      "input": 2.645,
+      "output": 7.935,
+      "cacheRead": 0.2645
+    },
+    "pareto2610": {
+      "input": 0.8,
+      "output": 3.2,
+      "cacheRead": 0.03
+    },
+    "particle1": {
+      "input": 0,
+      "output": 0
+    },
+    "perceptronmk1": {
+      "input": 0.15,
+      "output": 1.5
+    },
+    "perceptronmk15": {
+      "input": 0.1587,
+      "output": 1.587
+    },
+    "phi4mini": {
+      "input": 0.075,
+      "output": 0.3
+    },
+    "phi4multimodalinstruct": {
+      "input": 0.07,
+      "output": 0.11,
+      "cacheRead": 0.035
+    },
+    "pixtral12b": {
+      "input": 0.285,
+      "output": 0.285
+    },
+    "pixtrallarge2502": {
+      "input": 2,
+      "output": 6
+    },
+    "pixtrallargelatest": {
+      "input": 2,
+      "output": 6
+    },
+    "qwen257binstruct": {
+      "input": 0.04,
+      "output": 0.1
+    },
+    "qwen25coder32binstruct": {
+      "input": 0.79,
+      "output": 0.79
+    },
+    "qwen25vl72binstruct": {
+      "input": 1.014,
+      "output": 1.014
+    },
+    "qwen3235ba22b": {
+      "input": 0.29,
+      "output": 2.86
+    },
+    "qwen3235ba22binstruct2507": {
+      "input": 0.29,
+      "output": 1.143
+    },
+    "qwen3235ba22bthinking2507": {
+      "input": 0.23,
+      "output": 2.3,
+      "cacheRead": 0.2
+    },
+    "qwen330ba3b": {
+      "input": 0.11,
+      "output": 1.08
+    },
+    "qwen330ba3binstruct2507": {
+      "input": 0.09,
+      "output": 0.3,
+      "cacheRead": 0.09
+    },
+    "qwen332b": {
+      "input": 0.08,
+      "output": 0.28
+    },
+    "qwen3508b": {
+      "input": 0,
+      "output": 0
+    },
+    "qwen35122ba10b": {
+      "input": 0.1126,
+      "output": 0.9008,
+      "tiers": [
+        {
+          "above": 128000,
+          "input": 0.2818,
+          "output": 2.2544
+        }
+      ]
+    },
+    "qwen3527b": {
+      "input": 0.0846,
+      "output": 0.6768,
+      "tiers": [
+        {
+          "above": 128000,
+          "input": 0.2536,
+          "output": 2.0288
+        }
+      ]
+    },
+    "qwen352b": {
+      "input": 0,
+      "output": 0
+    },
+    "qwen3535ba3b": {
+      "input": 0.06,
+      "output": 0.46,
+      "tiers": [
+        {
+          "above": 128000,
+          "input": 0.23,
+          "output": 1.83
+        }
+      ]
+    },
+    "qwen3535ba3bbase": {
+      "input": 0.54,
+      "output": 1.335,
+      "cacheRead": 0.108
+    },
+    "qwen35397ba17b": {
+      "input": 0.55,
+      "output": 3.5,
+      "cacheRead": 0.225
+    },
+    "qwen354b": {
+      "input": 0.04,
+      "output": 0.07,
+      "cacheRead": 0.02
+    },
+    "qwen359b": {
+      "input": 0,
+      "output": 0
+    },
+    "qwen359bbase": {
+      "input": 0.3,
+      "output": 0.807,
+      "cacheRead": 0.06
+    },
+    "qwen35flash": {
+      "input": 0.1,
+      "output": 0.4,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125
+    },
+    "qwen35plus": {
+      "input": 0.12,
+      "output": 0.69,
+      "tiers": [
+        {
+          "above": 128000,
+          "input": 0.29,
+          "output": 1.72
+        },
+        {
+          "above": 256000,
+          "input": 0.58,
+          "output": 3.44
+        }
+      ]
+    },
+    "qwen3627b": {
+      "input": 0.32,
+      "output": 3.2
+    },
+    "qwen3635ba3b": {
+      "input": 0.28,
+      "output": 1.7
+    },
+    "qwen36flash": {
+      "input": 0.19,
+      "output": 1.13,
+      "cacheRead": 0.0171,
+      "cacheWrite": 0.214,
+      "tiers": [
+        {
+          "above": 256000,
+          "input": 0.76,
+          "output": 4.52,
+          "cacheRead": 0.0686,
+          "cacheWrite": 0.857
+        }
+      ]
+    },
+    "qwen36maxpreview": {
+      "input": 1.27,
+      "output": 7.61,
+      "cacheRead": 0.1268,
+      "cacheWrite": 1.585,
+      "tiers": [
+        {
+          "above": 128000,
+          "input": 2.11,
+          "output": 12.67,
+          "cacheRead": 0.2112,
+          "cacheWrite": 2.64
+        }
+      ]
+    },
+    "qwen36plus": {
+      "input": 0.3,
+      "output": 1.8,
+      "tiers": [
+        {
+          "above": 256000,
+          "input": 1.2,
+          "output": 7.2
+        }
+      ]
+    },
+    "qwen37flash": {
+      "input": 0.03,
+      "output": 0.13,
+      "cacheRead": 0.006,
+      "cacheWrite": 0.0375,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.1,
+          "output": 0.4,
+          "cacheRead": 0.02,
+          "cacheWrite": 0.125
+        },
+        {
+          "above": 256000,
+          "input": 0.2,
+          "output": 0.8,
+          "cacheRead": 0.04,
+          "cacheWrite": 0.25
+        }
+      ]
+    },
+    "qwen37max": {
+      "input": 1.8,
+      "output": 5.3
+    },
+    "qwen37plus": {
+      "input": 0.228,
+      "output": 0.92,
+      "cacheRead": 0.023,
+      "cacheWrite": 0.286,
+      "tiers": [
+        {
+          "above": 256000,
+          "input": 0.68,
+          "output": 2.74,
+          "cacheRead": 0.068,
+          "cacheWrite": 0.86
+        }
+      ]
+    },
+    "qwen3824ta95b": {
+      "input": 1.8,
+      "output": 5.4,
+      "cacheRead": 0.225
+    },
+    "qwen3827b": {
+      "input": 0.039,
+      "output": 1.25,
+      "cacheRead": 0.0039
+    },
+    "qwen38b": {
+      "input": 0.18,
+      "output": 0.7
+    },
+    "qwen38flash": {
+      "input": 0.15,
+      "output": 0.47,
+      "cacheRead": 0.016,
+      "cacheWrite": 0.2
+    },
+    "qwen38flashnext": {
+      "input": 0.075,
+      "output": 0.3
+    },
+    "qwen38max": {
+      "input": 2,
+      "output": 6,
+      "cacheRead": 0.25,
+      "cacheWrite": 2.5
+    },
+    "qwen38max0902": {
+      "input": 2,
+      "output": 6,
+      "cacheRead": 0.25
+    },
+    "qwen38maxpreview": {
+      "input": 0.338,
+      "output": 1.014,
+      "cacheRead": 0.0676,
+      "cacheWrite": 0.4225
+    },
+    "qwen38maxprime": {
+      "input": 4.232,
+      "output": 12.696,
+      "cacheRead": 0.529
+    },
+    "qwen38omniflash": {
+      "input": 0.15,
+      "output": 0.47,
+      "cacheRead": 0.016
+    },
+    "qwen3coder30ba3binstruct": {
+      "input": 0.45,
+      "output": 2.25,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.75,
+          "output": 3.75
+        },
+        {
+          "above": 128000,
+          "input": 1.2,
+          "output": 6
+        }
+      ]
+    },
+    "qwen3coder480ba35binstruct": {
+      "input": 0.86,
+      "output": 3.43,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 1.29,
+          "output": 5.15
+        },
+        {
+          "above": 128000,
+          "input": 2.15,
+          "output": 8.58
+        }
+      ]
+    },
+    "qwen3coderflash": {
+      "input": 0.3,
+      "output": 1.5,
+      "cacheRead": 0.06,
+      "cacheWrite": 0.375,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.5,
+          "output": 2.5,
+          "cacheRead": 0.1,
+          "cacheWrite": 0.625
+        },
+        {
+          "above": 128000,
+          "input": 0.8,
+          "output": 4,
+          "cacheRead": 0.16,
+          "cacheWrite": 1
+        },
+        {
+          "above": 256000,
+          "input": 1.6,
+          "output": 9.6,
+          "cacheRead": 0.32,
+          "cacheWrite": 2
+        }
+      ]
+    },
+    "qwen3codernext": {
+      "input": 0.137,
+      "output": 0.548,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.2054,
+          "output": 0.8216
+        },
+        {
+          "above": 128000,
+          "input": 0.3424,
+          "output": 1.3696
+        }
+      ]
+    },
+    "qwen3coderplus": {
+      "input": 1,
+      "output": 5
+    },
+    "qwen3max": {
+      "input": 0.86,
+      "output": 3.43,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 1.43,
+          "output": 5.72
+        },
+        {
+          "above": 128000,
+          "input": 2.15,
+          "output": 8.58
+        }
+      ]
+    },
+    "qwen3maxpreview": {
+      "input": 1.08,
+      "output": 4.8
+    },
+    "qwen3next80ba3binstruct": {
+      "input": 0.1587,
+      "output": 1.2696
+    },
+    "qwen3next80ba3bthinking": {
+      "input": 0.5,
+      "output": 6
+    },
+    "qwen3omni30ba3bthinking": {
+      "input": 0.25,
+      "output": 0.97
+    },
+    "qwen3vl235ba22binstruct": {
+      "input": 0.53,
+      "output": 2.66
+    },
+    "qwen3vl235ba22bthinking": {
+      "input": 0.98,
+      "output": 3.95
+    },
+    "qwen3vl30ba3binstruct": {
+      "input": 0.15,
+      "output": 0.6
+    },
+    "qwen3vlflash": {
+      "input": 0.022,
+      "output": 0.215,
+      "cacheRead": 0.0044,
+      "cacheWrite": 0.0275
+    },
+    "qwen3vlplus": {
+      "input": 0.137,
+      "output": 1.37,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.2054,
+          "output": 2.054
+        },
+        {
+          "above": 128000,
+          "input": 0.411,
+          "output": 4.11
+        }
+      ]
+    },
+    "qwen4max": {
+      "input": 1.5,
+      "output": 4.5,
+      "cacheRead": 0.075
+    },
+    "qwenflash": {
+      "input": 0.05,
+      "output": 0.4,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.0625,
+      "tiers": [
+        {
+          "above": 256000,
+          "input": 0.25,
+          "output": 2,
+          "cacheRead": 0.05,
+          "cacheWrite": 0.3125
+        }
+      ]
+    },
+    "qwenmax": {
+      "input": 1.12,
+      "output": 4.48,
+      "cacheRead": 0.224
+    },
+    "qwenmtplus": {
+      "input": 2.46,
+      "output": 7.37
+    },
+    "qwenomniturbo": {
+      "input": 0.07,
+      "output": 0.27
+    },
+    "qwenplus": {
+      "input": 0.28,
+      "output": 0.84,
+      "cacheRead": 0.056
+    },
+    "qwenturbo": {
+      "input": 0.05,
+      "output": 0.2
+    },
+    "qwenvlmax": {
+      "input": 0.8,
+      "output": 3.2
+    },
+    "qwenvlplus": {
+      "input": 0.21,
+      "output": 0.63
+    },
+    "qwq32b": {
+      "input": 0.4,
+      "output": 0.4
+    },
+    "qwqplus": {
+      "input": 0.8,
+      "output": 2.4
+    },
+    "rekaedge": {
+      "input": 0.1058,
+      "output": 0.1058
+    },
+    "rekaflash3": {
+      "input": 0.1,
+      "output": 0.2
+    },
+    "relaceapply3": {
+      "input": 0.8993,
+      "output": 1.3225
+    },
+    "relacesearch": {
+      "input": 1.058,
+      "output": 3.174
+    },
+    "remmslerpl213b": {
+      "input": 0.529,
+      "output": 0.7935
+    },
+    "restyler1": {
+      "input": 0.04,
+      "output": 0.16
+    },
+    "rnj1instruct": {
+      "input": 0.15,
+      "output": 0.15
+    },
+    "sakananamazu": {
+      "input": 0.95,
+      "output": 4,
+      "cacheRead": 0.15
+    },
+    "sarvam105b": {
+      "input": 0.15790269,
+      "output": 0.63161075,
+      "cacheRead": 0.05263423
+    },
+    "schematronv2small": {
+      "input": 0.0529,
+      "output": 0.24334
+    },
+    "schematronv2turbo": {
+      "input": 0.03174,
+      "output": 0.1587
+    },
+    "seed16": {
+      "input": 0.11594203,
+      "output": 1.15942029,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.17391304,
+          "output": 2.31884058
+        },
+        {
+          "above": 128000,
+          "input": 0.34782609,
+          "output": 3.47826087
+        }
+      ]
+    },
+    "seed16flash": {
+      "input": 0.02173913,
+      "output": 0.2173913,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.04347826,
+          "output": 0.43478261
+        },
+        {
+          "above": 128000,
+          "input": 0.08695652,
+          "output": 0.86956522
+        }
+      ]
+    },
+    "seed16vision": {
+      "input": 0.114,
+      "output": 1.143
+    },
+    "seed18": {
+      "input": 0.1143,
+      "output": 0.286,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.1715,
+          "output": 2.286
+        },
+        {
+          "above": 128000,
+          "input": 0.343,
+          "output": 3.43
+        }
+      ]
+    },
+    "seed20code": {
+      "input": 0.4822,
+      "output": 2.411,
+      "cacheRead": 0.09644,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.72328,
+          "output": 3.6164,
+          "cacheRead": 0.144656
+        },
+        {
+          "above": 128000,
+          "input": 1.4466,
+          "output": 7.233,
+          "cacheRead": 0.28932
+        }
+      ]
+    },
+    "seed20lite": {
+      "input": 0.1714,
+      "output": 1.0286,
+      "cacheRead": 0.0343
+    },
+    "seed20mini": {
+      "input": 0.030136,
+      "output": 0.30136,
+      "cacheRead": 0.0060272,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.060274,
+          "output": 0.60274,
+          "cacheRead": 0.0120548
+        },
+        {
+          "above": 128000,
+          "input": 0.120548,
+          "output": 1.20548,
+          "cacheRead": 0.0241096
+        }
+      ]
+    },
+    "seed20pro": {
+      "input": 0.4958,
+      "output": 2.479,
+      "cacheRead": 0.09916,
+      "tiers": [
+        {
+          "above": 32000,
+          "input": 0.7436,
+          "output": 3.718,
+          "cacheRead": 0.14872
+        },
+        {
+          "above": 128000,
+          "input": 1.4872,
+          "output": 7.436,
+          "cacheRead": 0.29744
+        }
+      ]
+    },
+    "seed21lite": {
+      "input": 0,
+      "output": 0
+    },
+    "seed21pro": {
+      "input": 1.7143,
+      "output": 8.5714,
+      "cacheRead": 0.3429
+    },
+    "seed21turbo": {
+      "input": 0.5,
+      "output": 2.5,
+      "cacheRead": 0.1
+    },
+    "seedcharacter": {
+      "input": 0.15,
+      "output": 0.37,
+      "cacheRead": 0.03,
+      "cacheWrite": 0.003
+    },
+    "seedevolving": {
+      "input": 0.884,
+      "output": 4.42,
+      "cacheRead": 0.177,
+      "cacheWrite": 0.0025
+    },
+    "seedoss36binstruct": {
+      "input": 0.21,
+      "output": 0.57
+    },
+    "skyfall36bv2": {
+      "input": 0.5819,
+      "output": 0.8464,
+      "cacheRead": 0.2645
+    },
+    "solarmini4": {
+      "input": 0.1,
+      "output": 0.4,
+      "cacheRead": 0.01
+    },
+    "solarpro2": {
+      "input": 0.25,
+      "output": 0.25
+    },
+    "solarpro3": {
+      "input": 0.25,
+      "output": 0.25
+    },
+    "solarpro4": {
+      "input": 0.3,
+      "output": 1.2,
+      "cacheRead": 0.06
+    },
+    "sonar": {
+      "input": 1,
+      "output": 1
+    },
+    "sonardeepresearch": {
+      "input": 2,
+      "output": 8
+    },
+    "sonarpro": {
+      "input": 3,
+      "output": 15
+    },
+    "sonarreasoningpro": {
+      "input": 2,
+      "output": 8
+    },
+    "step35flash": {
+      "input": 0.10461,
+      "output": 0.31384,
+      "cacheRead": 0.02092
+    },
+    "step35flash2603": {
+      "input": 0.10461,
+      "output": 0.31384,
+      "cacheRead": 0.02092
+    },
+    "step37flash": {
+      "input": 0.20175,
+      "output": 1.21052,
+      "cacheRead": 0.04035
+    },
+    "step5preview": {
+      "input": 1.04613,
+      "output": 2.98895,
+      "cacheRead": 0.10461
+    },
+    "toast1": {
+      "input": 0.3,
+      "output": 0.72,
+      "cacheRead": 0.036
+    },
+    "trinitylargepreview": {
+      "input": 0,
+      "output": 0
+    },
+    "trinitylargethinking": {
+      "input": 0.25,
+      "output": 0.8,
+      "cacheRead": 0.06
+    },
+    "trinitymini": {
+      "input": 0.045,
+      "output": 0.15
+    },
+    "unslopnemo12b": {
+      "input": 0.4232,
+      "output": 0.4232
+    },
+    "visionlarge": {
+      "input": 7.37,
+      "output": 22.11
+    },
+    "visionmedium": {
+      "input": 4.21,
+      "output": 12.63
+    },
+    "visionsmall": {
+      "input": 1.05,
+      "output": 3.16
+    },
+    "vivfast": {
+      "input": 0.13,
+      "output": 0.4,
+      "cacheRead": 0.05
+    },
+    "voxtralmini3b2507": {
+      "input": 0.04,
+      "output": 0.04
+    },
+    "voxtralsmall24b2507": {
+      "input": 0.1058,
+      "output": 0.3174,
+      "cacheRead": 0.01058
+    },
+    "voxtralsmalllatest": {
+      "input": 0.11,
+      "output": 0.44,
+      "cacheRead": 0.011
+    },
+    "weaver": {
+      "input": 0.7935,
+      "output": 1.058
+    },
+    "wizardlm28x22b": {
+      "input": 0.48,
+      "output": 0.48
+    }
+  }
+}

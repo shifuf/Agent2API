@@ -1,6 +1,7 @@
 /* Agent2API · 报表数据契约、读数口径与热力图布局 */
 
 import { t } from '../i18n'
+import { formatEstimate } from '../../../ui-shared/pricing'
 import { DATE_RANGES, readCustomRange as readDates, saveCustomRange as saveDates, type CustomDates } from '../../../ui-shared/date-range'
 export { dayKey, defaultCustomRange, DAY_KEY_RE } from '../../../ui-shared/date-range'
 
@@ -25,6 +26,7 @@ export type StatsGroup = {
   source?: string; filterValue?: string; state?: 'enabled' | 'disabled' | 'deleted'
 }
 export type StatsOverview = {
+  costUsd?: number | null; costCny?: number | null; pricingCurrency?: string; pricedRequests?: number
   requests?: number; successful?: number; tokens?: number; activeDays?: number; streak?: number
   topModel?: { model?: string; tokens?: number; percentage?: number } | null
 }
@@ -173,6 +175,7 @@ export function overviewCells(overview: StatsOverview | undefined, range: string
   const successRate = requests ? `${((successful / requests) * 100).toFixed(1)}%` : '—'
 
   const cells: OverviewCell[] = [
+    { key: 'costUsd', label: t('估算费用'), value: formatEstimate(data), sub: t('已计价请求：{n}', { n: formatInt(data.pricedRequests) }), mono: false },
     { key: 'tokens', label: t('总 Token'), value: formatTokens(data.tokens), sub: t('输入 + 输出'), mono: false },
     { key: 'successful', label: t('成功请求数'), value: formatInt(successful), sub: t('成功率 {rate}', { rate: successRate }), mono: false },
     { key: 'requests', label: t('总请求数'), value: formatInt(requests), sub: RANGE_LABEL[range] || '', mono: false },

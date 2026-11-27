@@ -879,7 +879,7 @@ export function usageSummary(entry: UsageEntry): { text: string; kind: string; t
       ...usageWarningsOf(data).map(line => t(line)),
       data.statisticsError ? t('订阅统计未读到：{error}', { error: String(data.statisticsError) }) : '',
     ].filter(Boolean)
-    const supplement = usageSupplementReadingsOf(data, t, numberText)
+    const supplement = usageSupplementReadingsOf(data, t, numberText, formatTime)
     const missingNumber = numberOrNull(data.available) === null && !fallbackWallet && !data.availableView
     const knownView = missingNumber && supplement.length ? supplement[0] : available
     return {

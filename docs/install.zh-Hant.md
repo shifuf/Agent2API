@@ -480,3 +480,29 @@ Release 裡的 `Agent2API-<版本>.ipa` **預設是未簽名包** —— 蘋果�
 | 檢視 Agent 接管狀態、還原 | 改寫用戶端設定（手機讀不到本機檔案） |
 
 桌面端側欄底部有「手機端開啟」入口，點開即是同一個頁面。
+
+### 選用：社群外掛隔離探測（Linux）
+
+在可信任的 Linux amd64 建置機上執行 `python3 scripts/prepare-community-probe-kit.py --help`，提供發行版的 QEMU x86-64 模擬器、amd64 核心、SeaBIOS、QEMU 韌體及經校驗的 Bun 1.4.2 x64 baseline ZIP，並備妥靜態 `/bin/busybox` 和 `/usr/bin/setpriv`。套件目錄須歸 root 所有，網關不可寫入。以非 root、無額外 capabilities 的使用者啟動網關，將 `AGENT2API_COMMUNITY_GUEST_DIR` 設為目錄絕對路徑。容器僅需唯讀掛載套件，不開放設備、控制 socket 或特權模式。
+
+管理員選擇已保留封存檔的目前 SHA-256，才能探測獨立 JS/ESM 的 OpenCode `server()`。每次使用無網卡、無主機掛載的一次性客體；不安裝依賴、不執行套件生命週期、不匯入帳號、不授權。主機不符合條件時不執行，也不使用主機 Bun。
+
+只接受最多 256 KiB 的單檔入口。預設每次限時 80 秒、CPU 時間 65 秒；慢速主機的維運人員可在網關環境將 `AGENT2API_COMMUNITY_GUEST_TIMEOUT_SECS` 設為 30–300 之間的十進位整數，CPU 上限為該值減 15 秒。無效值會停用探測。一次只執行一個客體，分配 768 MiB 記憶體；中斷請求即終止。客體回報的診斷訊號不是安全認證或權限憑證。
+
+收到 `503` 時先檢查套件和預算設定。`422` 表示客體未確認完成；可能是指令碼失敗，或核心先終止了程序（例如達到 CPU 上限），不能據此判斷確切原因。只有網關的實際經過時間達到上限才會回傳 `504`。
+
+### 從 WebDAV 或 S3 還原帳號金鑰
+
+雲端同步只在本機沒有帳號金鑰時安裝遠端金鑰。若與 `account.key` 或有效的 `AGENT2API_ACCOUNT_KEY` 相同就沿用；不同則拒絕，以保護不在雲端快照內的本機資料。請還原到全新的資料目錄，或使用整庫加密備份遷移；不要刪除原金鑰。
+
+### 選用的面板登入設定：OAuth 與 Cloudflare Turnstile
+
+另可在「設定 → 安全 → 第三方身分登入」設定 Google 或 GitHub。使用自己控制的固定 HTTPS 面板來源；反向代理須保留該 `Host`。在提供方登記畫面顯示的精確回呼網址 `/api/panel/oauth/{google|github}/callback`，儲存 client ID 與 secret，再用該來源的網頁管理員 Cookie 工作階段主動綁定。僅認 Google `sub` 或 GitHub 數字 `id`，不依相同電子郵件授權。更改來源或 client ID 會清除相關綁定；變更管理員密碼後請解除再綁定。原生殼、APK、封鎖 Cookie 的代理或尚未綁定時請用密碼；不會透過網址傳送登入票據。
+
+預設 ALTCHA 不需外部服務。Turnstile 需要你控制的**獨立 HTTPS 靜態站台**；請勿使用面板或閘道的主機名稱，也不要在該站台代理 API、設定面板 Cookie 或儲存憑證。
+
+1. 從面板的 `/api/panel/turnstile-widget` 下載 HTML，在靜態站台以 `/turnstile-widget.html` 原樣提供（`text/html`，允許面板嵌入）。面板的下載網址不能當成 iframe 網址。
+2. 在 Cloudflare 建立 Turnstile widget，將**靜態站台的主機名稱**而非面板主機名稱加入允許清單。用戶端須能存取靜態站與 `challenges.cloudflare.com`；閘道須能透過 HTTPS 存取後者。
+3. 保留管理員工作階段，在「設定 → 安全 → 登入驗證方式」選擇 Turnstile，輸入 site key、secret key 與靜態站台的 `https://主機名稱`（不含連接埠或路徑）。啟用此端的人機驗證後，用私密視窗測試密碼登入。
+
+伺服器必須同時驗證成功、精確的靜態站台主機名稱及 `action=agent2api_panel`。網路或驗證失敗不會略過驗證或切換到 ALTCHA。可從保留的工作階段改回 ALTCHA；Cloudflare 公開測試密鑰不傳回所需的 action，不能用來驗收正式登入。

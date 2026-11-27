@@ -48,6 +48,7 @@
 //! 一律在闭包之外打（`now_ms` 只读时钟，不算 IO）。
 
 mod storage;
+mod maintenance_history;
 pub(crate) mod calendar;
 
 use std::collections::HashMap;
@@ -90,6 +91,8 @@ pub struct TaskState {
     interval_ms: i64,
     lease_until: i64,
     owner: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) history: Vec<maintenance_history::Run>,
 }
 
 impl TaskState {
@@ -156,7 +159,14 @@ pub fn read(key: &str) -> Result<TaskState, String> {
 }
 
 pub fn read_all() -> Result<HashMap<String, TaskState>, String> {
-    storage::read_all()
+    let mut states = storage::read_all()?;
+    let now = logging::now_ms();
+    for (key,state) in &mut states {
+        if maintenance_history::expired(state,now) {
+            *state=change(key,|current|maintenance_history::recover(current,logging::now_ms()))?;
+        }
+    }
+    Ok(states)
 }
 
 pub fn store_value(key: &str, value: Value) -> Result<(), String> {
@@ -223,6 +233,7 @@ pub fn clear_cooldown(key: &str) -> Result<(), String> {
 pub fn reschedule(key: &str, interval_ms: i64) -> Result<(), String> {
     change(key, |state| {
         let now = logging::now_ms();
+        maintenance_history::recover(state, now);
         state.adjust_clock(now);
         state.interval_ms = interval_ms;
         let anchor = state.last_run_at.max(state.last_attempt_at);
@@ -278,12 +289,14 @@ pub fn claim(
     let mut acquired = false;
     let state = change(key, |state| {
         state.adjust_clock(now);
+        maintenance_history::recover(state, now);
         let earliest = state.last_attempt_at.saturating_add(min_gap_ms);
         let cooling = state.retry_at > now && !(manual && backoff == ManualBackoff::Bypass);
         if state.running() || now < earliest || cooling || (!manual && now < state.next_run_at) {
             return;
         }
         acquired = true;
+        maintenance_history::start(state,key,manual,now);
         state.last_attempt_at = now;
         state.interval_ms = interval_ms;
         state.next_run_at = now.saturating_add(interval_ms);
@@ -367,6 +380,7 @@ impl RunGuard {
             }
             let now = logging::now_ms();
             state.last_run_at = now;
+            maintenance_history::finish(state,if success {maintenance_history::Status::Succeeded} else {maintenance_history::Status::Failed},now);
             state.last_result = Some(summary.clone());
             state.interval_ms = interval_ms;
             if success {
@@ -401,6 +415,7 @@ impl Drop for RunGuard {
         }
         let _ = change(&self.key, |state| {
             if state.owner == self.owner {
+                maintenance_history::finish(state,maintenance_history::Status::Interrupted,logging::now_ms());
                 state.owner.clear();
                 state.lease_until = 0;
                 state.last_result = Some("上次执行中断，保留原有排期".to_string());

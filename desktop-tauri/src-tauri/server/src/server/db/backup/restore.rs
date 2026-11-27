@@ -20,6 +20,8 @@ pub(super) fn import(
     config_dir: &Path,
     password: &str,
 ) -> Result<Value, String> {
+    #[cfg(feature = "task-plugins")]
+    let _task_restore = crate::server::core::task_plugins::restore_guard()?;
     set_phase(RestorePhase::Decrypting);
     let mut backup = archive::read(source, password, config_dir)?;
     let header = sql_import::header(&mut backup.sql)?;
@@ -77,6 +79,21 @@ pub(super) fn import(
     } else {
         0
     };
+    temp.conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false).map_err(|_| "无法隔离恢复中的任务")?;
+    for table in super::TRANSIENT_TABLES {
+        let exists: bool = temp.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)", [table], |row| row.get(0)).map_err(|_| "无法检查临时图像数据")?;
+        if exists { temp.conn.execute(&format!("DELETE FROM {table}"), []).map_err(|_| "无法清除临时图像数据")?; }
+    }
+    temp.conn.execute_batch("UPDATE task_plugins SET enabled=0, notify_allowed=0, network_grants_json='{}'; UPDATE task_jobs SET enabled=0, next_run_at=NULL;").map_err(|_| "无法清除备份中的任务授权")?;
+    let interrupted = "从备份恢复，原执行已中断";
+    temp.conn.execute(
+        "UPDATE task_job_runs SET status='failed', finished_at=MAX(started_at, ?1), error=?2 WHERE status='running'",
+        rusqlite::params![logging::now_ms(), interrupted],
+    ).map_err(|_| "无法终结备份中未完成的执行记录")?;
+    temp.conn.execute(
+        "UPDATE task_jobs SET last_status='failed', last_error=?1 WHERE last_status='running'",
+        [interrupted],
+    ).map_err(|_| "无法终结备份中未完成的实例状态")?;
     let tables = table_row_counts(&temp.conn, &[]);
     set_phase(RestorePhase::SafetyBackup);
     let suppression = cloud_sync::auto_sync::SuppressionGuard::new();
@@ -97,6 +114,7 @@ pub(super) fn import(
                 Err(rollback_error) => Err(format!("{error}；自动还原失败: {rollback_error}。安全备份保存在 {}，本机密钥未更换", safety.display())),
             };
         }
+        crate::server::core::model_pricing::fx::database_replaced(main);
         db.invalidate_accounts();
         db.invalidate_requests();
         Ok(safety)

@@ -266,16 +266,77 @@ fn load_or_create_key(scope: SecretScope) -> Result<[u8; KEY_LEN], String> {
 fn create_key_file(path: &std::path::Path) -> Result<[u8; KEY_LEN], String> {
     let mut key = [0u8; KEY_LEN];
     getrandom::getrandom(&mut key).map_err(|error| format!("系统随机源不可用: {error}"))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|error| format!("创建配置目录失败: {error}"))?;
+    publish_key_if_absent(path, key)
+}
+
+fn publish_key_if_absent(path: &std::path::Path, key: [u8; KEY_LEN]) -> Result<[u8; KEY_LEN], String> {
+    use std::io::{ErrorKind, Write};
+    let dir = path.parent().ok_or("密钥文件路径无效")?;
+    std::fs::create_dir_all(dir).map_err(|error| format!("创建配置目录失败: {error}"))?;
+    let mut file = tempfile::NamedTempFile::new_in(dir).map_err(|error| format!("暂存密钥失败: {error}"))?;
+    file.write_all(&key).and_then(|()| file.as_file().sync_all()).map_err(|error| format!("写入密钥失败: {error}"))?;
+    match file.persist_noclobber(path) {
+        Ok(_) => Ok(key),
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => std::fs::read(path)
+            .map_err(|error| format!("读取密钥文件失败: {error}"))?
+            .try_into().map_err(|_| "密钥文件长度异常".to_owned()),
+        Err(error) => Err(format!("安装密钥文件失败: {error}")),
     }
-    std::fs::write(path, key).map_err(|error| format!("写入密钥文件 {} 失败: {error}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(test)]
+mod key_publication_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_first_key_publications_keep_one_complete_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("account.key");
+        let gate = std::sync::Barrier::new(12);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..12).map(|index| {
+                let path = &path;
+                let gate = &gate;
+                scope.spawn(move || {
+                    gate.wait();
+                    publish_key_if_absent(path, [index; KEY_LEN]).unwrap()
+                })
+            }).collect();
+            let results: Vec<_> = handles.into_iter().map(|thread| thread.join().unwrap()).collect();
+            let installed = std::fs::read(&path).unwrap();
+            assert!(results.iter().all(|result| result.as_slice() == installed));
+        });
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        }
+        std::fs::write(&path, b"invalid").unwrap();
+        assert!(publish_key_if_absent(&path, [10; KEY_LEN]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"invalid");
     }
-    Ok(key)
+}
+
+pub(crate) fn adopt_account_key(key: [u8; KEY_LEN]) -> Result<(), String> {
+    let scope = SecretScope::Accounts;
+    let conflict = "本机已有不同的账号密钥。为保护本机数据不能用云端密钥覆盖，请在全新配置目录恢复，或使用整库加密备份迁移。";
+    let mut cached = cache_for(scope).lock().map_err(|_| "密钥锁不可用")?;
+    if cached.is_some_and(|current| current != key) {
+        return Err(conflict.to_owned());
+    }
+    if let Some(pinned) = env_key(scope) {
+        if pinned != key { return Err(conflict.to_owned()); }
+    } else {
+        let path = key_file_path(scope);
+        let existing = match std::fs::read(&path) {
+            Ok(bytes) => bytes.try_into().map_err(|_| "密钥文件长度异常")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => publish_key_if_absent(&path, key)?,
+            Err(error) => return Err(format!("读取密钥文件失败: {error}")),
+        };
+        if existing != key { return Err(conflict.to_owned()); }
+    }
+    *cached = Some(key);
+    Ok(())
 }
 
 // ─── 密钥指纹（只读，绝不触发生成）───────────────────────────

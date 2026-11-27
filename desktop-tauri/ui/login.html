@@ -67,7 +67,7 @@
        同一手法）—— 中间多一层 div 的话，卡片的 min(400px,100%) 会按那一层的收缩宽度
        计算，窄窗口下就偏了 */
     #login-app { display: contents; }
-    panel-captcha { display: flex; justify-content: center; }
+    panel-captcha { display: flex; flex-direction:column; justify-content: center; } [data-widget-host]:empty { display:none; }
     #submit { margin-top: 20px; }
   </style>
   <!-- 多语言运行时（词典已在上面 head 的引导脚本里同步注入）：排在所有 css 之后，
@@ -232,7 +232,7 @@
 
       // 探测开关：未启用时领题回 400，隐藏验证行（提交自然不带 payload）
       fetch('/api/panel/captcha').then(function (resp) {
-        if (resp.ok) return;
+        if (resp.status !== 400) return;
         captchaRequired = false;
         widget.style.display = 'none';
       }).catch(function () { /* 网关不可达：组件自会显示失败 */ });
@@ -240,6 +240,17 @@
       // 决定模式：没有任何管理员 → 注册；否则登录
       fetch('/api/panel/status').then(function (resp) { return resp.json(); }).then(function (data) {
         var registered = data && data.data && data.data.registered;
+        if (registered && location.protocol === 'https:' && Array.isArray(data.data.oauthProviders)) {
+          data.data.oauthProviders.forEach(function (provider) {
+            if (provider !== 'google' && provider !== 'github') return;
+            var oauth = document.createElement('button'); oauth.type = 'button'; oauth.className = 'btn'; oauth.textContent = provider === 'google' ? 'Google' : 'GitHub';
+            oauth.onclick = function () {
+              if (captchaRequired && !captchaPayload) { errorEl.textContent = '请先完成人机验证'; return; }
+              oauth.disabled = true; window.beginPanelOAuth(provider, 'login', captchaPayload).catch(function () { errorEl.textContent = 'OAuth 登录暂不可用，请使用账号密码'; oauth.disabled = false; if (captchaRequired) widget.reset(); });
+            };
+            $('oauth-buttons').appendChild(oauth);
+          });
+        }
         isSetup = !registered;
         tip.textContent = isSetup
           ? '首次使用：创建一个管理员账号，用于登录此面板'

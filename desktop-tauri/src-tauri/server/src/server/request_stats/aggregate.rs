@@ -72,7 +72,7 @@ pub(super) fn remap_model_days(conn: &mut rusqlite::Connection) -> rusqlite::Res
         // 重算是按明细整行重写的安全动作，聚合行缺失时重算顺带把它建全。
         let aggregate_requests: i64 = tx
             .query_row(
-                "SELECT requests FROM request_daily WHERE date = ?1",
+                "SELECT requests + auxiliary_requests FROM request_daily WHERE date = ?1",
                 rusqlite::params![key],
                 |row| row.get(0),
             )
@@ -178,6 +178,11 @@ pub(super) fn summarize(
         "startDate": start_date,
         "endDate": end_date,
         "overview": {
+            "costUsd": (totals.priced_requests > 0).then_some(totals.cost_usd),
+            "costCny": (totals.priced_requests > 0).then_some(totals.cost_cny),
+            "pricingCurrency": crate::server::core::model_pricing::display_currency(),
+            "pricedRequests": totals.priced_requests,
+            "auxiliaryRequests": totals.auxiliary_requests,
             "requests": totals.requests,
             "successful": totals.successful,
             "tokens": totals.tokens,
@@ -222,8 +227,15 @@ pub(super) fn fold_into_daily(day: &mut DailyEntry, item: &RequestEntry) {
     }
     super::source_report::fold_sources(day, item);
     let success = item.is_success();
-    day.requests += 1;
-    if success {
+    if let Some(cost) = item.cost_usd.filter(|cost| success && cost.is_finite() && *cost >= 0.0) {
+        day.cost_usd += cost;
+        day.cost_cny += item.cost_cny().unwrap_or(0.0);
+        day.priced_requests += 1;
+    }
+    let auxiliary = item.is_auxiliary();
+    day.auxiliary_requests += i64::from(auxiliary);
+    day.requests += i64::from(!auxiliary);
+    if success && !auxiliary {
         day.successful += 1;
     }
     day.tokens += item.total_tokens;

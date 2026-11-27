@@ -677,7 +677,7 @@ pub fn shim_js() -> &'static str {
   }
 
   // ── HTTP 调用：信封解包与桌面 gateway::unwrap_envelope 对齐 ──
-  async function httpCall(method, path, body, retried, selectedKey) {
+  async function httpCall(method, path, body, retried, selectedKey, signal) {
     // 到期前先把令牌换掉：这一步让「access 过期 → 401 → 续期」不再发生，
     // 也就没有那条每 2 小时一次的 401（见 `ensureFreshSession`）。
     // 只在首轮做：重试那一趟（retried=true）刚刚续过期，再判一次纯属多余。
@@ -699,6 +699,7 @@ pub fn shim_js() -> &'static str {
     }
     if (selectedKey !== undefined) headers['x-api-key'] = selectedKey;
     var init = { method: method, headers: headers };
+    if (signal) init.signal = signal;
     var wantsBody = method === 'POST' || method === 'PUT' || method === 'PATCH'
       || !(body === null || body === undefined);
     if (wantsBody) {
@@ -712,7 +713,7 @@ pub fn shim_js() -> &'static str {
       throw new Error('无法连接网关：' + (error && error.message ? error.message : error));
     }
     var text = await response.text();
-    if (response.status === 401 && !retried) {
+    if (response.status === 401 && !retried && !signal) {
       // 按错误类型分流。panel_login_required：管理员已注册、要登录 ——
       // 先用长效 refresh 静默换新（access 过期时用户无感），不行再整页
       // 跳独立登录页；其余 401 = 未配管理员的部署，弹 Key 框兜底。
@@ -1116,7 +1117,7 @@ pub fn shim_js() -> &'static str {
     api_request: function (args) {
       var request = (args && args.request) || {};
       return httpCall(request.method || 'GET', request.path || '/', request.body, false,
-        request.apiKey === undefined ? undefined : String(request.apiKey));
+        request.apiKey === undefined ? undefined : String(request.apiKey), request.signal);
     },
     check_update: function () {
       // 网页端没有「壳打包的版本号」这个概念：不带 current，服务端按自己的
@@ -1478,6 +1479,7 @@ pub fn shim_js() -> &'static str {
   // __TAURI_INTERNALS__ 先装：界面里两处直接 internals.invoke('api_request')
   // （sms-login 的兜底与添加账号的 postAccount）依赖它存在。
   window.__TAURI_INTERNALS__ = {
+    supportsAbortSignal: true,
     invoke: function (command, args) {
       return invokeShell(command, args).catch(asError).then(function (value) {
         if (value instanceof Error) throw value;
@@ -1677,6 +1679,8 @@ pub fn shim_js() -> &'static str {
     saveClientIdentification: function (payload) { return call('PUT', '/api/client-identification', payload); },
     previewClientIdentification: function (payload) { return call('POST', '/api/client-identification/preview', payload); },
     getCompactRoutes: function () { return call('GET', '/api/models/compact-routes'); },
+    getTitleRoutes: function () { return call('GET', '/api/models/title-routes'); },
+    saveTitleRoutes: function (payload) { return call('PUT', '/api/models/title-routes', payload); },
     saveCompactRoutes: function (payload) { return call('PUT', '/api/models/compact-routes', payload); },
     setModelState: function (payload) { return call('POST', '/api/models/state', payload); },
     // 第 4 / 第 5 个参数（思考等级 / 映射开关）都按「有没有传」决定是否进请求体：
@@ -1984,6 +1988,10 @@ pub fn shim_js() -> &'static str {
 
     // ── 间隔型定时任务 ──
     getScheduledTasks: function () { return call('GET', '/api/scheduled-tasks'); },
+    localTaskRequest: function (method, route, payload) {
+      if (!/^task-(jobs|plugins)(\/[a-z0-9-]+){0,2}$/.test(route) || !['GET','POST','PUT','DELETE'].includes(method)) throw Error('Invalid task operation');
+      return call(method, '/api/' + route, payload);
+    },
     saveScheduledTask: function (id, patch) {
       return call('PATCH', '/api/scheduled-tasks/' + encodeURIComponent(String(id || '')), patch);
     },
@@ -2058,6 +2066,14 @@ pub fn shim_js() -> &'static str {
       return call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true });
     },
 
+    // ── 第三方模型回答完自动折叠过程 ──
+    // 与桌面桥（src/bridge.rs 的 getReasoningCollapse / saveReasoningCollapse）
+    // 同一映射：两边接口名与签名必须一致，界面代码零改动地跑在两边
+    getReasoningCollapse: function () { return call('GET', '/api/reasoning-collapse'); },
+    saveReasoningCollapse: function (enabled) {
+      return call('PUT', '/api/reasoning-collapse', { thirdPartyReasoningCollapse: enabled === true });
+    },
+
     // ── Cline 伪装头（转发头逐键覆盖）──
     // 与桌面桥（src/bridge.rs 的 getClineHeaders / saveClineHeaders）同一映射。
     // 这两个方法曾经漏在网页桥里：设置页调用 `getClineHeaders` 抛
@@ -2086,6 +2102,9 @@ pub fn shim_js() -> &'static str {
 
     // ── 系统提示词与内容拦截降级 ──
     getPrompt: function () { return call('GET', '/api/prompt'); },
+    getPromptRules: function () { return call('GET', '/api/prompt/rules'); },
+    savePromptRules: function (body) { return call('PUT', '/api/prompt/rules', body); },
+    previewPromptRules: function (body) { return call('POST', '/api/prompt/rules/preview', body); },
     savePrompt: function (payload) {
       payload = payload || {};
       return call('PUT', '/api/prompt', {
@@ -2115,6 +2134,21 @@ pub fn shim_js() -> &'static str {
     // 「在 WebUI 里隐藏的菜单客户端也跟着隐藏」这条功能等于不存在。
     // 语义见 api::sidebar_layout：读回 `{layout}`（null = 没存过），写整份。
     getSidebarLayout: function () { return call('GET', '/api/sidebar-layout'); },
+    saveBranding: function (patch) { return call('PUT', '/api/branding', patch); },
+    getPrivacy: function () { return call('GET', '/api/privacy'); },
+    getTurnstile: function () { return call('GET', '/api/captcha/turnstile'); },
+    getPanelOauth: function () { return call('GET', '/api/panel-oauth'); },
+    savePanelOauth: function (patch) { return call('PUT', '/api/panel-oauth', patch); },
+    saveTurnstile: function (patch) { return call('PUT', '/api/captcha/turnstile', patch); },
+    savePrivacy: function (patch) { return call('PUT', '/api/privacy', patch); },
+    previewPrivacy: function (payload) { return call('POST', '/api/privacy/test', payload); },
+    getNotifications: function () { return call('GET', '/api/notifications'); },
+    getPricing: function () { return call('GET', '/api/model-pricing'); },
+    savePricing: function (body) { return call('PUT', '/api/model-pricing', body); },
+    refreshPricingFx: function () { return call('POST', '/api/model-pricing/fx'); },
+    repriceRequests: function (body) { return call('POST', '/api/model-pricing/reprice', body); },
+    saveNotifications: function (patch) { return call('PUT', '/api/notifications', patch); },
+    testNotification: function (payload) { return call('POST', '/api/notifications/test', payload); },
     saveSidebarLayout: function (layout) {
       return call('PUT', '/api/sidebar-layout', { layout: layout === undefined ? null : layout });
     },

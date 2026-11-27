@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { formatEstimate } from '../../../../ui-shared/pricing'
 import { Badge, Button, HtmlContent, StatusDot } from '@ui'
 import { t } from '../../i18n'
 import { NameEyeButton } from '../accounts-panels'
@@ -16,6 +17,8 @@ export type RequestEntry = {
   /** 上游按请求上报的积分消耗（后端 `credit`）；null / 缺键 = 这一家没上报，
    *  与 0（确实零消耗）是两件事 —— 前者显示「—」 */
   credit?: number | null
+  costUsd?: number | null
+  costCny?: number | null; pricingCurrency?: string
   attempts?: number; attemptDetails?: unknown[]; sensitiveHits?: unknown[]
   /** 模型测试发起的请求（后端 `is_test`；此前落盘的老行没有这个键） */
   isTest?: boolean
@@ -383,6 +386,7 @@ export function RequestCell({ entry, column, namesHidden }: { entry: RequestEntr
       return <span key={key} className={`${className}${speed ? '' : ' req-none'}`} title={SPEED_TIP}>{speed || '—'}</span>
     }
 
+    case 'costUsd': return <span key={key} className={className}>{isRunning(entry) ? '' : formatEstimate(entry)}</span>
     case 'credit': {
       // 进行中：积分要等上游最后一个 chunk 的 usage 才到，此刻没有读数可给
       // （与「用量」列同一处置：留空比「-」更准确）。

@@ -261,6 +261,7 @@ pub(crate) async fn forward(
     // 但同源更不容易在将来改坏）
     quirks.apply_emulation_to_body(&mut outbound, &base_url);
     super::tool_schema::normalize_grok_tools(&mut outbound);
+    telemetry.mask_private_body(&mut outbound)?;
     let payload = serde_json::to_string(&outbound)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
     // ── 出站头（三段拼装，顺序不可换）────────────────────────────
@@ -314,7 +315,7 @@ pub(crate) async fn forward(
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string);
-        let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
+        let detail = read_upstream_error(response, telemetry.capture().as_deref(), telemetry.privacy.is_some()).await;
         return Err(classify_custom_error(
             status,
             &detail.message,
@@ -609,6 +610,7 @@ async fn forward_translated(
         }
     };
     super::tool_schema::normalize_grok_tools(&mut payload);
+    telemetry.mask_private_body(&mut payload)?;
     let payload = serde_json::to_string(&payload)
         .map_err(|error| GatewayError::with_status(500, format!("请求体序列化失败: {error}")))?;
 
@@ -647,7 +649,7 @@ async fn forward_translated(
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string);
-        let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
+        let detail = read_upstream_error(response, telemetry.capture().as_deref(), telemetry.privacy.is_some()).await;
         return Err(classify_custom_error(
             status,
             &detail.message,

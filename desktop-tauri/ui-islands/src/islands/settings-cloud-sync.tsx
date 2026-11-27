@@ -225,6 +225,10 @@ export function CloudSyncPanel({ active = true }: { active?: boolean }) {
     }
     setRemote(info)
     if (info.keyRequired) {
+      if (info.localKeyFingerprint) {
+        toast(t('只在本机没有账号密钥时安装；已有相同密钥无需改动。若密钥不同，请在全新配置目录恢复，或使用整库加密备份迁移。'), 'err')
+        return
+      }
       // 远端说用了另一把密钥，但文件却没传上来（旧版本上传 / 手删了文件）：
       // 这时输入密码也解不出来，直接说清楚，别让用户白输一次
       if (info.hasKeyArtifact === false) {
@@ -708,7 +712,7 @@ export function CloudSyncPanel({ active = true }: { active?: boolean }) {
               )}
             </div>
             <div className='hint mt-2'>
-              {t('导入前会把本机的 account.key 改名备份（account.key.bak-时间戳），不会直接删除。')}
+              {t('只在本机没有账号密钥时安装；已有相同密钥无需改动。若密钥不同，请在全新配置目录恢复，或使用整库加密备份迁移。')}
             </div>
             <Label htmlFor='cloud-sync-key-password' className='mt-3 mb-[5px] block text-[12.5px]'>
               {t('同步密码')}

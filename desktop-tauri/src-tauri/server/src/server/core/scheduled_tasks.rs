@@ -77,6 +77,23 @@ pub struct TaskDef {
 pub const TASK_CREDENTIAL_MAINTENANCE: &str = config::KEY_CREDENTIAL_MAINTENANCE;
 pub const TASK_MODEL_REFRESH: &str = config::KEY_MODEL_REFRESH;
 pub const TASK_UPDATE_CHECK: &str = config::KEY_UPDATE_CHECK;
+const TASK_PLUGIN_CATALOG: &str = "pluginCatalog";
+
+fn software_check_available() -> bool {
+    use crate::server::core::update;
+    if update::desktop_shell() { return true; }
+    let disabled=|key| std::env::var(key).is_ok_and(|value| value.trim()=="0");
+    if cfg!(windows) && disabled("AGENT2API_WINDOWS_UPDATE") {return false;}
+    if cfg!(target_os="linux") && disabled("AGENT2API_SYSTEMD_UPDATE") {return false;}
+    !(crate::server::core::system_info::in_container() && !update::selfupdate::enabled())
+}
+
+fn catalog_info(state: TaskState) -> Value {
+    use crate::server::core::plugin_host;
+    let available=plugin_host::current().is_some() || !plugin_host::list_packs().is_empty();
+    let plan=plugin_host::settings::current();
+    json!({"id":TASK_PLUGIN_CATALOG,"label":"插件目录检查","description":"沿用插件页计划；此处仅检查，不安装。","unit":"minutes","runner":"backend","enabled":available && plan.auto_check,"interval":plan.interval,"min":plugin_host::settings::MIN_INTERVAL,"max":plugin_host::settings::MAX_INTERVAL,"defaultInterval":plan.interval,"running":state.running(),"lastRunAt":(state.last_run_at>0).then_some(state.last_run_at),"nextRunAt":(available && plan.auto_check && state.due_at()>0).then_some(state.due_at()),"lastResult":state.last_result,"canRun":available,"available":available,"readOnlyPlan":true,"history":state.history})
+}
 pub const TASK_LOGS_AUTO_REFRESH: &str = config::KEY_LOGS_AUTO_REFRESH;
 pub const TASK_REQUESTS_AUTO_REFRESH: &str = config::KEY_REQUESTS_AUTO_REFRESH;
 pub const TASK_REPORT_AUTO_REFRESH: &str = config::KEY_REPORT_AUTO_REFRESH;
@@ -176,6 +193,7 @@ fn state_key(id: &str) -> String {
 fn task_json(task: &TaskDef, state: Result<TaskState, String>) -> Value {
     let settings = settings_of(config::scheduled_settings(), task.id);
     let backend = task.runner == Runner::Backend;
+    let available = task.id != TASK_UPDATE_CHECK || software_check_available();
     let error = state.as_ref().err().cloned();
     let state = state.unwrap_or_default();
     let timestamp = |at: i64| if at > 0 { json!(at) } else { Value::Null };
@@ -185,7 +203,8 @@ fn task_json(task: &TaskDef, state: Result<TaskState, String>) -> Value {
         "description": task.description,
         "unit": task.unit,
         "runner": if backend { "backend" } else { "frontend" },
-        "enabled": settings.enabled,
+        "enabled": settings.enabled && available,
+        "available":available, "readOnlyPlan":!available,
         "interval": settings.interval,
         "min": task.min,
         "max": task.max,
@@ -194,11 +213,12 @@ fn task_json(task: &TaskDef, state: Result<TaskState, String>) -> Value {
         "lastRunAt": timestamp(state.last_run_at),
         "lastAttemptAt": timestamp(state.last_attempt_at),
         "lastSuccessAt": timestamp(state.last_success_at),
+        "history": state.history,
         "lastResult": error.or_else(|| state.last_result.clone()),
         "lastError": state.last_error,
         "retryAt": timestamp(state.retry_at),
-        "nextRunAt": if backend && settings.enabled { timestamp(state.due_at().max(logging::now_ms())) } else { Value::Null },
-        "canRun": backend,
+        "nextRunAt": if backend && settings.enabled && available { timestamp(state.due_at().max(logging::now_ms())) } else { Value::Null },
+        "canRun": backend && available,
     })
 }
 
@@ -219,11 +239,13 @@ pub fn list() -> Value {
                 };
                 task_json(task, state)
             })
+            .chain(std::iter::once(catalog_info(states.as_ref().ok().and_then(|states|states.get(&crate::server::core::plugin_host::catalog::key())).cloned().unwrap_or_default())))
             .collect::<Vec<_>>(),
     })
 }
 
 pub fn task_by_id(id: &str) -> Value {
+    if id==TASK_PLUGIN_CATALOG {return catalog_info(task_state::read(&crate::server::core::plugin_host::catalog::key()).unwrap_or_default());}
     find(id)
         .map(|task| {
             let state = if task.runner == Runner::Backend {
@@ -280,6 +302,12 @@ pub fn configure(id: &str, patch: IntervalTaskPatch) -> Result<Value, String> {
 }
 
 pub async fn run_now(store: &AccountStore, update: &UpdateManager, id: &str) -> Result<String, String> {
+    if id==TASK_PLUGIN_CATALOG {
+        use crate::server::core::plugin_host;
+        if plugin_host::current().is_none() && plugin_host::list_packs().is_empty() {return Err("无已安装插件，此维护任务不适用".into());}
+        plugin_host::catalog::refresh(true).await?;
+        return Ok("插件目录已检查，未安装或更新插件".into());
+    }
     let task = find(id).ok_or_else(|| format!("未知的定时任务: {id}"))?;
     if task.runner != Runner::Backend {
         return Err(format!("「{}」由界面自己刷新，无法在后端立即执行", task.label));
@@ -307,6 +335,28 @@ fn round_succeeded(succeeded: usize, failed: usize) -> bool {
     failed == 0 || succeeded > 0
 }
 
+pub async fn credential_report(store:&AccountStore,manual:bool) -> Result<(String, Value),String> {
+    let task=find(TASK_CREDENTIAL_MAINTENANCE).ok_or("凭证维护不可用")?;
+    let interval=interval_ms(task);
+    let guard=match task_state::claim(task.id,interval,manual,task_state::ManualBackoff::Bypass,1000)? {
+        Claim::Acquired(guard)=>guard, Claim::Deferred(state)=>return Err(state.waiting_message_bypassing()),
+    };
+    let report=crate::server::core::credential_maintenance::refresh_expiring_report(store).await;
+    let count=|name:&str| report[name].as_u64().unwrap_or(0) as usize;
+    let (refreshed,skipped,failed)=(count("refreshed"),count("skipped"),count("failed"));
+    let summary=format!("刷新 {refreshed} 个，跳过 {skipped} 个，失败 {failed} 个");
+    if refreshed>0 || failed>0 {logging::log_with_level("[Maintenance]",&format!("凭证自动维护：{summary}"),if failed>0 {"error"} else {"info"});}
+    guard.finish(round_succeeded(refreshed,failed),summary.clone(),None,0,interval)?;
+    Ok((summary,report))
+}
+
+pub async fn refresh_catalog_if_due(store:&AccountStore, update:&UpdateManager) -> Result<String,String> {
+    let task=find(TASK_MODEL_REFRESH).ok_or("模型目录刷新不可用")?;
+    if !settings_of(config::scheduled_settings(), task.id).enabled { return Err("模型目录定时刷新未启用".into()); }
+    if task_state::read(task.id)?.due_at() > logging::now_ms() {return Err("模型目录刷新尚未到期".into());}
+    run_backend(store, update, task, false).await
+}
+
 async fn run_backend(
     store: &AccountStore,
     update: &UpdateManager,
@@ -314,7 +364,9 @@ async fn run_backend(
     manual: bool,
 ) -> Result<String, String> {
     // 更新管理器同时承接设置页按钮，排期必须属于它而不是外围定时器。
+    if task.id == TASK_CREDENTIAL_MAINTENANCE { return credential_report(store,manual).await.map(|(summary,_)|summary); }
     if task.id == TASK_UPDATE_CHECK {
+        if !software_check_available() {return Err("此部署已禁用软件更新检查".into());}
         let current = crate::server::core::update::CURRENT_VERSION;
         let info = if manual { update.check(current).await } else { update.check_scheduled(current).await }
             .map_err(|error| error.message)?;
@@ -348,15 +400,6 @@ async fn run_backend(
         }
     };
     let (summary, success) = match task.id {
-        TASK_CREDENTIAL_MAINTENANCE => {
-            let results = crate::server::core::credential_maintenance::refresh_expiring_accounts(store).await;
-            let (refreshed, skipped, failed) = crate::server::core::credential_maintenance::summarize(&results);
-            let summary = format!("刷新 {refreshed} 个，跳过 {skipped} 个，失败 {failed} 个");
-            if refreshed > 0 || failed > 0 {
-                logging::log_with_level("[Maintenance]", &format!("凭证自动维护：{summary}"), if failed > 0 { "error" } else { "info" });
-            }
-            (summary, round_succeeded(refreshed, failed))
-        }
         TASK_MODEL_REFRESH => {
             let results = if manual {
                 crate::server::core::providers::adapter::refresh_implemented_forced(store, &serde_json::Map::new(), None).await
@@ -438,6 +481,7 @@ pub fn spawn(store: AccountStore, update: UpdateManager) {
                 continue;
             };
             for task in TASKS.iter().filter(|task| task.runner == Runner::Backend) {
+                if task.id==TASK_UPDATE_CHECK && !software_check_available() {continue;}
                 if !settings_of(config::scheduled_settings(), task.id).enabled {
                     continue;
                 }

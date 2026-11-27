@@ -228,6 +228,19 @@ pub fn admin_registered() -> bool {
     panel_auth_enabled()
 }
 
+pub(crate) fn oauth_admin_stamp() -> Option<String> {
+    let (username,hash)=store_admin()?;
+    Some(sha256_hex(&format!("{username}\0{hash}")))
+}
+
+pub(crate) fn oauth_cookie_session(headers:&HeaderMap)->Option<String> {
+    let table=access_tokens().lock().ok()?;let now=now_ms();
+    cookie_values(headers,ACCESS_COOKIE).into_iter().find_map(|cookie| {
+        let (token,_)=cookie.split_once(TOKEN_SEP)?;
+        table.get(&sha256_hex(token)).filter(|(_,expiry)|*expiry>now).map(|(session,_)|session.clone())
+    })
+}
+
 /// 密码 → bcrypt 哈希（成本因子 10，与 env 预置、htpasswd -nBC 的输出互通）。
 ///
 /// 哈希参数只在这一处定义：面板注册（`api::panel`）与桌面壳的注册命令

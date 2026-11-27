@@ -3,6 +3,7 @@ import { mountOnPage } from '../island-lazy'
 import { createRoot } from 'react-dom/client'
 import { Badge, Button, Input, Switch , Label, Card, CardHeader, CardContent, CardFooter } from '@ui'
 import { t } from '../i18n'
+import { LocalTaskPlugins, type TaskPluginRequest } from '../../../ui-shared/local-task-plugins'
 import { Empty } from '@ui'
 // 「把检查结果交给更新弹窗」与 app.js 的轮询同一条出口，实现在更新家族的共享模块里
 
@@ -60,7 +61,12 @@ import { Empty } from '@ui'
  * 一条间隔型任务（GET /api/scheduled-tasks 的 tasks[]）。
  * 字段与后端 task_json 一一对应；单位 / 上下限 / 默认值都由后端下发，前端不抄一份。
  */
+import { MaintenanceHistory, type MaintenanceRun } from '../../../ui-shared/maintenance-history'
+
 type IntervalTask = {
+  history?: MaintenanceRun[]
+  available?: boolean
+  readOnlyPlan?: boolean
   id: string
   label: string
   /** 说明文案（问号 tooltip 的内容），后端随任务下发 */
@@ -90,7 +96,8 @@ type IntervalTask = {
  */
 type TasksBridge = {
   /** GET /api/scheduled-tasks */
-  getScheduledTasks(): Promise<{ tasks?: IntervalTask[] } | null | undefined>
+  getScheduledTasks(): Promise<{ tasks?: IntervalTask[]; localTaskPlugins?: boolean } | null | undefined>
+  localTaskRequest: TaskPluginRequest
   /** PATCH /api/scheduled-tasks/{id}，响应是改完的那条任务 */
   saveScheduledTask(id: string, patch: Record<string, unknown>): Promise<IntervalTask>
   /** POST /api/scheduled-tasks/{id}/run，响应带刷新后的那条任务 */
@@ -312,6 +319,7 @@ async function load() {
 function TasksPanel() {
   /** 最近一次拉到的间隔型任务清单 */
   const [tasks, setTasks] = React.useState<IntervalTask[]>([])
+  const [localTasks, setLocalTasks] = React.useState(false)
   /**
    * 是否已经成功拉到过数据。
    * 用来区分「还在加载」与「加载失败」—— 两者都是 tasks 空，
@@ -349,6 +357,7 @@ function TasksPanel() {
     try {
       if (!api) throw new Error(t('后端桥不可用'))
       const list = await api.getScheduledTasks()
+      setLocalTasks(list?.localTaskPlugins === true)
       setTasks(filterVisibleTasks(list))
       setLoaded(true)
     } catch (error) {
@@ -511,6 +520,7 @@ function TasksPanel() {
             <Label className='switch'>
               <Switch
                 checked={task.enabled === true}
+                disabled={task.readOnlyPlan}
                 onCheckedChange={next => void saveTask(task.id, { enabled: next }, t('{name}开关', { name: t(task.label) }))}
               />
               {/* 任务名 / 描述由后端随任务下发（固定中文常量），走 t() 让词典能翻 */}
@@ -527,6 +537,8 @@ function TasksPanel() {
             ) : null}
           </div>
           <div className='task-state'>{taskStateText(task)}</div>
+          {task.available===false && <div>{t('此部署不适用')}</div>}
+          <MaintenanceHistory runs={task.history} t={t} />
         </div>
         <div className='task-actions'>
           <span className='task-interval'>
@@ -536,6 +548,7 @@ function TasksPanel() {
               type='number'
               inputMode='numeric'
               min={task.min}
+              disabled={task.readOnlyPlan}
               max={task.max}
               step={1}
               className='w-[74px] max-w-[74px] text-center tabular-nums'
@@ -626,6 +639,7 @@ function TasksPanel() {
           ) : (
             <>
               {cards.slice(0, LEAD_CARDS)}
+              {localTasks && shared().workbuddyDesktop && <LocalTaskPlugins t={t} api={shared().workbuddyDesktop!.localTaskRequest} />}
               {rest.length ? <div className='task-grid'>{rest}</div> : null}
             </>
           )}

@@ -41,7 +41,7 @@ pub(super) fn parameter_supported(field: &str) -> bool {
     )
 }
 
-fn validate(
+pub(super) fn validate(
     payload: &mut Value,
     operation: image_models::ImageOperation,
 ) -> Result<(), GatewayError> {
@@ -329,8 +329,17 @@ pub(super) struct ImageExecution {
 
 pub(super) async fn execute(
     state: &ServerState,
+    payload: Value,
+    input: ImageExecution,
+) -> Result<Value, GatewayError> {
+    execute_with_telemetry(state, payload, input, Arc::new(RequestTelemetry::with_id())).await
+}
+
+pub(super) async fn execute_with_telemetry(
+    state: &ServerState,
     mut payload: Value,
     input: ImageExecution,
+    telemetry: Arc<RequestTelemetry>,
 ) -> Result<Value, GatewayError> {
     let ImageExecution {
         operation,
@@ -365,13 +374,12 @@ pub(super) async fn execute(
     }
     let raw = serde_json::to_vec(&payload)
         .map_err(|_| GatewayError::bad_request("图片请求无法序列化"))?;
-    pipeline::write_debug_files(
+    if !telemetry.ephemeral_image { pipeline::write_debug_files(
         &raw,
         "POST",
         operation.path(),
         &pipeline::user_agent_of(&headers),
-    );
-    let telemetry = Arc::new(RequestTelemetry::with_id());
+    ); }
     if let Some(key_source) = key_source {
         telemetry.install_model_key_source(key_source);
     }
@@ -395,7 +403,7 @@ pub(super) async fn execute(
         id,
         started_at,
     ));
-    let raw_request = pipeline::capture_raw_body(&raw);
+    let raw_request = if telemetry.ephemeral_image { None } else { pipeline::capture_raw_body(&raw) };
     let request = ForwardRequest {
         body: payload.clone(),
         stream: false,
@@ -426,7 +434,7 @@ pub(super) async fn execute(
         Err(error) => Err(error),
     };
     let (status, raw_response, error) = match &outcome {
-        Ok(body) => (200, pipeline::capture_raw_json(body), None),
+        Ok(body) => (200, if telemetry.ephemeral_image { None } else { pipeline::capture_raw_json(body) }, None),
         Err(error) => (
             i64::from(error.http_status().as_u16()),
             None,

@@ -13,6 +13,12 @@ import { RoutingChoiceBrand, RoutingModelRate } from '../../../ui-islands/src/is
 import type { RouteGroup, RoutingWorkspace } from '../../../ui-islands/src/islands/routing-types'
 import { RoutingPreviewPanel } from '../../../ui-islands/src/islands/routing-preview-panel'
 import { useRoutingPreviewMembers } from '../../../ui-islands/src/islands/routing-preview-members'
+import { TitleRouteSettings, type TitleRoutesApi } from '../../../ui-islands/src/islands/routing-title-dialog'
+import { VisionAssistSettings, type VisionApi } from '../../../ui-islands/src/islands/routing-vision-dialog'
+import { apiCall } from '../api/client'
+
+const titleRoutesApi: TitleRoutesApi = { getTitleRoutes: () => apiCall('/api/models/title-routes'), saveTitleRoutes: body => apiCall('/api/models/title-routes', { method: 'PUT', body }) }
+const visionApi: VisionApi = (method, path, body) => apiCall(path, { method, body })
 
 export function RoutingPage() {
   const [workspace, setWorkspace] = React.useState<RoutingWorkspace | null>(null)
@@ -32,6 +38,7 @@ export function RoutingPage() {
   const mutate = (patch: Partial<RouteGroup>) => editor.update(next => Object.assign(next, patch))
   const member = group?.members.find(item => item.id === dialog)
   return <div className='routing-magpie-mobile'>
+    {!group ? <><TitleRouteSettings api={titleRoutesApi} /><VisionAssistSettings api={visionApi} /></> : null}
     {!group ? <RoutingGroupsDashboard editor={editor} onOpen={open} onCreate={() => setCreating(true)} /> : <section className='routing-magpie-mobile-editor' data-mobile-routing-editor>
       <div className='routing-magpie-toolbar'><Button variant='outline' onClick={() => setView('')}>{t('返回路由组')}</Button>
         <Button variant='ghost' disabled={locked} onClick={() => void editor.load()}>{t('刷新目录，保留草稿')}</Button></div>

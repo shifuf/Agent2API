@@ -31,6 +31,35 @@ struct Fixture {
     http: LocalHttp,
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicitly isolated temporary home and a signed WorkBuddy Intl fixture"]
+async fn scheduled_checkin_sends_one_sanitized_round_notification() {
+    use crate::server::core::{auto_checkin::{self, AutoCheckin}, billing::BillingService,
+        checkin_schedules, notifications};
+    let fixture = Fixture::open(|request| {
+        if request.path == "/notify-fixture" { Reply::json(200, json!({})) }
+        else { Reply::json(403, json!({"error":"synthetic-checkin-private-upstream"})) }
+    }).await;
+    fixture.store.plugin_upsert_account("user-wasm-second-local", PROVIDER, "synthetic-checkin-private-name",
+        &json!({"uid":"second-local", "accessToken":"synthetic-checkin-private-token", "edition":"intl", "platform":"workbuddy-ai", "endpoint":"https://www.workbuddy.ai", "prefixPath":"/plugin"}),
+        &json!({"uid":"second-local", "name":"synthetic-checkin-private-name"}), false).unwrap();
+    let target = super::test_support::transport_url("https://www.workbuddy.ai/notify-fixture");
+    assert!(target.starts_with("http://127.0.0.1:"));
+    notifications::save(&json!({"enabled":true,"events":{"checkinFailure":true},"channels":{"webhook":{"enabled":true,"url":target}}})).unwrap();
+    auto_checkin::write_state(json!({"enabled":true}));
+    checkin_schedules::upsert(&json!({"id":"one-round", "time":"00:00", "timeEnd":"00:00", "retryTime":"", "retryGapMinutes":0, "providers":[PROVIDER], "enabled":true})).unwrap();
+    let checkin = AutoCheckin::new(fixture.store.clone(), BillingService::new(AuthService::new(fixture.store.clone())));
+    checkin.tick().await;
+    checkin.tick().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let delivered = fixture.http.requests.lock().unwrap().iter().filter(|request| request.path == "/notify-fixture").map(|request| request.body.clone()).collect::<Vec<_>>();
+    assert_eq!(delivered.len(), 1, "one notification per failed round, not per account or tick");
+    assert_eq!(delivered[0]["event"], "checkin_failure");
+    assert_eq!(delivered[0]["data"]["failedCount"], 2);
+    assert!(!delivered[0].to_string().contains("synthetic-checkin-private"));
+    fixture.close().await;
+}
+
 impl Fixture {
     async fn open(handler: impl Fn(&RecordedRequest) -> Reply + Send + Sync + 'static) -> Self {
         let http = LocalHttp::open(move |request| {

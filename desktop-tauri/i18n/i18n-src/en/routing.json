@@ -1,4 +1,13 @@
 {
+  "隐私模式不转发图片；无法识别或未获授权时不会改用其他组。": "Privacy mode does not forward images. If recognition fails or access is denied, no other group is used.",
+  "视觉辅助": "Vision assistance",
+  "视觉目标组": "Vision destination group",
+  "来源路由组": "Source route groups",
+  "文本组收到内嵌图片时，先调用视觉组描述图片，再由原文本组回答。两次上游调用分别计费；原生视觉组无需额外调用。": "For inline images, a vision group describes the images before the original text group answers. The two upstream calls are billed separately. Native vision needs no extra call.",
+  "标题生成": "Title generation",
+  "只改写被识别为标题生成的小请求，普通对话不受影响。": "Only small requests recognised as title generation are rewritten; normal conversations are unaffected.",
+  "标题模型": "Title model",
+  "目标不可用或未授权时返回错误，不回退原模型。": "If the target is unavailable or not permitted, return an error instead of falling back to the original model.",
   "{account} · 账号设置": "{account} · Account settings",
   "{account} 参与本路由": "Include {account} in this route",
   "{available} 可用 · {blocked} 跳过": "{available} available · {blocked} skipped",

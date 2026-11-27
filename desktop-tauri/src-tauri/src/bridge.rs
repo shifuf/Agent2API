@@ -302,6 +302,8 @@ const BRIDGE_JS: &str = r#"
     saveClientIdentification: payload => call('PUT', '/api/client-identification', payload),
     previewClientIdentification: payload => call('POST', '/api/client-identification/preview', payload),
     getCompactRoutes: () => call('GET', '/api/models/compact-routes'),
+    getTitleRoutes: () => call('GET', '/api/models/title-routes'),
+    saveTitleRoutes: payload => call('PUT', '/api/models/title-routes', payload),
     saveCompactRoutes: payload => call('PUT', '/api/models/compact-routes', payload),
     setModelState: payload => call('POST', '/api/models/state', payload),
     addModelMapping: (alias, target, provider, reasoning, enabled, create) => call('POST', '/api/models/mappings', {
@@ -680,6 +682,10 @@ const BRIDGE_JS: &str = r#"
     // 改一条任务用 PATCH（后端同时受理 POST 作别名：CORS 允许方法里没有 PATCH，
     // 浏览器直连时预检会拦下它；走本桥的调用两种都能用，这里按规范用 PATCH）。
     getScheduledTasks: () => call('GET', '/api/scheduled-tasks'),
+    localTaskRequest: (method, route, payload) => {
+      if (!/^task-(jobs|plugins)(\/[a-z0-9-]+){0,2}$/.test(route) || !['GET', 'POST', 'PUT', 'DELETE'].includes(method)) throw Error('Invalid task operation');
+      return call(method, '/api/' + route, payload);
+    },
     saveScheduledTask: (id, patch) =>
       call('PATCH', '/api/scheduled-tasks/' + encodeURIComponent(String(id || '')), patch),
     runScheduledTask: id =>
@@ -739,6 +745,14 @@ const BRIDGE_JS: &str = r#"
     saveDeveloperRoleCompat: enabled =>
       call('PUT', '/api/developer-role-compat', { developerRoleCompat: enabled === true }),
 
+    // ── 第三方模型回答完自动折叠过程开关 ──
+    // 与 getDeveloperRoleCompat / saveDeveloperRoleCompat 同形：GET 读、PUT 写，
+    // 响应体就是新状态。与 web_shim.rs 的同名方法逐字同形（漏一侧的症状见
+    // getCors 那段）。
+    getReasoningCollapse: () => call('GET', '/api/reasoning-collapse'),
+    saveReasoningCollapse: enabled =>
+      call('PUT', '/api/reasoning-collapse', { thirdPartyReasoningCollapse: enabled === true }),
+
     // ── Cline 伪装头 ──
     // 与 getSanitize / saveSanitize 同形：GET 读（overrides + effective），
     // PUT 整体替换覆盖表（空值 = 不发该头，删行 = 回落默认值）。
@@ -794,6 +808,9 @@ const BRIDGE_JS: &str = r#"
     // 生效后的全量状态（含降级是否生效）。`clearDegrade` 是同一端点上的一个
     // 动作位（参考项目只能等到零点，本项目允许用户当场解除）。
     getPrompt: () => call('GET', '/api/prompt'),
+    getPromptRules: () => call('GET', '/api/prompt/rules'),
+    savePromptRules: body => call('PUT', '/api/prompt/rules', body),
+    previewPromptRules: body => call('POST', '/api/prompt/rules/preview', body),
     savePrompt: payload =>
       call('PUT', '/api/prompt', {
         promptMode: payload && payload.promptMode != null ? String(payload.promptMode) : null,
@@ -839,6 +856,21 @@ const BRIDGE_JS: &str = r#"
     // 写整份（null = 恢复默认）。规整（校验 / 补位）在前端做，后端只存不解释，
     // 理由见 api::sidebar_layout 的模块头。
     getSidebarLayout: () => call('GET', '/api/sidebar-layout'),
+    saveBranding: patch => call('PUT', '/api/branding', patch),
+    getPrivacy: () => call('GET', '/api/privacy'),
+    getTurnstile: () => call('GET', '/api/captcha/turnstile'),
+    getPanelOauth: () => call('GET', '/api/panel-oauth'),
+    savePanelOauth: patch => call('PUT','/api/panel-oauth',patch),
+    saveTurnstile: patch => call('PUT', '/api/captcha/turnstile', patch),
+    savePrivacy: patch => call('PUT', '/api/privacy', patch),
+    previewPrivacy: payload => call('POST', '/api/privacy/test', payload),
+    getNotifications: () => call('GET', '/api/notifications'),
+    getPricing: () => call('GET', '/api/model-pricing'),
+    savePricing: body => call('PUT', '/api/model-pricing', body),
+    refreshPricingFx: () => call('POST', '/api/model-pricing/fx'),
+    repriceRequests: body => call('POST', '/api/model-pricing/reprice', body),
+    saveNotifications: patch => call('PUT', '/api/notifications', patch),
+    testNotification: payload => call('POST', '/api/notifications/test', payload),
     saveSidebarLayout: layout =>
       call('PUT', '/api/sidebar-layout', { layout: layout === undefined ? null : layout }),
     // 清空支持筛选条件（可选对象，与 getLogs 同一套键）：带条件 = 只删命中的，

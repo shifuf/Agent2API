@@ -59,7 +59,9 @@ const ACCOUNT_KEY_FILE: &str = "account.key";
 /// 精简导出（不带日志）跳过的表：事件日志、请求明细/聚合、调试报文与请求
 /// 原始报文。业务数据（kv、accounts、account_usage_records）无论哪种口径
 /// 都导出 —— 账号与配置是「换机器」真正要带的东西。
+const TRANSIENT_TABLES: &[&str] = &["tool_image_files", "tool_image_jobs"];
 const LOG_TABLES: &[&str] = &[
+    "task_job_runs",
     "logs",
     "requests",
     "request_daily",
@@ -654,6 +656,7 @@ fn format_sql_blob(bytes: &[u8]) -> String {
 /// 快照里各业务表的行数（导出统计；只数被导出的表）。
 fn table_row_counts(conn: &Connection, skip: &[&str]) -> Vec<Value> {
     let known = [
+        "task_plugins", "task_jobs", "task_job_runs",
         "kv",
         "accounts",
         "logs",

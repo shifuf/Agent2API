@@ -464,3 +464,29 @@ When a new version is available, a "Restart & update" bar floats at the bottom: 
 | View Agent takeover status, restore | Rewrite client configs (a phone cannot read local files) |
 
 The desktop sidebar has an "Open on phone" entry at the bottom that leads to the same page.
+
+### Optional: isolated community plugin probe (Linux)
+
+On a trusted Linux amd64 build machine, run `python3 scripts/prepare-community-probe-kit.py --help`. Supply distro QEMU x86-64, an amd64 kernel, SeaBIOS, QEMU firmware and the pinned Bun 1.4.2 x64 baseline ZIP. The builder also uses static `/bin/busybox` and `/usr/bin/setpriv`. Install the kit in a root-owned directory not writable by the gateway. Run the gateway as non-root with no capabilities, and set `AGENT2API_COMMUNITY_GUEST_DIR` to the absolute kit path. Containers only need the kit mounted read-only; do not grant devices, host control sockets or privileged mode.
+
+An administrator selects the current retained SHA-256 to probe a standalone JS/ESM OpenCode `server()` hook. Every probe gets a disposable guest with no NIC or host mounts. It installs no dependencies, runs no package lifecycle scripts, imports no accounts and grants no permissions. Unavailable prerequisites mean refusal, never execution in host Bun.
+
+Only a standalone entry of up to 256 KiB is accepted. The default wall/CPU limits are 80/65 seconds. On slower hosts, an operator can set `AGENT2API_COMMUNITY_GUEST_TIMEOUT_SECS` in the gateway environment to a decimal integer from 30 to 300; the CPU limit is 15 seconds less. An invalid setting disables probing. Only one 768 MiB guest runs at a time; disconnecting terminates it. A guest-reported diagnostic is neither a safety certification nor an authorization credential.
+
+For `503`, check the kit and budget settings first. `422` means the guest did not confirm completion; a script failure or kernel termination (including a CPU limit) can cause it. It does not identify the cause. Only the gateway's wall-clock deadline returns `504`.
+
+### Recovering the account key from WebDAV or S3
+
+Cloud sync installs the remote key only if no local account key exists. A matching `account.key` or valid `AGENT2API_ACCOUNT_KEY` stays unchanged. A different key is refused to protect local data excluded from the snapshot. Restore into a new data directory or use an encrypted full backup to migrate; do not delete the original key.
+
+### Optional panel login methods: OAuth and Cloudflare Turnstile
+
+For Google or GitHub, open Settings → Security → Third-party identity login. Set a fixed HTTPS origin you control; reverse proxies must preserve its `Host`. Register the exact callback shown (`/api/panel/oauth/{google|github}/callback`), save the client ID and secret, then bind the identity using an authenticated admin browser cookie on that origin. Only the Google `sub` or numeric GitHub `id` counts; matching email never grants access. Changing the origin or client ID clears the affected binding; after changing the admin password, unbind and bind again. Use the password in native shells, APKs, cookie-blocking proxies, or when no identity is bound; there are no login tickets in URLs.
+
+The default ALTCHA verifier needs no external service. Turnstile requires a **separate HTTPS static site you control**. Do not use the panel or gateway hostname, proxy its API, set panel cookies, or store credentials on that site.
+
+1. Download the HTML from `/api/panel/turnstile-widget` on the panel. Serve it unchanged at `/turnstile-widget.html` on the static site as `text/html`, allowing the panel to embed it. The panel download URL is not the iframe URL.
+2. Create a Turnstile widget in Cloudflare. Allow the **static site's hostname**, not the panel's. Clients must reach the static site and `challenges.cloudflare.com`; the gateway must reach the latter over HTTPS.
+3. Keep an admin session open. Under Settings → Security → Login verification method, select Turnstile and enter the site key, secret key and static site's `https://hostname` (no port or path). Enable the captcha switch for this deployment and test password login in a private window.
+
+The server requires successful verification, the exact static hostname and `action=agent2api_panel`. Network or validation failures never bypass verification or fall back to ALTCHA. Use the existing admin session to switch back. Cloudflare's public test secrets omit the required action; they cannot validate production login.

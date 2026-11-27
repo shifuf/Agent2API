@@ -4,19 +4,36 @@ import { Icon } from '../components/Icon'
 import { ThemeSwitch } from './MorePage'
 import { store, useStore } from '../state/store'
 import { locale, localeOptions, setLocale } from '../i18n'
-import { storeApiKey } from '../api/client'
+import { apiCall, storeApiKey } from '../api/client'
 import { usePwa } from '../lib/usePwa'
 import { applyUpdate, promptInstall } from '../lib/pwa'
 import { APP_VERSION } from '../lib/appUpdate'
 import { AppUpdatePanel } from '../components/AppUpdatePanel'
+import { ResponsesPhaseSetting } from '../components/settings-responses-phase'
 import { CommunitySheet } from '../components/CommunitySheet'
 import { SystemInfoSheet } from '../components/SystemInfoSheet'
 import { apiBase, baseLabel, serverIdentity } from '../lib/servers'
 import { usePullToRefresh, PullIndicator } from '../components/PullToRefresh'
 import { t } from '../i18n'
+import { mobileBrand, saveMobileBrand } from '../lib/panel-branding'
+import { BrandEditor } from '../../../ui-shared/panel-branding'
+import { PrivacyEditor } from '../../../ui-shared/privacy-settings'
+import { TurnstileEditor } from '../../../ui-shared/turnstile-settings'
+import { OAuthEditor } from '../../../ui-shared/panel-oauth'
+import { mobileOauth } from '../api/privacy'
+import { mobileTurnstile } from '../api/privacy'
+import { mobilePrivacy } from '../api/privacy'
 import { Card, Button, Badge, BadgeDot, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle } from '@ui'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
 import { clientIdentificationApi } from '../api/client-identification'
+import { NotificationPanel } from '../../../ui-shared/notification-settings'
+import { notificationApi } from '../api/notifications'
+import { ConditionalPrompts, type ConditionalApi } from '../../../ui-islands/src/islands/settings-conditional-prompts'
+
+const conditionalApi: ConditionalApi = { getPromptRules: () => apiCall('/api/prompt/rules'), savePromptRules: body => apiCall('/api/prompt/rules', { method: 'PUT', body }),
+  previewPromptRules: body => apiCall('/api/prompt/rules/preview', { method: 'POST', body }) }
+import { PricingPanel } from '../../../ui-shared/settings-pricing'
+import { pricingApi } from '../api/pricing'
 
 /**
  * 设置。
@@ -66,9 +83,14 @@ export function SettingsPage() {
   return (
     <div className='m-page' ref={pull.bindRef}>
       <PullIndicator pull={pull.pull} refreshing={pull.refreshing} />
+      <section className='m-section'><ConditionalPrompts api={conditionalApi} /></section>
       <PageIntro subtitle={t('外观 · 接入 · 关于')}
         actions={<IconButton name='refresh' label={t('刷新')} onClick={() => void store.refresh(true)} />}
       />
+      <section className='m-section'><BrandEditor key={mobileBrand.identity()} store={mobileBrand} save={saveMobileBrand} t={t} /></section>
+      <PrivacyEditor key={'privacy-' + mobileBrand.identity()} api={mobilePrivacy} identity={mobileBrand.identity} t={t} />
+      <TurnstileEditor key={'turnstile-' + mobileBrand.identity()} api={mobileTurnstile} identity={mobileBrand.identity} t={t} />
+      <OAuthEditor key={'oauth-'+mobileBrand.identity()} api={mobileOauth} identity={mobileBrand.identity} t={t} native={packaged} />
 
       {/* 服务器：APK 才有（浏览器里地址就是当前 origin，没什么可配的） */}
       {packaged ? (
@@ -118,6 +140,11 @@ export function SettingsPage() {
         </Card>
       </div>
 
+      <div className='m-section'>
+        <ResponsesPhaseSetting key={serverIdentity()} />
+        <NotificationPanel key={'notify-' + serverIdentity()} api={notificationApi} t={t} />
+        <PricingPanel key={'pricing-' + serverIdentity()} api={pricingApi} t={t} />
+      </div>
       <div className='m-section'>
         <SectionHead title={t('外观')} />
         <Card className='m-card'>

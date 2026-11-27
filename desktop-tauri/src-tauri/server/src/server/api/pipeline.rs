@@ -138,6 +138,7 @@ fn resolve_model_for(
 ) -> Result<String, GatewayError> {
     if let Some(object) = payload.as_object_mut() {
         object.remove(crate::server::core::compact_routing::ROUTE_FIELD);
+        object.remove(crate::server::core::title_routing::ROUTE_FIELD);
         object.remove("_wb_route_group_id");
         object.remove("_wb_route_continue");
     }
@@ -499,6 +500,12 @@ fn stored_sensitive_hits(list: &[usage::SensitiveHit]) -> Vec<SensitiveHit> {
 ///   attempts    旁路槽里累计的上游请求数；一次都没发出去时回落 1
 ///   error       旁路槽里的原因优先（更接近根因），否则用调用方给的兜底文案
 pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
+    let child = context.telemetry.vision_child.lock().unwrap_or_else(|error| error.into_inner()).take();
+    if let Some(child) = child.filter(|record| record.telemetry.snapshot().attempts > 0) {
+        record_entry(&RecordContext { stats: context.stats.clone(), telemetry: child.telemetry, started_at: child.started, model: child.model,
+            client_model: context.client_model.clone(), client_reasoning: String::new(), status: child.status, raw_request: None, raw_response: None,
+            is_test: context.is_test, source: context.source.clone() }, (child.status != 200).then(|| "视觉辅助请求未完成".into()));
+    }
     let mut snapshot = context.telemetry.snapshot();
     // 收尾时刻只取一次：明细里的 durationMs 与日志里打的那一个是同一个值
     let finished_at = logging::now_ms();
@@ -507,6 +514,8 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
         .first_response_at
         .map(|at| (at - context.started_at).max(0));
     let error = snapshot.error.clone().or(fallback_error).map(|text| {
+        if context.telemetry.ephemeral_image { return "图片请求已省略诊断详情".into(); }
+        if context.telemetry.privacy.is_some() { return "隐私模式已省略诊断详情".into(); }
         if context.raw_request.is_some() || context.raw_response.is_some()
             || context.telemetry.capture().is_some() || crate::server::core::debug_traffic::enabled()
         {
@@ -565,6 +574,9 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
     entry.completion_tokens = snapshot.completion_tokens;
     entry.total_tokens = snapshot.total_tokens;
     entry.cache_read_tokens = snapshot.cache_read_tokens;
+    entry.cache_write_tokens = snapshot.cache_write_tokens;
+    entry.cache_write_1h_tokens = snapshot.cache_write_1h_tokens;
+    entry.pricing_prompt_tokens = snapshot.pricing_prompt_tokens;
     // Token 限制器的增量记账（先取快照再 record：entry 的字段已被 move）。
     // 请求收尾立刻把本次消耗加进当前窗口，选路的 Token 跳过判定不必等下一轮
     // 10 秒刷新。account_id 为空 = 没走到任何账号（转发前就失败的路径），
@@ -592,7 +604,7 @@ pub fn record_entry(context: &RecordContext, fallback_error: Option<String>) {
         &snapshot.id,
         context.started_at,
         context.raw_request.as_deref(),
-        context.raw_response.as_deref(),
+        if context.telemetry.privacy.is_none() { context.raw_response.as_deref() } else { None },
     );
     logging::verbose(
         "[Stats]",
@@ -727,7 +739,7 @@ impl RecordingStream {
         let terminal = if frames.is_empty() { None } else { Some(TerminalScan::new(frames)) };
         // 响应侧采集与请求侧同一道闸：调试模式关着就不攒缓冲（零开销）——
         // 这里定格一次，本请求的响应侧行为此后不再看开关（见 `RawCapture` 的说明）
-        let raw = RawCapture::new(crate::server::core::debug_traffic::enabled());
+        let raw = RawCapture::new(context.telemetry.privacy.is_none() && crate::server::core::debug_traffic::enabled());
         Self { inner, context: Some(context), terminal, raw }
     }
 

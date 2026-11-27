@@ -1,4 +1,5 @@
 import { Progress as UiProgress } from '@ui'
+import { formatEstimate } from '../../../ui-shared/pricing'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PageHead, SectionHead, Empty, ErrorNote, StatCard, SkeletonList } from '../components/ui'
 import { PullIndicator, usePullToRefresh } from '../components/PullToRefresh'
@@ -111,6 +112,7 @@ export function ReportPage() {
               sub={t('失败 {n} 次', { n: formatInt(requests - successful) })}
             />
             <StatCard label={t('总请求数')} value={formatInt(requests)} sub={t('区间内累计')} />
+            <StatCard label={t('估算费用')} value={formatEstimate(overview)} sub={t('已计价请求：{n}', { n: formatInt(overview?.pricedRequests || 0) })} />
             <StatCard
               label={t('缓存命中率')}
               value={cacheRate === null ? '—' : formatPercent(cacheRate)}

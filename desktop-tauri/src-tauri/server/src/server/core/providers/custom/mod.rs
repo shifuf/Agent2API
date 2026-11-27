@@ -11,6 +11,7 @@ use crate::server::core::models::{list_item, model_id};
 /// 智谱 / 智谱 z.ai 国际）的编排。方案由提供商记录的 `balanceScheme` 决定
 /// （预置卡写入），查询凭证按账号存（`balanceQuery`）—— 详见各文件模块头。
 pub mod balance;
+mod balance_new_api;
 /// 七种方案的上游响应解析（纯函数；与 `balance` 的请求链路分开，
 /// 便于对照移植来源逐字段读）
 pub mod balance_parse;

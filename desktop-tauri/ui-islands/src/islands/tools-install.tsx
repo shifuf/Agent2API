@@ -7,7 +7,7 @@ import {
 import { t } from '../i18n'
 import { toast } from './assistant-state'
 import {
-  fetchApiKeys, fetchInstallTargets, installMcp, installSkill, uninstallMcp, uninstallSkill,
+  SERVICE_NAME, fetchApiKeys, fetchInstallTargets, installMcp, installSkill, uninstallMcp, uninstallSkill,
   type ApiKeyOption, type InstallOutcome, type InstallTarget, type ToolService,
 } from './tools-data'
 
@@ -106,7 +106,7 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
     }
   }
 
-  const serviceLabel = service.id === 'vision' ? t('视觉分析') : t('网络搜索')
+  const serviceLabel = SERVICE_NAME[service.id]
   const title = mode === 'skill'
     ? t('安装 {name}', { name: serviceLabel })
     : t('{name} 接入客户端', { name: serviceLabel })
@@ -132,12 +132,12 @@ export function ToolInstallDialog({ service, mode, onClose, onDone }: {
             ]} />
             <FieldDescription>{t('Node.js 无需额外依赖，推荐使用；Python 需要本机有 python。')}</FieldDescription>
           </Field>}
-          {mode === 'mcp' && service.id === 'vision' && <Field>
+          {mode === 'mcp' && service.id !== 'web-search' && <Field>
             <FieldLabel>{t('接入方式')}</FieldLabel>
             <SegmentedControl value={mcpMode} onValueChange={value => { if (value === 'bridge' || value === 'http') setMcpMode(value) }} aria-label={t('接入方式')} options={[
               { value: 'bridge', label: t('本地桥接') }, { value: 'http', label: t('远程 HTTP') },
             ]} />
-            <FieldDescription>{mcpMode === 'bridge'
+            <FieldDescription>{service.id === 'image-generation' ? t('图片编辑仅接受同一 Key 的图片引用或内嵌图片，不读取本地路径。') : mcpMode === 'bridge'
               ? t('本地桥接会在本机运行一个 node 脚本，支持直接传本地图片路径，推荐在桌面端使用。')
               : t('远程 HTTP 只接受图片 URL 或 data URI，不需要本机安装 node。')}</FieldDescription>
           </Field>}
@@ -205,7 +205,7 @@ export function ToolUninstallDialog({ service, mode, onClose, onDone }: {
 
   return <Dialog open onOpenChange={(open, details) => { if (!open) { if (busy) details.cancel(); else onClose() } }}>
     <DialogContent className='max-w-xl'>
-      <DialogHeader><DialogTitle>{t('移除 {name} 配置', { name: service.id === 'vision' ? t('视觉分析') : t('网络搜索') })}</DialogTitle></DialogHeader>
+      <DialogHeader><DialogTitle>{t('移除 {name} 配置', { name: SERVICE_NAME[service.id] })}</DialogTitle></DialogHeader>
       <DialogBody className='flex flex-col gap-3'>
         <p className='text-xs text-subtle'>{t('选择要从中移除的客户端，未勾选的客户端保持不变。')}</p>
         {loading ? <div className='flex items-center gap-2 py-6 text-sm text-subtle'><Spinner />{t('正在加载安装目标…')}</div>

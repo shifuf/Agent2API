@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::server::config::compact_routes;
-use crate::server::core::{blocking, compact_routing};
+use crate::server::core::{blocking, compact_routing, title_routing};
 use crate::server::core::key_scope::KeyScope;
 use crate::server::errors::GatewayError;
 use crate::server::request_stats::{RequestSource, RequestStats};
@@ -14,7 +14,7 @@ pub(super) async fn resolve_model(
     payload: &mut Value,
     scope: Option<&KeyScope>,
 ) -> Result<String, GatewayError> {
-    resolve_client_model(state, payload, scope, None).await
+    resolve_client_model(state, payload, scope, None, None).await
 }
 
 pub(super) async fn resolve_client_model(
@@ -22,12 +22,13 @@ pub(super) async fn resolve_client_model(
     payload: &mut Value,
     scope: Option<&KeyScope>,
     compact_client: Option<&'static str>,
+    title: Option<title_routing::TitleMatch>,
 ) -> Result<String, GatewayError> {
     let state = state.clone();
     let scope = scope.cloned();
     let mut body = std::mem::take(payload);
     let (body, result) = blocking::run(move || {
-        let result = resolve_chat_model(&state, &mut body, scope.as_ref(), compact_client);
+        let result = resolve_chat_model(&state, &mut body, scope.as_ref(), compact_client, title);
         (body, result)
     }).await?;
     *payload = body;
@@ -39,9 +40,29 @@ fn resolve_chat_model(
     body: &mut Value,
     scope: Option<&KeyScope>,
     compact_client: Option<&str>,
+    title: Option<title_routing::TitleMatch>,
 ) -> Result<String, GatewayError> {
     // 先校验来源模型，不能用目标的权限替来源放行；同时清除下游伪造的内部标记。
     let source = super::pipeline::resolve_model(state, body, scope)?;
+    if compact_client.is_none() {
+        if let Some(rule) = title {
+            let catalog = crate::server::core::providers::catalog::models_response(state.store(), scope);
+            let available = |name: &str| catalog["data"].as_array().is_some_and(|rows| rows.iter().any(|row|
+                row["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(name)) && row["kind"] != "image"));
+            if !available(&source) || !available(&rule.model) {
+                return Err(GatewayError::with_status(404, "标题路由来源或目标不在网关 Key 可用的对话路由组内；未回退原模型").with_code("model_not_found"));
+            }
+            let mut target_body = serde_json::json!({"model": rule.model});
+            let target = super::pipeline::resolve_model(state, &mut target_body, scope)?;
+            if !body["_wb_route_group_id"].is_string() || !target_body["_wb_route_group_id"].is_string() {
+                return Err(GatewayError::with_status(404, "标题路由需要已发布的对话路由组").with_code("model_not_found"));
+            }
+            body["model"] = target.clone().into();
+            body["_wb_route_group_id"] = target_body["_wb_route_group_id"].clone();
+            title_routing::mark_routed(body, &source, &target, &rule);
+            return Ok(target);
+        }
+    }
     let Some(client) = compact_client else { return Ok(source); };
     let snapshot = compact_routes::current();
     let settings = snapshot.settings.as_ref().map_err(|error| GatewayError::new(error.clone()))?;

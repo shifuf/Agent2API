@@ -167,6 +167,7 @@ fn collect_system_info(state: &ServerState, hide: bool) -> Value {
             "sanitizeFingerprints": snapshot.sanitize_fingerprints(),
             "cors": snapshot.cors_enabled(),
             "developerRoleCompat": snapshot.developer_role_compat(),
+            "thirdPartyReasoningCollapse": snapshot.third_party_reasoning_collapse(),
             "keepaliveStrip": config::strip_newline_keepalive(),
             "autoContinue": config::auto_continue(),
             "autoContinueMaxRounds": config::auto_continue_max_rounds(),

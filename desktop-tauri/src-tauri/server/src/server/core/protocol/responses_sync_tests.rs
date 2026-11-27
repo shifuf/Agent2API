@@ -40,7 +40,7 @@ fn upstream_sync_names_stay_unique_valid_and_roundtrip_to_originals() {
         assert!(!wire.is_empty() && wire.len() <= 64);
         assert!(wire.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-'));
         assert!(names.insert(wire.to_string()));
-        let response = responses_from_chat(&json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","type":"function","function":{"name":wire,"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}), "public-id", &request);
+        let response = responses_from_chat(&json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","type":"function","function":{"name":wire,"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}), "public-id", &request, false);
         assert_eq!(response["output"][0]["name"], originals[i]);
         if i == 1 { assert_eq!(response["output"][0]["namespace"], "files"); }
         else { assert!(response["output"][0].get("namespace").is_none()); }
@@ -61,7 +61,7 @@ fn upstream_sync_stream_restores_names_in_all_tool_events() {
     let request = json!({"tools":[{"type":"namespace","name":"files","tools":[declaration("read")]}]});
     let chat = chat_from_responses(&request).unwrap();
     let wire = chat["tools"][0]["function"]["name"].as_str().unwrap();
-    let mut stream = ResponsesStream::new("public-id", &request);
+    let mut stream = ResponsesStream::new("public-id", &request, false);
     let chunks = [json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":wire,"arguments":"{}"}}]}}]}),
         json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})];
     let mut output = Vec::new();
@@ -84,7 +84,7 @@ fn upstream_sync_single_input_additional_tools_and_custom_calls_are_supported() 
     let request = json!({"input":{"type":"additional_tools","tools":[{"type":"custom","name":"apply/patch","description":"patch"}]}});
     let chat = chat_from_responses(&request).unwrap();
     let wire = chat["tools"][0]["function"]["name"].as_str().unwrap();
-    let response = responses_from_chat(&json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","type":"function","function":{"name":wire,"arguments":"{\"input\":\"patch text\"}"}}]},"finish_reason":"tool_calls"}]}), "public-id", &request);
+    let response = responses_from_chat(&json!({"choices":[{"message":{"tool_calls":[{"id":"call-1","type":"function","function":{"name":wire,"arguments":"{\"input\":\"patch text\"}"}}]},"finish_reason":"tool_calls"}]}), "public-id", &request, false);
     assert_eq!(response["output"][0]["type"], "custom_tool_call");
     assert_eq!(response["output"][0]["name"], "apply/patch");
     assert_eq!(response["output"][0]["input"], "patch text");

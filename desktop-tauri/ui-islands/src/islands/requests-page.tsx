@@ -108,6 +108,7 @@ const COLUMNS: Column[] = [
   { key: 'dur', label: t('用时'), sel: '.req-dur', track: '96px', align: 'right' },
   { key: 'speed', label: t('速度'), sel: '.req-speed', track: '96px', align: 'center', legacyAlign: 'right' },
   { key: 'credit', label: t('积分'), sel: '.req-credit', track: '72px', align: 'center' },
+  { key: 'costUsd', label: t('估算费用'), sel: '.req-cost', track: '110px', align: 'center' },
   { key: 'usage', label: t('用量'), sel: '.req-usage', track: 'minmax(0, 1.6fr)' },
   { key: 'error', label: t('错误'), sel: '.req-error-cell', track: 'minmax(0, 1.2fr)' },
   { key: 'detail', label: t('详情'), sel: '.req-detail', track: '60px', align: 'right' },

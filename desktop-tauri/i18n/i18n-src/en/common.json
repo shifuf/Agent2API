@@ -1,4 +1,12 @@
 {
+  "隔离试跑": "Run isolation check",
+  "仅在隔离客体中试运行，不启用此插件。": "Run once in an isolated guest without enabling this plugin.",
+  "隔离试跑完成，未启用插件。": "Isolation check complete. The plugin is not enabled.",
+  "保存已检查的归档（不启用）": "Save verified archive (do not enable)",
+  "恢复前一份归档": "Restore previous archive",
+  "社区脚本验包": "Inspect a community script package",
+  "只检查归档，不安装、不运行。请从可信发布者另行取得 SHA-256。": "Inspection does not install or execute the package. Obtain the SHA-256 separately from a trusted publisher.",
+  "检查归档": "Inspect archive",
   "<span style=\"color:var(--danger)\">无可用账号：{reason}</span>": "<span style=\"color:var(--danger)\">No accounts available: {reason}</span>",
   "AI 助手": "AI Assistant",
   "API Key 用量详情": "API key usage details",

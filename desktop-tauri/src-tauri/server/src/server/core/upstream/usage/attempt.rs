@@ -79,8 +79,13 @@ impl TelemetrySnapshot {
 }
 
 impl RequestTelemetry {
-    pub fn set_route_decision(&self, decision: Value) {
+    pub fn set_route_decision(&self, mut decision: Value) {
         let mut guard = self.lock();
+        if let (Some(object), Some(previous)) = (decision.as_object_mut(), guard.route.as_ref()) {
+            for key in ["titleRoute", "promptRuleId", "visionRoute", "visionParent"] {
+                if let Some(value) = previous.get(key) { object.entry(key).or_insert_with(|| value.clone()); }
+            }
+        }
         if guard.route.as_ref() == Some(&decision) { return; }
         guard.route = Some(decision);
         guard.route_revision = guard.route_revision.wrapping_add(1);
@@ -89,6 +94,17 @@ impl RequestTelemetry {
 
     pub fn route_decision(&self) -> Option<Value> {
         self.lock().route.clone()
+    }
+
+    pub fn set_prompt_rule(&self, id: Option<&str>) {
+        let mut guard = self.lock();
+        if guard.route.as_ref().and_then(|route| route["promptRuleId"].as_str()) == id { return; }
+        let route = guard.route.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(object) = route.as_object_mut() {
+            if let Some(id) = id { object.insert("promptRuleId".into(), id.into()); } else { object.remove("promptRuleId"); }
+            guard.route_revision = guard.route_revision.wrapping_add(1);
+            self.flush_live(&guard);
+        }
     }
 
     pub fn note_attempt_response(&self) {

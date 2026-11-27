@@ -1,6 +1,8 @@
 import React, { useEffect } from 'react'
 import { AppFrame } from '@ui'
 import { store, useStore, bootstrapTheme } from './state/store'
+import { mobileBrand } from './lib/panel-branding'
+import { useBranding, useBrandDocument } from '../../ui-shared/panel-branding'
 import { TabBar, Toast, AuthGate, ThemeSync } from './components/Shell'
 import { PwaNotice } from './components/PwaNotice'
 import { usePwa } from './lib/usePwa'
@@ -62,6 +64,7 @@ const SCREENS: Record<ScreenId, ScreenDef> = {
 }
 
 export function App() {
+  const brand = useBranding(mobileBrand)
   const state = useStore()
   const pwa = usePwa()
   const def = SCREENS[state.route.screen]
@@ -138,10 +141,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  useEffect(() => {
-    // 页面标题跟着当前页走（PWA 里影响任务切换器的显示）
-    document.title = needsServer ? `${t('服务器')} · Agent2API` : `${def.title} · Agent2API`
-  }, [def.title, needsServer])
+  useBrandDocument(`${needsServer ? t('服务器') : def.title} · ${brand.displayName}`, brand.logoUrl)
 
   if (needsServer) {
     return (

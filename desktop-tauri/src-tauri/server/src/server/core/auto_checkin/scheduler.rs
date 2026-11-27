@@ -52,6 +52,7 @@ impl AutoCheckin {
             return None;
         }
         let mut summary = None;
+        let mut failures = 0;
         for account in due {
             if guard
                 .inner
@@ -63,10 +64,10 @@ impl AutoCheckin {
             {
                 break;
             }
-            let current = self
+            let Some(current) = self
                 .planned_schedules()
                 .into_iter()
-                .find(|schedule| schedule.id == id)?;
+                .find(|schedule| schedule.id == id) else { break; };
             if !current.enabled {
                 break;
             }
@@ -99,6 +100,7 @@ impl AutoCheckin {
             .await
             {
                 Ok(result) => {
+                    failures += result["failedCount"].as_u64().unwrap_or(0) as usize;
                     let previous = checkin_schedules::list()
                         .into_iter()
                         .find(|schedule| schedule.id == id)
@@ -116,11 +118,13 @@ impl AutoCheckin {
                     summary = Some(result);
                 }
                 Err(error) => {
+                    failures += 1;
                     logging::log("[Checkin]", &format!("随机签到执行失败：{}", error.message))
                 }
             }
             account_plan::finish_providers(id, &[provider], &date);
         }
+        crate::server::core::notifications::checkin(source, failures);
         drop(guard);
         summary
     }

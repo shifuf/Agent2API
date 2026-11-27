@@ -74,6 +74,9 @@ pub mod assistant_images;
 pub mod auto_checkin;
 pub mod beijing;
 pub mod billing;
+pub mod branding;
+pub(crate) mod panel_turnstile;
+pub(crate) mod panel_oauth;
 pub(crate) mod blocking;
 pub mod capability;
 pub mod checkin_history;
@@ -82,6 +85,7 @@ pub mod checkin_schedules;
 pub mod clash;
 pub mod client;
 pub(crate) mod compact_routing;
+pub(crate) mod title_routing;
 // 云同步（设置页「数据 → 云同步」）：WebDAV / S3 兼容存储上的业务数据快照。
 // 范围、密钥封装与自动同步的触发口径见该模块头
 pub mod cloud_sync;
@@ -99,6 +103,7 @@ pub mod legacy_api_key;
 pub mod limiter;
 pub mod login;
 pub mod model_meta;
+pub mod model_pricing;
 pub mod model_rules;
 pub mod public_model_catalog;
 pub mod models;
@@ -109,12 +114,16 @@ pub mod models;
 /// （`ProviderAdapter`），本模块提供它的远程实现 `RpcAdapter`。
 pub mod plugin_host;
 pub mod prompt;
+pub(crate) mod privacy;
 pub mod protocol;
 pub mod providers;
 pub mod proxy_pool;
 pub mod proxy_rotate;
 pub mod proxy_settings;
 pub mod proxies;
+pub mod notifications;
+#[cfg(feature = "task-plugins")]
+pub mod task_plugins;
 pub mod routing;
 pub(crate) mod routing_groups;
 pub(crate) mod routing_rules;

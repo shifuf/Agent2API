@@ -71,6 +71,7 @@ import {
   panelLogout,
   refreshDebug,
   refreshDeveloperRoleCompat,
+  refreshReasoningCollapse,
   refreshImageCompress,
   refreshClineHeaders,
   refreshZcodeVersion,
@@ -114,6 +115,7 @@ import {
   saveRetentionField,
   saveRetryField,
   saveDeveloperRoleCompat,
+  saveReasoningCollapse,
   saveTimeoutField,
   saveToggle,
   selectCategory,
@@ -154,10 +156,23 @@ import { DatabaseBackupDialogs, DatabaseBackupPanel } from './settings-database-
 import { SanitizePanel } from './settings-sanitize'
 import { ClientIdentificationPanel } from '../../../ui-shared/client-identification-panel'
 import { clientIdentificationApi } from './settings-client-identification'
+import { NotificationPanel } from '../../../ui-shared/notification-settings'
+import { notificationApi } from './settings-notifications'
+import { ConditionalPrompts } from './settings-conditional-prompts'
+import { PricingPanel } from '../../../ui-shared/settings-pricing'
+import { pricingApi } from './settings-pricing'
 // 侧边栏菜单面板（设置 → 显示）：显隐 / 顺序 / 分组。布局模型在
 // ui/sidebar-layout.js（经典脚本，主侧边栏渲染与这里共用同一份），见该文件的模块头
 import { SidebarPane } from './sidebar-pane'
 import { t } from '../i18n'
+import { desktopBrand, saveDesktopBrand } from '../panel-branding'
+import { BrandEditor } from '../../../ui-shared/panel-branding'
+import { PrivacyEditor } from '../../../ui-shared/privacy-settings'
+import { TurnstileEditor } from '../../../ui-shared/turnstile-settings'
+import { OAuthEditor } from '../../../ui-shared/panel-oauth'
+import { desktopOauth } from './settings-privacy'
+import { desktopTurnstile } from './settings-privacy'
+import { desktopPrivacy } from './settings-privacy'
 import { Alert } from '@ui'
 
 /**
@@ -540,6 +555,7 @@ function DisplayPane() {
 
   return (
     <>
+      <BrandEditor store={desktopBrand} save={saveDesktopBrand} t={t} />
       <Card render={<section />} className='panel'>
         <PanelHead title={t('显示模式')} tip={TIPS.displayTheme} />
         <CardContent className='panel-body'>
@@ -1066,7 +1082,7 @@ function PromptPanel({ snap }: { snap: SettingsSnapshot }) {
           : prompt.status === 'unavailable'
             ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
             : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
-        actions={<RefreshButton id='btn-prompt-refresh' onClick={() => void refreshPrompt()} />}
+        actions={<><ConditionalPrompts /><RefreshButton id='btn-prompt-refresh' onClick={() => void refreshPrompt()} /></>}
       />
       <CardContent className='panel-body'>
         <div className='retention-list'>
@@ -1384,6 +1400,41 @@ function GatewayPane({ snap, panels }: { snap: SettingsSnapshot; panels: Set<str
                 : snap.developerRoleCompat.on ? STATES.roleCompatOn : STATES.roleCompatOff}
           </div>
           <div className='hint retention-note'>{NOTES.developerRoleCompat}</div>
+        </CardContent>
+      </Card>
+
+      <Card render={<section />} className='panel'>
+        <PanelHead
+          title={t('第三方模型回答完自动折叠过程')}
+          tip={TIPS.reasoningCollapse}
+          badge={snap.reasoningCollapse.status === 'ready'
+            ? <StatusBadge tone='ok'>{t('已生效')}</StatusBadge>
+            : snap.reasoningCollapse.status === 'unavailable'
+              ? <StatusBadge tone='bad'>{t('不可用')}</StatusBadge>
+              : <StatusBadge tone='idle'>{t('检测中…')}</StatusBadge>}
+          actions={
+            <RefreshButton id='btn-reasoning-collapse-refresh' onClick={() => void refreshReasoningCollapse()} />
+          }
+        />
+        <CardContent className='panel-body'>
+          <div className='settings-switches'>
+            <SwitchRow
+              id='settings-reasoning-collapse'
+              label={t('给 Codex 的响应补阶段标记，回答完后像官方模型一样把推理与命令过程折叠起来')}
+              checked={snap.reasoningCollapse.on}
+              // 读到后端值之前不许切（与 developerRoleCompat 同一取舍）
+              disabled={snap.reasoningCollapse.status !== 'ready' || snap.busy === 'reasoningCollapse'}
+              onCheckedChange={next => void saveReasoningCollapse(next)}
+            />
+          </div>
+          <div className='settings-state'>
+            {snap.reasoningCollapse.status === 'loading'
+              ? STATES.appLoading
+              : snap.reasoningCollapse.status === 'unavailable'
+                ? STATES.reasoningCollapseUnavailable
+                : snap.reasoningCollapse.on ? STATES.reasoningCollapseOn : STATES.reasoningCollapseOff}
+          </div>
+          <div className='hint retention-note'>{NOTES.reasoningCollapse}</div>
         </CardContent>
       </Card>
 
@@ -2441,6 +2492,8 @@ function SettingsPage() {
         </div>
         <div className={paneClass('gateway')} data-cat='gateway'>
           <ClientIdentificationPanel api={clientIdentificationApi} t={t} active={snap.category === 'gateway'} />
+          <NotificationPanel api={notificationApi} t={t} />
+          <PricingPanel api={pricingApi} t={t} />
           <GatewayPane snap={snap} panels={adminPanels} />
         </div>
         <div className={paneClass('retry')} data-cat='retry'>
@@ -2451,6 +2504,9 @@ function SettingsPage() {
         </div>
         <div className={paneClass('security')} data-cat='security'>
           <SecurityPane snap={snap} />
+          <PrivacyEditor api={desktopPrivacy} identity={desktopBrand.identity} t={t} />
+          <TurnstileEditor api={desktopTurnstile} identity={desktopBrand.identity} t={t} />
+          <OAuthEditor api={desktopOauth} identity={desktopBrand.identity} t={t} />
         </div>
         <div className={paneClass('account')} data-cat='account'>
           <AccountPane snap={snap} />

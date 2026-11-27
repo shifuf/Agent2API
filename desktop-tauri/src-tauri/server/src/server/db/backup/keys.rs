@@ -8,6 +8,112 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::server::core::crypto::{self, SecretScope};
 
+#[cfg(test)]
+mod sync360_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn restore_requires_encrypted_privacy_rules_and_rekeys_them() {
+        let original = [7; 32];
+        let destination = [9; 32];
+        let scope = SecretScope::Accounts.key_file().to_owned();
+        let source = BackupKeys { values: BTreeMap::from([(scope.clone(), Zeroizing::new(original))]) };
+        let mut transform = SecretTransform { source: &source, rewrite: true, local: BTreeMap::from([(scope, Zeroizing::new(destination))]), count: 0 };
+        let rules = br#"{"words":["fixture"]}"#;
+        let mut value = json!({"version":1,"enabled":true,"rulesEnc":crypto::seal_with_key(rules, &original).unwrap()});
+        transform.config("privacyRedaction", &mut value).unwrap();
+        assert_eq!(crypto::open_with_key(value["rulesEnc"].as_str().unwrap(), &destination).unwrap(), rules);
+        for invalid in [json!({"enabled":true}), json!({"rulesEnc":"{}"}), json!({"rulesEnc":"enc1:invalid"})] {
+            let database = Connection::open_in_memory().unwrap();
+            database.execute_batch("CREATE TABLE accounts(data TEXT); CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT);").unwrap();
+            database.execute("INSERT INTO kv VALUES ('privacyRedaction',?1)", [invalid.to_string()]).unwrap();
+            assert!(validate(&database, &source).is_err());
+        }
+    }
+
+    #[test]
+    fn restore_rekeys_each_search_key_and_notification_bundle() {
+        let original = [3; 32];
+        let destination = [5; 32];
+        let encrypt = |plain: &str| crypto::seal_with_key(plain.as_bytes(), &original).unwrap();
+        let scope = SecretScope::Accounts.key_file().to_owned();
+        let keys = BackupKeys { values: BTreeMap::from([(scope.clone(), Zeroizing::new(original))]) };
+        let mut transform = SecretTransform { source: &keys, rewrite: true, local: BTreeMap::from([(scope, Zeroizing::new(destination))]), count: 0 };
+        let mut tools = json!({"providers": {"first": {"encryptedKey": encrypt("legacy")}, "second": {"keys": [{"id": "a", "encryptedKey": encrypt("first")},{"id": "b", "encryptedKey": encrypt("second")}]} }});
+        let mut notifications = json!({"enabled": true, "channelsEnc": encrypt("{\"token\":\"fixture\"}")});
+        transform.config("toolServices", &mut tools).unwrap();
+        transform.config("notifications", &mut notifications).unwrap();
+        assert_eq!(transform.count, 4);
+        for (value, expected) in [(&tools["providers"]["first"]["encryptedKey"], "legacy"), (&tools["providers"]["second"]["keys"][0]["encryptedKey"], "first"), (&tools["providers"]["second"]["keys"][1]["encryptedKey"], "second"), (&notifications["channelsEnc"], "{\"token\":\"fixture\"}")] {
+            assert_eq!(crypto::open_with_key(value.as_str().unwrap(), &destination).unwrap(), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn panel_identity_settings_require_recoverable_envelopes() {
+        let source_key = [43; 32];
+        let target_key = [37; 32];
+        let scope = SecretScope::Accounts.key_file().to_owned();
+        let keys = BackupKeys { values: BTreeMap::from([(scope.clone(), Zeroizing::new(source_key))]) };
+        let mut transform = SecretTransform { source: &keys, rewrite: true, local: BTreeMap::from([(scope, Zeroizing::new(target_key))]), count: 0 };
+        for name in ["panelTurnstile", "panelOauth"] {
+            let content = br#"{"fixture":"binding"}"#;
+            let mut bundle = json!({"version":1,"settingsEnc":crypto::seal_with_key(content, &source_key).unwrap()});
+            transform.config(name, &mut bundle).unwrap();
+            assert_eq!(crypto::open_with_key(bundle["settingsEnc"].as_str().unwrap(), &target_key).unwrap(), content);
+            for mut bad in [json!({}), json!({"settingsEnc":"plaintext"}), json!({"settingsEnc":"enc1:invalid"})] {
+                assert!(transform.config(name, &mut bad).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn restore_validates_nested_search_secrets_before_replacing_database() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE accounts(data TEXT); CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT);").unwrap();
+        let encrypted = crypto::seal_with_key(b"fixture", &[8; 32]).unwrap();
+        let tools = json!({"providers": {"search": {"keys": [{"encryptedKey": encrypted}]}}});
+        connection.execute("INSERT INTO kv VALUES ('toolServices',?1)", [tools.to_string()]).unwrap();
+        assert!(validate(&connection, &BackupKeys { values: BTreeMap::new() }).is_err());
+    }
+
+    #[test]
+    fn restore_rejects_unreadable_or_plaintext_task_secrets() {
+        let database = Connection::open_in_memory().unwrap();
+        database.execute_batch("CREATE TABLE accounts(data TEXT); CREATE TABLE kv(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE task_jobs(id TEXT PRIMARY KEY, secrets_enc TEXT, storage_enc TEXT); INSERT INTO task_jobs VALUES('job','','');").unwrap();
+        let source = BackupKeys { values: BTreeMap::new() };
+        assert!(validate(&database, &source).is_ok());
+        for column in ["secrets_enc", "storage_enc"] {
+            for invalid in ["{}", "enc1:wrong"] {
+                database.execute(&format!("UPDATE task_jobs SET {column}=?1"), [invalid]).unwrap();
+                assert!(validate(&database, &source).is_err(), "{column} was ignored");
+            }
+            database.execute(&format!("UPDATE task_jobs SET {column}=''"), []).unwrap();
+        }
+    }
+
+    #[test]
+    fn restore_rekeys_both_task_fields_without_changing_empty_values() {
+        let original = [11; 32];
+        let destination = [12; 32];
+        let scope = SecretScope::Accounts.key_file().to_owned();
+        let source = BackupKeys { values: BTreeMap::from([(scope.clone(), Zeroizing::new(original))]) };
+        let database = Connection::open_in_memory().unwrap();
+        database.execute_batch("CREATE TABLE task_jobs(id TEXT PRIMARY KEY,secrets_enc TEXT,storage_enc TEXT); INSERT INTO task_jobs VALUES('empty','','');").unwrap();
+        let secret = br#"{"password":"fixture"}"#;
+        let storage = br#"{"cookie":"fixture"}"#;
+        database.execute("INSERT INTO task_jobs VALUES('both',?1,?2)", params![crypto::seal_with_key(secret, &original).unwrap(), crypto::seal_with_key(storage, &original).unwrap()]).unwrap();
+        let mut transform = SecretTransform { source: &source, rewrite: true, local: BTreeMap::from([(scope, Zeroizing::new(destination))]), count: 0 };
+        transform.task_secrets(&database).unwrap();
+        assert_eq!(transform.count, 2);
+        let pair: (String, String) = database.query_row("SELECT secrets_enc,storage_enc FROM task_jobs WHERE id='both'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(crypto::open_with_key(&pair.0, &destination).unwrap(), secret);
+        assert_eq!(crypto::open_with_key(&pair.1, &destination).unwrap(), storage);
+        assert!(database.query_row("SELECT secrets_enc='' AND storage_enc='' FROM task_jobs WHERE id='empty'", [], |row| row.get::<_, bool>(0)).unwrap());
+    }
+}
+
 const SCOPES: [SecretScope; 3] = [
     SecretScope::Accounts,
     SecretScope::UpdateToken,
@@ -170,6 +276,36 @@ impl SecretTransform<'_> {
 
     fn config(&mut self, name: &str, value: &mut Value) -> Result<(), String> {
         match name {
+            "toolServices" => {
+                if let Some(providers) = value.get_mut("providers") {
+                    for provider in providers.as_object_mut().ok_or("工具提供商配置格式异常")?.values_mut() {
+                        self.field(provider, "encryptedKey", SecretScope::Accounts, "工具服务 Key", false)?;
+                        if let Some(keys) = provider.get_mut("keys") {
+                            for item in keys.as_array_mut().ok_or("工具服务 Key 列表格式异常")? {
+                                self.field(item, "encryptedKey", SecretScope::Accounts, "工具服务 Key", false)?;
+                            }
+                        }
+                    }
+                }
+            }
+            "notifications" => {
+                if let Some(text) = value.get("channelsEnc").and_then(Value::as_str) {
+                    if !text.is_empty() && !crypto::is_envelope(text) { return Err("通知配置必须包含有效密文".into()); }
+                }
+                self.field(value, "channelsEnc", SecretScope::Accounts, "通知渠道配置", true)?;
+            }
+            "privacyRedaction" => {
+                let encrypted = value.get_mut("rulesEnc").ok_or("隐私配置缺少规则密文")?;
+                if !encrypted.as_str().is_some_and(crypto::is_envelope) {
+                    return Err("隐私配置必须包含有效密文".into());
+                }
+                self.value(encrypted, SecretScope::Accounts, "隐私规则", true)?;
+            }
+            "panelTurnstile" | "panelOauth" => {
+                let encrypted = value.get_mut("settingsEnc").ok_or("面板身份设置缺少密文")?;
+                if !encrypted.as_str().is_some_and(crypto::is_envelope) { return Err("面板身份设置必须包含有效密文".into()); }
+                self.value(encrypted, SecretScope::Accounts, "面板身份配置", true)?;
+            }
             "apiKey" => self.value(value, SecretScope::Accounts, "网关 Key", false)?,
             "githubToken" => self.value(value, SecretScope::UpdateToken, "GitHub 令牌", false)?,
             "apiKeys" => {
@@ -236,6 +372,28 @@ impl SecretTransform<'_> {
         }
         Ok(())
     }
+
+    fn task_secrets(&mut self, conn: &Connection) -> Result<(), String> {
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='task_jobs')", [], |row| row.get(0)).map_err(|_| "检查任务表失败")?;
+        if !exists { return Ok(()); }
+        let mut cursor: Option<i64> = None;
+        loop {
+            let row: Option<(i64, String, String)> = conn.query_row("SELECT rowid,secrets_enc,storage_enc FROM task_jobs WHERE ?1 IS NULL OR rowid>?1 ORDER BY rowid LIMIT 1", [cursor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(|_| "读取任务密文失败")?;
+            let Some((id, secrets, storage)) = row else { break };
+            cursor = Some(id);
+            let mut fields = [Value::String(secrets), Value::String(storage)];
+            for value in &mut fields {
+                let text = value.as_str().ok_or("任务密文字段无效")?;
+                if text.is_empty() { continue; }
+                if !crypto::is_envelope(text) { return Err("任务配置必须包含有效密文".into()); }
+                self.value(value, SecretScope::Accounts, "任务密文", true)?;
+            }
+            if self.rewrite {
+                conn.execute("UPDATE task_jobs SET secrets_enc=?1, storage_enc=?2 WHERE rowid=?3", params![fields[0].as_str(), fields[1].as_str(), id]).map_err(|_| "迁移任务密文失败")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn validate(conn: &Connection, source: &BackupKeys) -> Result<(), String> {
@@ -287,6 +445,11 @@ fn transform(conn: &Connection, source: &BackupKeys, rewrite: bool) -> Result<us
     for name in [
         "apiKey",
         "apiKeys",
+        "toolServices",
+        "notifications",
+        "privacyRedaction",
+        "panelTurnstile",
+        "panelOauth",
         "githubToken",
         "agentProfiles",
         "cloudSync",
@@ -310,5 +473,6 @@ fn transform(conn: &Connection, source: &BackupKeys, rewrite: bool) -> Result<us
             .map_err(|error| format!("迁移加密配置失败: {error}"))?;
         }
     }
+    transform.task_secrets(conn)?;
     Ok(transform.count)
 }

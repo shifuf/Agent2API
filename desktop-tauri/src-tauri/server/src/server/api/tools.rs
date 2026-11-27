@@ -79,7 +79,8 @@ pub async fn get_servers(Query(query): Query<HashMap<String, String>>) -> Respon
 }
 
 /// PATCH /api/tools/servers/{id} `{protocol, enabled?, timeout_seconds?}`
-pub async fn patch_server(Path(id): Path<String>, body: Bytes) -> Response {
+pub async fn patch_server(Path(id): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
+    if id == tool_services::IMAGE_GENERATION_SERVICE_ID && !crate::server::access::session_valid(&headers) { return errors::management_error(403, "需要管理员登录"); }
     if !tool_services::is_service(&id) {
         return errors::management_error(400, "未知的工具服务");
     }
@@ -160,7 +161,15 @@ pub async fn put_selection(body: Bytes) -> Response {
 }
 
 /// PUT /api/tools/providers/{provider} `{api_key?, account_id?, enabled?}`
-pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path<String>, body: Bytes) -> Response {
+fn provider_admin(headers: &HeaderMap) -> Result<(), Response> {
+    if crate::server::access::session_valid(headers) {
+        return Ok(());
+    }
+    Err(errors::management_error(403, "管理搜索提供商凭据需要管理员登录"))
+}
+
+pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path<String>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Err(response) = provider_admin(&headers) { return response; }
     if !tool_services::is_search_provider(&provider) {
         return errors::management_error(400, "未知的搜索提供商");
     }
@@ -187,13 +196,25 @@ pub async fn put_provider(State(state): State<ServerState>, Path(provider): Path
         Some(Value::String(value)) => Some(value.as_str()),
         Some(_) => return errors::management_error(400, "account_id 必须是字符串或 null"),
     };
-    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id) {
+    let keys = match object.get("keys") {
+        None => None,
+        Some(Value::Array(items)) if items.len() <= tool_services::MAX_PROVIDER_KEYS => {
+            match serde_json::from_value::<Vec<tool_services::ProviderKeyUpdate>>(Value::Array(items.clone())) {
+                Ok(keys) => Some(keys),
+                Err(_) => return errors::management_error(400, "keys 必须是包含 id 或 api_key 的密钥列表"),
+            }
+        }
+        Some(Value::Array(_)) => return errors::management_error(400, "每家提供商最多保存 100 个密钥"),
+        Some(_) => return errors::management_error(400, "keys 必须是数组"),
+    };
+    match tool_services::update_provider(state.store(), &provider, api_key, enabled, account_id, keys) {
         Ok(value) => ok_json(value),
         Err(error) => errors::management_error(400, error),
     }
 }
 
-pub async fn delete_provider_key(Path(provider): Path<String>) -> Response {
+pub async fn delete_provider_key(Path(provider): Path<String>, headers: HeaderMap) -> Response {
+    if let Err(response) = provider_admin(&headers) { return response; }
     if !tool_services::is_search_provider(&provider) {
         return errors::management_error(400, "未知的搜索提供商");
     }
@@ -203,11 +224,22 @@ pub async fn delete_provider_key(Path(provider): Path<String>) -> Response {
     ok_json(json!({ "success": true }))
 }
 
-pub async fn test_provider(State(state): State<ServerState>, Path(provider): Path<String>) -> Response {
+pub async fn test_provider(
+    State(state): State<ServerState>, Path(provider): Path<String>, Query(query): Query<HashMap<String, String>>, headers: HeaderMap,
+) -> Response {
+    if let Err(response) = provider_admin(&headers) { return response; }
     if !tool_services::is_search_provider(&provider) {
         return errors::management_error(400, "未知的搜索提供商");
     }
-    ok_json(tool_services::test_provider(state.store(), &provider).await)
+    let key_id = query.get("key_id").map(String::as_str).filter(|id| !id.trim().is_empty());
+    let operation = query.get("operation").map(String::as_str).unwrap_or("search");
+    if !matches!(operation, "search" | "fetch") {
+        return errors::management_error(400, "operation 必须是 search 或 fetch");
+    }
+    if tool_services::is_account_provider(&provider) && (key_id.is_some() || operation == "fetch") {
+        return errors::management_error(400, "已有账号搜索不支持密钥检查或网页抓取");
+    }
+    ok_json(tool_services::test_provider(state.store(), &provider, key_id, operation).await)
 }
 
 /* ─── 视觉分析 ─────────────────────────────────────────────── */
@@ -343,6 +375,10 @@ pub async fn install_info(State(state): State<ServerState>, headers: HeaderMap, 
     let base = base_url(&headers, &state);
     let tools: Vec<&str> = if service == tool_services::WEB_SEARCH_SERVICE_ID {
         vec!["web_search", "web_fetch"]
+    } else if service == tool_services::IMAGE_GENERATION_SERVICE_ID {
+        let mut names = vec!["generate_images", "get_image_result"];
+        if tool_services::image_config::load().is_some_and(|config| config.editing.is_some()) { names.push("edit_images"); }
+        names
     } else {
         vec!["image_analyze"]
     };
@@ -356,7 +392,8 @@ pub async fn install_info(State(state): State<ServerState>, headers: HeaderMap, 
             "server_name": tool_services::package_name(service),
             "url": format!("{}{}", base.trim_end_matches('/'), tool_services::endpoint(service, "mcp")),
             "tools": tools,
-            "bridge_url": if service == tool_services::VISION_SERVICE_ID { format!("{}/api/tools/mcp-bridge/vision.js", base.trim_end_matches('/')) } else { String::new() },
+            "bridge_url": match service { tool_services::VISION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/vision.js", base.trim_end_matches('/')),
+                tool_services::IMAGE_GENERATION_SERVICE_ID => format!("{}/api/tools/mcp-bridge/image-generation.cjs", base.trim_end_matches('/')), _ => String::new() },
         },
     });
     if service == tool_services::WEB_SEARCH_SERVICE_ID {
@@ -439,8 +476,9 @@ pub async fn install_mcp(State(state): State<ServerState>, headers: HeaderMap, b
     if mode != "http" && mode != "bridge" {
         return errors::management_error(400, "接入方式必须是 http 或 bridge");
     }
-    if mode == "bridge" && service != tool_services::VISION_SERVICE_ID {
-        return errors::management_error(400, "只有视觉分析支持本地桥接");
+    if service == tool_services::IMAGE_GENERATION_SERVICE_ID && !crate::server::access::session_valid(&headers) { return errors::management_error(403, "需要管理员登录"); }
+    if mode == "bridge" && !matches!(service, tool_services::VISION_SERVICE_ID | tool_services::IMAGE_GENERATION_SERVICE_ID) {
+        return errors::management_error(400, "该工具不支持本地桥接");
     }
     let key = match plain_key(text_field(object, "api_key_id")) {
         Ok(key) => key,
@@ -503,4 +541,8 @@ pub async fn vision_bridge_script() -> Response {
         tool_services::VISION_BRIDGE_SCRIPT,
     )
         .into_response()
+}
+
+pub async fn image_bridge_script() -> Response {
+    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], tool_services::IMAGE_BRIDGE_SCRIPT).into_response()
 }

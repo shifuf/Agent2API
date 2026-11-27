@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { LocalTaskPlugins, type TaskPluginRequest } from '../../../ui-shared/local-task-plugins'
+import { apiCall } from '../api/client'
 import { PageIntro, IconButton, Empty, ErrorNote, SkeletonList } from '../components/ui'
 import { GlyphLogo } from '../components/ProviderLogo'
 import { Icon } from '../components/Icon'
@@ -24,6 +26,8 @@ import { Button, Card, InputGroup, InputGroupAddon, InputGroupInput, InputGroupT
  * 与桌面端一致：签到是每天定点型，不在这张表里（它有自己的页）。
  */
 export function TasksPage() {
+  const [localTasks,setLocalTasks] = useState(false)
+  const taskApi: TaskPluginRequest = (method, route, body) => apiCall(`/api/${route}`, {method, body})
   const [tasks, setTasks] = useState<ScheduledTask[] | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
@@ -33,6 +37,7 @@ export function TasksPage() {
   const load = async () => {
     try {
       const data = await fetchScheduledTasks()
+      setLocalTasks(data.localTaskPlugins === true)
       setTasks(data.tasks || [])
       setError('')
     } catch (failure) {
@@ -110,6 +115,7 @@ export function TasksPage() {
       />
 
       {error ? <ErrorNote text={error} /> : null}
+      {localTasks && <LocalTaskPlugins t={t} api={taskApi} />}
       {!tasks ? <SkeletonList rows={4} height={64} /> : null}
 
       {tasks ? (
@@ -201,6 +207,8 @@ export function TasksPage() {
   )
 }
 
+import { MaintenanceHistory } from '../../../ui-shared/maintenance-history'
+
 function TaskRow({
   task,
   busy,
@@ -230,7 +238,8 @@ function TaskRow({
       }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 550 }}>{task.label}</div>
+        <div style={{ fontSize: 13.5, fontWeight: 550 }}>{t(task.label || '')}</div>
+        {task.available===false && <small>{t('此部署不适用')}</small>}
         <div style={{ fontSize: 11.5, color: 'var(--m-text-3)', marginTop: 3 }}>
           {intervalText}
           {task.lastRunAt ? ` · ${formatStamp(task.lastRunAt)}` : ''}
@@ -241,6 +250,7 @@ function TaskRow({
         ) : task.lastResult ? (
           <div style={{ fontSize: 11, color: 'var(--m-text-3)', marginTop: 3 }}>{task.lastResult}</div>
         ) : null}
+        <MaintenanceHistory runs={task.history} t={t} />
         {task.canRun && onRun ? (
           <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
             <Button size='touch-sm' variant='outline'
@@ -253,7 +263,7 @@ function TaskRow({
               <Icon name='play' style={{ width: 12, height: 12 }} />
               {task.running ? t('执行中…') : t('立即执行')}
             </Button>
-            {onEdit ? (
+            {onEdit && !task.readOnlyPlan ? (
               <Button size='touch-sm' variant='outline'
                 type='button'
                 className='m-btn m-sm m-ghost'
@@ -268,7 +278,7 @@ function TaskRow({
           </div>
         ) : null}
       </div>
-      <SwitchSmall checked={Boolean(task.enabled)} disabled={busy} label={task.label || ''} onChange={onToggle} />
+      <SwitchSmall checked={Boolean(task.enabled)} disabled={busy || task.readOnlyPlan} label={task.label || ''} onChange={onToggle} />
     </div>
   )
 }

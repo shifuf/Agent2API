@@ -1,4 +1,13 @@
 {
+  "隐私模式不转发图片；无法识别或未获授权时不会改用其他组。": "O modo de privacidade não encaminha imagens. Se o reconhecimento falhar ou o acesso for negado, nenhum outro grupo será usado.",
+  "视觉辅助": "Assistência visual",
+  "视觉目标组": "Grupo de destino visual",
+  "来源路由组": "Grupos de rotas de origem",
+  "文本组收到内嵌图片时，先调用视觉组描述图片，再由原文本组回答。两次上游调用分别计费；原生视觉组无需额外调用。": "O grupo visual descreve as imagens incorporadas antes que o grupo de texto original responda. As duas chamadas são cobradas separadamente. A visão nativa não exige uma chamada extra.",
+  "标题生成": "Geração de título",
+  "只改写被识别为标题生成的小请求，普通对话不受影响。": "Apenas pequenas requisições reconhecidas como geração de título são reescritas; conversas normais não são afetadas.",
+  "标题模型": "Modelo de título",
+  "目标不可用或未授权时返回错误，不回退原模型。": "Se o modelo de destino estiver indisponível ou não for autorizado, será retornado um erro sem voltar ao modelo original.",
   "{account} · 账号设置": "{account} · Configurações da conta",
   "{account} 参与本路由": "Incluir {account} nesta rota",
   "{available} 可用 · {blocked} 跳过": "{available} disponíveis · {blocked} ignorados",

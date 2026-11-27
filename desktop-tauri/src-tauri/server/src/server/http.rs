@@ -100,12 +100,17 @@ pub fn panel_router(state: ServerState) -> Router {
         // 凭证（setup / login），要么凭证本身就是它们的主张（refresh 带
         // refresh cookie、logout 撤自己的会话），挂 public 由端点自理。
         .route("/api/panel/status", get(api::panel::panel_status))
+        .route("/api/panel/branding", get(api::branding::get))
+        .route("/api/panel/branding/logo", get(api::branding::logo))
         .route("/api/panel/setup", post(api::panel::panel_setup))
         .route("/api/panel/refresh", post(api::panel::panel_refresh))
         .route("/api/panel/logout", post(api::panel::panel_logout))
         // ALTCHA 领题：与 status / setup 同为「认证边界」端点 —— 领题时
         // 用户还没有任何凭证（开关关闭时回 400，前端跳过校验）
         .route("/api/panel/captcha", get(api::panel::captcha_challenge))
+        .route("/api/panel/turnstile-widget", get(api::captcha::widget))
+        .route("/api/panel/oauth/start", post(api::panel_oauth::start).layer(axum::extract::DefaultBodyLimit::max(16384)))
+        .route("/api/panel/oauth/{provider}/callback", get(api::panel_oauth::callback))
         // 会话传输探测（登录页连打两发）：同为 public —— 探测在登录之前，
         // 只种/读一枚 60 秒寿命的探针 cookie，不建立会话、不校验值
         // （见 api::panel::cookie_probe）
@@ -200,7 +205,12 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/plugins/runtime/{*rest}", get(api::plugin_theme::serve));
 
     // 需鉴权：Node 版对这些路径都调用了 checkApiKey
-    let protected = Router::new()
+    let protected = Router::new();
+    #[cfg(feature = "task-plugins")]
+    let protected = protected.merge(api::task_plugins::router());
+    let protected = protected
+        .route("/api/privacy", get(api::privacy::get).put(api::privacy::put).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
+        .route("/api/privacy/test", post(api::privacy::preview).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         // GET /api/session（首屏状态）：从 public 组挪进来 —— 它会透出账号
         // 昵称、各家健康状态、路由中的账号等部署信息（字段清单见 session.rs），
         // 桌面壳的请求由壳带第一把 Key（gateway::request_builder）不受影响。
@@ -447,6 +457,7 @@ pub fn panel_router(state: ServerState) -> Router {
                 .delete(api::tools::delete_vision_config),
         )
         .route("/api/tools/vision/config/test", post(api::tools::test_vision))
+        .route("/api/tools/image-generation/config", get(api::tool_images::config).put(api::tool_images::save).delete(api::tool_images::clear))
         .route("/api/tools/install-targets", get(api::tools::install_targets))
         .route("/api/tools/install-info", get(api::tools::install_info))
         .route("/api/tools/install-skill", post(api::tools::install_skill))
@@ -454,6 +465,7 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/tools/uninstall-skill", post(api::tools::uninstall_skill))
         .route("/api/tools/uninstall-mcp", post(api::tools::uninstall_mcp))
         .route("/api/tools/mcp-bridge/vision.js", get(api::tools::vision_bridge_script))
+        .route("/api/tools/mcp-bridge/image-generation.cjs", get(api::tools::image_bridge_script))
         // ── 侧边栏布局（菜单的分组 / 顺序 / 显隐）──
         // 挂 protected：布局是用户配置，且写操作会改两端共用的那一份。
         // 桌面壳的管理请求由壳自动带 Key，网页端走面板会话，两端都不受影响。
@@ -606,6 +618,8 @@ pub fn panel_router(state: ServerState) -> Router {
         .route("/api/models/catalog", get(api::managed_models::get_catalog).post(api::managed_models::save_model))
         .route("/api/models/public-catalog", get(api::public_model_catalog::get_catalog).post(api::public_model_catalog::refresh_catalog))
         .route("/api/models/compact-routes", get(api::compact_routes::get_routes).put(api::compact_routes::put_routes))
+        .route("/api/models/title-routes", get(api::title_routes::get_routes).put(api::title_routes::put_routes))
+        .route("/api/vision-compatibility", get(api::vision_compat::get).put(api::vision_compat::put))
         .route("/api/models/state", post(api::model_manage::set_state))
         .route("/api/models/mappings", post(api::model_manage::add_mapping))
         .route("/api/models/mappings/remove", post(api::model_manage::remove_mapping))
@@ -704,6 +718,10 @@ pub fn panel_router(state: ServerState) -> Router {
         // **全部挂 protected**：装插件等于允许本机跑任意代码，与备份导入同级敏感。
         // 安装的 Bytes 提取器读取最终扩展：局部有限上限后写覆盖外层 32 MiB。
         .route("/api/plugins", get(api::plugins::list))
+        .route("/api/plugins/community/inspect", post(api::plugins::inspect_community).layer(axum::extract::DefaultBodyLimit::max(crate::server::core::plugin_host::community::BODY_LIMIT)))
+        .route("/api/plugins/community/inspect-source", post(api::plugins::inspect_source).layer(axum::extract::DefaultBodyLimit::max(2048)))
+        .route("/api/plugins/community/archives", get(api::plugins::community_archives).post(api::plugins::community_archives).layer(axum::extract::DefaultBodyLimit::max(2048)))
+        .route("/api/plugins/community/probe", post(api::plugins::community_probe).layer(axum::extract::DefaultBodyLimit::max(2048)))
         .route("/api/plugins/settings", get(api::plugins::settings).patch(api::plugins::save_settings))
         .route("/api/plugins/progress", get(api::plugins::progress))
         .route(
@@ -741,6 +759,22 @@ pub fn panel_router(state: ServerState) -> Router {
         .route(
             "/api/developer-role-compat",
             get(api::role_compat::get_role_compat).put(api::role_compat::put_role_compat),
+        )
+        // ── 第三方模型回答完自动折叠过程开关 ──
+        // 与 /api/developer-role-compat 同形的单开关端点（GET 读 / PUT 写），
+        // 挂 protected：它决定下发给客户端的 Responses 事件里要不要补阶段标记
+        // （改的是协议字节，敏感度与角色归一同一级）。实施点见
+        // `core::protocol::responses` 的 Responses 事件重建层。
+        .route(
+            "/api/model-pricing",
+            get(api::model_pricing::get).put(api::model_pricing::put).layer(axum::extract::DefaultBodyLimit::max(512 * 1024)),
+        )
+        .route("/api/model-pricing/fx", post(api::model_pricing::refresh))
+        .route("/api/model-pricing/reprice", post(api::model_pricing::reprice).layer(axum::extract::DefaultBodyLimit::max(1024)))
+        .route(
+            "/api/reasoning-collapse",
+            get(api::reasoning_collapse::get_reasoning_collapse)
+                .put(api::reasoning_collapse::put_reasoning_collapse),
         )
         // ── Cline 伪装头的逐键覆盖 ──
         // 与 /api/sanitize 同形（GET 读 / PUT 写，响应体就是新状态），挂
@@ -789,6 +823,8 @@ pub fn panel_router(state: ServerState) -> Router {
         // 在对话链路，生图 / 图片编辑走独立分支、不经过压缩）。
         .route("/api/client-identification", get(api::client_identification::get_settings).put(api::client_identification::put_settings))
         .route("/api/client-identification/preview", post(api::client_identification::preview_settings))
+        .route("/api/notifications", get(api::notifications::get).put(api::notifications::put).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
+        .route("/api/notifications/test", post(api::notifications::test).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         .route(
             "/api/image-compress",
             get(api::image_compress::get_image_compress)
@@ -798,9 +834,14 @@ pub fn panel_router(state: ServerState) -> Router {
         // 与 /api/debug 同形的单开关端点（GET 读 / PUT 写），挂 protected：
         // 它决定登录 / 注册是否要求 ALTCHA proof-of-work，敏感度同级。
         .route(
+            "/api/branding", axum::routing::put(api::branding::put).layer(axum::extract::DefaultBodyLimit::max(3 * 1024 * 1024)),
+        )
+        .route(
             "/api/captcha",
             get(api::captcha::get_captcha).put(api::captcha::put_captcha),
         )
+        .route("/api/captcha/turnstile", get(api::captcha::get_turnstile).put(api::captcha::put_turnstile).layer(axum::extract::DefaultBodyLimit::max(8192)))
+        .route("/api/panel-oauth",get(api::panel_oauth::get).put(api::panel_oauth::put).layer(axum::extract::DefaultBodyLimit::max(8192)))
         // ── 活动套餐通道的人机验证令牌池 ──
         // 与上面那条**不是一回事**：上面是网关自己的登录门槛（ALTCHA），这条是
         // 上游 ZCode 对活动套餐推理端点要求的阿里云验证码令牌（界面静默铸造、
@@ -839,6 +880,8 @@ pub fn panel_router(state: ServerState) -> Router {
             "/api/prompt",
             get(api::prompt::get_prompt).put(api::prompt::put_prompt),
         )
+        .route("/api/prompt/rules", get(api::prompt_rules::get).put(api::prompt_rules::put))
+        .route("/api/prompt/rules/preview", post(api::prompt_rules::preview))
         // ── 定时签到（对照 server.mjs 726-746 行）──
         // 三条都在 Node 的最外层大 try 里，失败走 OpenAI 风格 body（含 run 的
         // 「签到正在执行中，请稍候」）—— 形状由 api::auto_checkin 自己保证。
@@ -1014,6 +1057,7 @@ pub fn gateway_router(state: ServerState) -> Router {
         .route("/v1/chat/completions", post(api::chat::chat_completions))
         .route("/v1/responses", post(api::protocol::responses_endpoint))
         .route("/v1/messages", post(api::protocol::messages_endpoint))
+        .route_layer(middleware::from_fn_with_state(state.clone(), api::privacy::protect))
         .route("/v1/messages/count_tokens", post(api::chat::count_tokens))
         .route("/v1/images/generations", post(api::images::generations))
         .route("/v1/images/edits", post(api::images::edits))
@@ -1030,6 +1074,8 @@ pub fn gateway_router(state: ServerState) -> Router {
             "/mcp/vision",
             post(api::tool_runtime::mcp_vision).get(api::tool_runtime::mcp_unsupported),
         )
+        .route("/mcp/image-generation", post(api::tool_runtime::mcp_images).get(api::tool_runtime::mcp_unsupported))
+        .route("/mcp/image-generation/files/{id}", get(api::tool_images::download))
         .layer(middleware::from_fn(require_api_key))
         .with_state(state);
     health.merge(open.merge(guarded))
@@ -1079,7 +1125,7 @@ async fn cors(request: Request, next: Next) -> Response {
     // ——只有开了 AGENT2API_VERBOSE=1（旧名 WORKBUDDY_VERBOSE 仍可读）才入库，
     // 普通启动只是控制台多一行
     if logging::is_verbose() && !path.starts_with("/v1/") {
-        let query = request.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+        let query = if path.starts_with("/api/panel/oauth/") {String::new()} else {request.uri().query().map(|q| format!("?{q}")).unwrap_or_default()};
         logging::verbose("[HTTP]", &format!("← {method} {path}{query}"));
     }
 

@@ -363,6 +363,8 @@ impl ServerState {
         // 下面日志裁剪天数与旧文件候选目录才不会用错值。
         let snapshot = config::init(db.clone());
         core::task_state::install(db.clone());
+        #[cfg(feature = "task-plugins")]
+        core::task_plugins::store::install(db.clone());
         // 每账号的余额查询记录（余额不足跳过 / 自动禁用的底座）：装库句柄时
         // 顺带做旧 kv 快照的一次性迁移与内存事实表的装载（见 usage_records 模块头）。
         core::usage_records::install(db.clone());
@@ -444,6 +446,7 @@ impl ServerState {
         // 时只读内嵌快照（功能仍在，只是拿不到上次的刷新结果），所以位置不敏感；
         // 放在这里是为了和另外两个 kv 使用者排在一起，便于核对「谁在用这个库」。
         core::model_meta::install(db.clone());
+        core::model_pricing::fx::install(db.clone());
         // ── 旧文件一次性迁移：**本切片起不再自动跑** ────────────────
         // 它现在由用户在升级弹窗里点「升级」触发（`POST /api/upgrade/run`）。
         // 为什么改成手动：需求是「弹窗告诉用户换了 SQLite，点升级才开始导」——
@@ -785,6 +788,8 @@ impl ServerState {
             logging::log("[Checkin]", &format!("定时签到已启用：每天 {time} 执行"));
             state.auto_checkin.start();
         }
+        #[cfg(feature = "task-plugins")]
+        core::task_plugins::scheduler::spawn_scheduler();
 
         // 间隔型定时任务（凭证自动维护 / 模型目录刷新）：
         // 起一个循环，按各自配置的开关与间隔重复执行。

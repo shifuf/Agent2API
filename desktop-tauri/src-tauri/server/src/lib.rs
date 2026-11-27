@@ -45,6 +45,10 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    let future = {
+        let scope = server::core::privacy::log_scope();
+        async move { if let Some(scope) = scope { server::core::privacy::LOG_SCOPE.scope(scope, future).await } else { future.await } }
+    };
     match Handle::try_current() {
         Ok(handle) => handle.spawn(future),
         Err(_) => global_runtime().spawn(future),

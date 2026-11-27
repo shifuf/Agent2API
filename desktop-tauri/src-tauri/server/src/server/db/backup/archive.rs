@@ -99,10 +99,15 @@ pub(super) fn export(
 ) -> Result<Value, String> {
     validate_password(password, true)?;
     let snapshot = snapshot_to_memory(db)?;
+    if !include_logs {
+        snapshot.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false).map_err(|_| "无法隔离精简快照")?;
+        snapshot.execute_batch("UPDATE task_jobs SET last_status=NULL, last_run_at=NULL, last_duration_ms=NULL, last_error=NULL, status_summary_json='{}';").map_err(|_| "无法移除任务运行历史")?;
+    }
     let keys = BackupKeys::collect()?;
     keys::validate(&snapshot, &keys)?;
-    let skip = if include_logs { &[][..] } else { LOG_TABLES };
-    let tables = table_row_counts(&snapshot, skip);
+    let mut skip = super::TRANSIENT_TABLES.to_vec();
+    if !include_logs { skip.extend_from_slice(LOG_TABLES); }
+    let tables = table_row_counts(&snapshot, &skip);
     let schema_version = snapshot
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| format!("读取备份版本失败: {error}"))?;
@@ -148,7 +153,7 @@ pub(super) fn export(
         .map_err(write_error)?;
     compressed.write_all(&manifest_bytes).map_err(write_error)?;
     let mut sql_file = temp::anonymous_file(config_dir).map_err(write_error)?;
-    dump_sql_into(&snapshot, skip, &mut sql_file)?;
+    dump_sql_into(&snapshot, &skip, &mut sql_file)?;
     let sql_bytes = sql_file.stream_position().map_err(write_error)?;
     if sql_bytes > MAX_SQL_BYTES {
         return Err("备份 SQL 超过 8GB 上限，请改用精简导出".into());

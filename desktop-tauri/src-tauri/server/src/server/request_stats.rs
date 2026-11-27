@@ -72,6 +72,8 @@ mod aggregate;
 mod daily;
 mod maintenance;
 mod record;
+mod pricing;
+pub use pricing::Selection as PricingSelection;
 // 报表计算层（纯函数）与「模型请求日志」的查询实现。
 //
 // 这里**不放模块级 allow**：本层已由 `api::stats_api` 的报表路由接线，

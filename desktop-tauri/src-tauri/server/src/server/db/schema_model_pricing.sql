@@ -1,0 +1,5 @@
+ALTER TABLE requests ADD COLUMN cost_usd REAL;
+ALTER TABLE requests ADD COLUMN pricing_evidence TEXT;
+ALTER TABLE request_daily ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE request_daily ADD COLUMN cost_cny REAL NOT NULL DEFAULT 0;
+ALTER TABLE request_daily ADD COLUMN priced_requests INTEGER NOT NULL DEFAULT 0;

@@ -942,6 +942,7 @@ pub struct CustomCredential {
     pub base_url_override: Option<String>,
     /// 出网代理（None = 未配置 / 解析失败 → 直连）
     pub proxy: Option<ResolvedProxy>,
+    pub proxy_unavailable: bool,
 }
 
 /// 一条记录 → 凭证快照（两个入口共用一份取数口径，不会各漂一份）
@@ -950,11 +951,11 @@ fn credential_of_record(record: &StoredAccount) -> CustomCredential {
     // 轮询档取下一个出口：凭证快照的消费方（余额查询、拉清单）都是**真实出网**，
     // 与转发同一条口径；展示那一路（公开形态）走 `describe_account_proxy`，
     // 它不动游标（见 `core::proxies` 的两个解析入口）。
-    let proxy = match resolve_account_proxy_rotating(Some(&record.proxy()), record.id()) {
-        Some(resolution) => resolution.resolved().cloned(),
+    let (proxy, proxy_unavailable) = match resolve_account_proxy_rotating(Some(&record.proxy()), record.id()) {
+        Some(resolution) => (resolution.resolved().cloned(), resolution.resolved().is_none()),
         // 无代理配置 → 直连（与「解析失败回退直连」在出网行为上等价，
         // 区别只在日志：这里没有请求上下文可挂 notice，静默直连即可）
-        None => None,
+        None => (None, false),
     };
     CustomCredential {
         account_id: record.id().to_string(),
@@ -971,5 +972,6 @@ fn credential_of_record(record: &StoredAccount) -> CustomCredential {
             .map(str::to_string)
             .filter(|text| !text.is_empty()),
         proxy,
+        proxy_unavailable,
     }
 }

@@ -62,6 +62,7 @@ pub mod request;
 pub(crate) mod replay_guard;
 mod payload;
 mod provider_loop;
+pub(crate) mod vision_compat;
 mod rotate;
 mod route_state;
 mod route_context;
@@ -390,7 +391,7 @@ impl UpstreamService {
         // 无状态 / 有状态）都要采，装一次全都覆盖到。开关关着时**不创建**
         // 采集器 —— 后续所有 `capture()` 都返回 None，采集代码整段跳过。
         // 只带 id：URL / 头 / 体等真正发送时才由 `reset_request` 填上。
-        if crate::server::core::debug_traffic::enabled() {
+        if !request.telemetry.ephemeral_image && request.telemetry.privacy.is_none() && crate::server::core::debug_traffic::enabled() {
             let id = request.telemetry.id();
             if !id.is_empty() {
                 request.telemetry.set_capture(std::sync::Arc::new(
@@ -429,8 +430,11 @@ impl UpstreamService {
         let route_body = request.body.clone();
         let route_scope = request.allowed_providers.clone();
         let ignore_route = request.ignore_model_gate;
+        let allow_vision = images.is_none() && !ignore_route && request.pinned_account.is_none();
         let routing = crate::server::core::blocking::run(move || {
-            route_context::RequestRouting::capture_request(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route, images)
+            let mut routing = route_context::RequestRouting::capture_request(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route, images)?;
+            if allow_vision { vision_compat::capture(&mut routing, &route_body, route_scope.as_ref()); }
+            Ok::<_, GatewayError>(routing)
         }).await??;
         let mut slot = self.begin_slot(&request.dedupe_key, cancel.as_ref()).await;
         // 账号级活跃连接计数：**本请求**的凭证，随选路改绑到实际使用的账号。
@@ -441,6 +445,10 @@ impl UpstreamService {
         // 对话统一向上游请求流式；Images 保留独立的请求形态。
         let mut upstream_body = request.body.clone();
         let compact_route = super::compact_routing::take_route(&mut upstream_body);
+        let title_route = super::title_routing::take_route(&mut upstream_body);
+        if let Some(route) = title_route.as_ref() {
+            request.telemetry.set_route_decision(serde_json::json!({"titleRoute": route}));
+        }
         if let Some(object) = upstream_body.as_object_mut() {
             object.remove("_wb_route_group_id");
             object.remove("_wb_route_continue");
@@ -474,7 +482,13 @@ impl UpstreamService {
         let config = crate::server::config::current();
         let sanitize = config.sanitize_settings();
         let developer_role_compat = config.developer_role_compat();
+        let prompt_model = title_route.as_ref().or(compact_route.as_ref()).and_then(|route| route["source"].as_str())
+            .or_else(|| upstream_body["model"].as_str()).unwrap_or("");
+        let client = crate::server::core::client::classify(request.client_headers.get("user-agent").and_then(|ua| ua.to_str().ok()).unwrap_or(""));
         let prompt = config.prompt_plan();
+        let prompt = if request.ignore_model_gate || preserve_system_prompt || config.prompt_rules.rules.is_empty() { prompt } else {
+            prompt.with_sample(&config.prompt_rules.rules, if client.is_empty() { "other" } else { &client }, prompt_model)
+        };
         // 图片压缩设置是 `Copy`，拷一份随上下文带下去（不借用 config，省去生命周期约束）
         let image_compress = *config.image_compress_settings();
         // Key 的提供商白名单随请求带进转发上下文：它要活过整条转发链
@@ -507,7 +521,7 @@ impl UpstreamService {
             ignore_model_gate: request.ignore_model_gate,
             proxy_override: proxy_override.as_ref(),
         };
-        provider_loop::forward_with_providers(self, context, &mut slot, &mut connections).await
+        Box::pin(provider_loop::forward_with_providers(self, context, &mut slot, &mut connections)).await
     }
 
     /// 等待同 body 的在途请求完成，然后占住槽位。

@@ -166,15 +166,14 @@ async function solve(challenge: Challenge, onProgress?: SolveProgress): Promise<
  *
  * 服务端关闭校验时领题回 400 —— 这时返回 `null`，调用方提交时不带 captcha 字段。
  */
-export async function solveCaptcha(onProgress?: SolveProgress): Promise<string | null> {
-  let challenge: Challenge
-  try {
-    const response = await fetch(url('/api/panel/captcha'), { headers: { Accept: 'application/json' } })
-    if (!response.ok) return null
-    challenge = (await response.json()) as Challenge
-  } catch {
-    // 网关不可达：交给登录请求自己报错，不在这里把「验证失败」当结论
-    return null
+export async function solveCaptcha(onProgress?: SolveProgress): Promise<string | null | { siteKey: string; widgetOrigin:string }> {
+  const response = await fetch(url('/api/panel/captcha'), { headers: { Accept: 'application/json' }, cache: 'no-store' })
+  if (response.status === 400) return null
+  if (!response.ok) throw new Error('Verification unavailable')
+  const challenge = await response.json() as Challenge & { provider?: string; siteKey?: string; widgetOrigin?: string }
+  if (challenge.provider === 'turnstile') {
+    if (!challenge.siteKey || !challenge.widgetOrigin) throw new Error('Verification unavailable')
+    return { siteKey: challenge.siteKey, widgetOrigin: challenge.widgetOrigin }
   }
   const number = await solve(challenge, onProgress)
   // 服务端要的是 base64(JSON)（std 与 url-safe 都认，btoa 给的是 std）

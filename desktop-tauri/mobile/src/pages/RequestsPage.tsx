@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon'
 import { Alert, Sheet, SheetContent, SheetHeader, SheetBody, SheetTitle, SheetFooter, Button, Card, SegmentedControl } from '@ui'
 import { store, useStore } from '../state/store'
 import { fetchRequests, type RequestPage, type RequestRow } from '../api/gateway'
+import { formatEstimate } from '../../../ui-shared/pricing'
 import { ellipsisMiddle, formatClock, formatDuration, formatInt } from '../lib/format'
 import { providerLabel } from '../lib/providers'
 import { usePolling } from '../lib/usePolling'
@@ -262,6 +263,7 @@ function RequestCard({ row, onClick }: { row: RequestRow; onClick: () => void })
         <span>{formatDuration(row.durationMs)}</span>
         <span style={{ opacity: 0.45 }}>·</span>
         <span>{formatInt(Number(row.totalTokens) || 0)} tokens</span>
+        <span>{t('估算费用')} {formatEstimate(row)}</span>
         {(row.attempts || 1) > 1 ? (
           <>
             <span style={{ opacity: 0.45 }}>·</span>

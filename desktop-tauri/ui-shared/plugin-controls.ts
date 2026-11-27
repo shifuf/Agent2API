@@ -1,7 +1,7 @@
 import type { PluginDocumentText } from './provider-docs'
 
 export type PluginTranslate = (key: string, params?: Record<string, string | number>) => string
-export type PluginRequest = <T>(method: 'GET' | 'PATCH' | 'POST', path: string, body?: unknown) => Promise<T>
+export type PluginRequest = <T>(method: 'GET' | 'PATCH' | 'POST', path: string, body?: unknown, signal?: AbortSignal) => Promise<T>
 export type PluginSettingValue = string | number | boolean | null
 export type PluginSettingField = {
   key: string

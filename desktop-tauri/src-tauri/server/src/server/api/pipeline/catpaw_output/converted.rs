@@ -12,7 +12,7 @@ use crate::server::errors::GatewayError;
 
 pub(in crate::server::api) async fn converted_outcome(
     outcome: Result<ForwardOutcome, GatewayError>, telemetry: &Arc<RequestTelemetry>, request: &Value,
-    model: &str, stream: bool, as_responses: bool,
+    model: &str, stream: bool, as_responses: bool, reasoning_collapse: bool,
 ) -> Result<Result<ForwardOutcome, GatewayError>, Response> {
     if outcome.is_err() { return Ok(outcome); }
     let mut guard = match telemetry.take_catpaw_output() {
@@ -20,7 +20,7 @@ pub(in crate::server::api) async fn converted_outcome(
         Ok(None) => return Ok(outcome),
         Err(_) => return Err(failure(telemetry)),
     };
-    let result = prepare(outcome, &mut guard, request, model, stream, as_responses).await;
+    let result = prepare(outcome, &mut guard, request, model, stream, as_responses, reasoning_collapse).await;
     match result {
         Ok(response) => {
             if guard.finish().is_err() { return Err(failure(telemetry)); }
@@ -32,7 +32,7 @@ pub(in crate::server::api) async fn converted_outcome(
 
 async fn prepare(
     outcome: Result<ForwardOutcome, GatewayError>, guard: &mut OutputGuard, request: &Value,
-    model: &str, stream: bool, as_responses: bool,
+    model: &str, stream: bool, as_responses: bool, reasoning_collapse: bool,
 ) -> Result<Response, ()> {
     match outcome.map_err(|_| ())? {
         ForwardOutcome::Completion { body } => {
@@ -48,14 +48,14 @@ async fn prepare(
         }
     }
     let chat = guard.prepare_chat().map_err(|_| ())?;
-    let mut body = if as_responses { responses::responses_from_chat(&chat, model, request) }
+    let mut body = if as_responses { responses::responses_from_chat(&chat, model, request, reasoning_collapse) }
         else { anthropic::anthropic_from_chat(&chat, model) };
     if !as_responses && !chat.get("usage").is_some_and(Value::is_object) { body["usage"] = Value::Null; }
     guard.verify_converted(&body, request, model, as_responses).map_err(|_| ())?;
     if !stream { return Ok(super::super::json_response(body)); }
     let input = chat_frames(&chat)?;
     let frames = if as_responses {
-        let mut converter = responses::ResponsesStream::new(model, request);
+        let mut converter = responses::ResponsesStream::new(model, request, reasoning_collapse);
         let frames = converter.push(&input);
         let terminal = frames.iter().filter_map(|frame| event(frame)).find_map(|(name, value)|
             (name == "response.completed").then(|| value["response"].clone())).ok_or(())?;

@@ -133,6 +133,7 @@ export type PluginSettings = {
 }
 
 export type PluginsPayload = {
+  localTaskPlugins?: boolean
   packs: PackSummary[]
   host: HostState
   adminPanels?: string[]

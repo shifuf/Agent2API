@@ -11,6 +11,8 @@ import { PluginNotesDialog, type PluginNotes } from './plugins-notes'
 import { PluginPackSettingsDialog } from './plugins-pack-settings'
 import { PluginSettingsDialog } from './plugins-settings'
 import { PluginTasks } from '../../../ui-shared/plugin-tasks'
+import { LocalTaskPlugins } from '../../../ui-shared/local-task-plugins'
+import { CommunityInspector } from '../../../ui-shared/community-inspector'
 import { api, bridge, errorMessage, pluginName, readBase64, selectPluginPlatform, toast } from './plugins-shared'
 import type { PackSummary, PluginMutation, PluginOperation, PluginUpdate, PluginsPayload, ReleaseState } from './plugins-types'
 import { t } from '../i18n'
@@ -213,6 +215,8 @@ function PluginsPage(): React.ReactElement {
           <Button variant='outline' size='sm' disabled={locked || active} onClick={pickFile}>{t('从文件安装…')}</Button>
         </div>
       </CardHeader>
+      {payload?.localTaskPlugins && <LocalTaskPlugins t={t} api={(method,route,body)=>api(method,`/api/${route}`,body)} />}
+      <CommunityInspector request={api} t={t} canAbort={bridge().__TAURI_INTERNALS__?.supportsAbortSignal === true} />
       <div className='p-4'>
         <Input ref={fileRef} type='file' accept='.zip,application/zip' className='hidden' onChange={event => void onFile(event)} />
         {error || syncError ? <p className='mb-3 text-[12px] text-destructive'>{error || syncError}</p> : null}

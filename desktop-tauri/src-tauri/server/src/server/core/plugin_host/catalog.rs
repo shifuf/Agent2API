@@ -10,7 +10,7 @@ use super::{settings, update};
 use crate::server::core::task_state::{self, Claim, ManualBackoff};
 use crate::server::logging;
 
-fn key() -> String {
+pub(crate) fn key() -> String {
     key_for(settings::current().channels())
 }
 

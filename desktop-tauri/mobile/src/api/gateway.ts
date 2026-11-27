@@ -120,6 +120,9 @@ export function refreshExpiringAccounts(): Promise<unknown> {
 /* ─── 报表 ─────────────────────────────────────── */
 
 export type StatsOverview = {
+  costCny?: number | null; pricingCurrency?: string
+  costUsd?: number | null
+  pricedRequests?: number
   requests?: number
   successful?: number
   tokens?: number
@@ -186,6 +189,8 @@ export function fetchStatsSummary(range: StatsRange, signal?: AbortSignal, optio
 export type AttemptDetail = { provider?: string; status?: number; error?: string }
 
 export type RequestRow = {
+  costCny?: number | null; pricingCurrency?: string
+  costUsd?: number | null
   clientLabel?: string
   clientEvidence?: import('../../../ui-shared/client-identification').ClientEvidence
   ts?: number
@@ -444,6 +449,9 @@ export function saveProxySettings(testUrl: string): Promise<ProxySettings> {
 /* ─── 定时任务 ─────────────────────────────────── */
 
 export type ScheduledTask = {
+  history?: import('../../../ui-shared/maintenance-history').MaintenanceRun[]
+  available?: boolean
+  readOnlyPlan?: boolean
   id?: string
   label?: string
   description?: string
@@ -463,8 +471,8 @@ export type ScheduledTask = {
   canRun?: boolean
 }
 
-export function fetchScheduledTasks(signal?: AbortSignal): Promise<{ tasks?: ScheduledTask[] }> {
-  return apiCall<{ tasks?: ScheduledTask[] }>('/api/scheduled-tasks', { signal })
+export function fetchScheduledTasks(signal?: AbortSignal): Promise<{ tasks?: ScheduledTask[]; localTaskPlugins?: boolean }> {
+  return apiCall<{ tasks?: ScheduledTask[]; localTaskPlugins?: boolean }>('/api/scheduled-tasks', { signal })
 }
 
 export function patchScheduledTask(

@@ -164,20 +164,25 @@ export function creditStatisticsWalletsOf(value: unknown): UsageObject[] | null 
     && (wallet.creditRemaining != null || wallet.creditTotal != null || wallet.creditUsed != null))
 }
 
-export function usageSupplementReadingsOf(value: unknown, t: Translate, format: (value: number) => string): string[] {
+export function usageSupplementReadingsOf(value: unknown, t: Translate, format: (value: number) => string, time?: (value: number) => string): string[] {
   const data = object(value)
   if (!data) return []
   const readings: string[] = []
   const subscription = object(data.subscription)
+  const newApi = typeof data.billingPreference === 'string' && subscription !== null
   if (typeof subscription?.planName === 'string' && subscription.planName.trim()) {
     readings.push(t('套餐 {name}', { name: subscription.planName }))
   }
   if (typeof data.balanceView === 'string' && data.balanceView.trim()) readings.push(t(data.balanceView))
+  if (newApi && time && typeof subscription?.resetsAt === 'number' && subscription.resetsAt > 0) {
+    readings.push(t('重置 {date}', { date: time(subscription.resetsAt) }))
+  }
   for (const wallet of creditStatisticsWalletsOf(data) ?? (Array.isArray(data.wallets) ? data.wallets : [])) {
     const row = object(wallet)
     if (!row) continue
+    const balance = usageNumberOrNull(row.balance)
     const view = typeof row.balanceView === 'string' && row.balanceView.trim() ? t(row.balanceView)
-      : usageNumberOrNull(row.balance) === null ? '' : format(usageNumberOrNull(row.balance)!)
+      : balance === null ? '' : [format(balance), newApi && typeof row.unit === 'string' ? usageUnitLabel(row.unit, t) : ''].filter(Boolean).join(' ')
     if (!view) continue
     const name = typeof row.displayName === 'string' ? t(row.displayName)
       : typeof row.type === 'string' ? row.type : t('明细')

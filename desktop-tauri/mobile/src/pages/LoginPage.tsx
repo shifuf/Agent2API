@@ -3,9 +3,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Icon } from '../components/Icon'
 import { store, useStore } from '../state/store'
 import { authenticate, fetchPanelStatus, solveCaptcha } from '../api/auth'
-import { storeApiKey } from '../api/client'
+import { storeApiKey, url } from '../api/client'
+import { mountTurnstile } from '../../../ui-shared/turnstile-widget'
+import { beginOAuth, providerName, type OAuthProvider } from '../../../ui-shared/panel-oauth'
 import { baseLabel, serverIdentity } from '../lib/servers'
 import { t } from '../i18n'
+import { mobileBrand } from '../lib/panel-branding'
+import { useBranding } from '../../../ui-shared/panel-branding'
 import { Alert, AppFrame, Button, Field as UiField, FieldLabel, Input } from '@ui'
 
 /**
@@ -32,6 +36,7 @@ import { Alert, AppFrame, Button, Field as UiField, FieldLabel, Input } from '@u
  * 办法带上凭证（`Allow-Origin: *` 下浏览器不带 cookie）。
  */
 export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: () => void }) {
+  const brand = useBranding(mobileBrand)
   const { server, packaged } = useStore()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -41,6 +46,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
   /** 该网关有没有管理员 —— 没有就是首次注册 */
   const [setup, setSetup] = useState(false)
   const [statusKnown, setStatusKnown] = useState(false)
+  const [oauthProviders,setOauthProviders]=useState<OAuthProvider[]>([])
   /**
    * 人机验证状态。
    *   idle    还没开始（首帧）
@@ -54,9 +60,12 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
   const [progress, setProgress] = useState(0)
   /** 代次：重试时作废上一轮，避免迟到的结果覆盖新状态 */
   const generation = useRef(0)
+  const widget = useRef<HTMLDivElement>(null)
+  const closeWidget = useRef<() => void>(() => {})
 
   const runCaptcha = async () => {
     const mine = ++generation.current
+    closeWidget.current()
     setCaptchaState('solving')
     setCaptcha(null)
     setProgress(0)
@@ -65,7 +74,14 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
         if (generation.current === mine) setProgress(ratio)
       })
       if (generation.current !== mine) return
-      if (payload) {
+      if (payload && typeof payload === 'object') {
+        if (!widget.current) throw new Error('Verification unavailable')
+        closeWidget.current = mountTurnstile(widget.current, payload.widgetOrigin, url('/api/panel/status'), payload.siteKey, value => {
+          if (generation.current !== mine) return
+          setCaptcha(value.state === 'verified' ? value.token : null)
+          setCaptchaState(value.state === 'verified' ? 'ready' : 'failed')
+        })
+      } else if (payload) {
         setCaptcha(payload)
         setCaptchaState('ready')
       } else {
@@ -86,6 +102,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
         const status = await fetchPanelStatus()
         if (!alive) return
         setSetup(!status.registered)
+        setOauthProviders(Array.isArray(status.oauthProviders)?status.oauthProviders.filter(provider=>provider==='google'||provider==='github'):[])
         setStatusKnown(true)
       } catch {
         if (!alive) return
@@ -96,6 +113,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
     })()
     return () => {
       alive = false
+      closeWidget.current()
       generation.current += 1
     }
     // 只在挂载时跑一次
@@ -148,7 +166,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
     busy ||
     (mode === 'key'
       ? !apiKey.trim()
-      : !statusKnown || !username.trim() || !password || captchaState === 'solving')
+      : !statusKnown || !username.trim() || !password || !['off','ready'].includes(captchaState))
 
   return (
     <AppFrame
@@ -181,15 +199,16 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
             boxShadow: '0 10px 24px -12px var(--m-primary)',
           }}
         >
-          <Icon name='shield' style={{ width: 24, height: 24 }} />
+          {brand.logoUrl ? <img width={48} height={48} src={brand.logoUrl} alt='' style={{ objectFit: 'contain' }} /> : <Icon name='shield' style={{ width: 24, height: 24 }} />}
         </div>
         <h1 style={{ margin: '16px 0 0', fontSize: 23, letterSpacing: '-0.02em' }}>
           {mode === 'key'
             ? t('需要网关 API Key')
             : setup
               ? t('创建管理员账号')
-              : t('登录 Agent2API')}
+              : t('登录 Agent2API').replace('Agent2API', () => brand.displayName)}
         </h1>
+        {(setup || mode === 'key') && brand.displayName !== 'Agent2API' && <div>{brand.displayName}</div>}
         <p style={{ margin: '6px 0 0', fontSize: 12.5, lineHeight: 1.6, color: 'var(--m-text-3)' }}>
           {mode === 'key'
             ? t('这台网关没有管理员，用一把已启用的 API Key 访问。')
@@ -265,6 +284,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
             />
 
             <div className='flex flex-col gap-1.5'>
+              <div ref={widget} />
               <Verification className='w-full justify-start whitespace-normal text-left'
                 state={captchaState === 'ready' ? 'verified' : captchaState === 'solving' ? 'verifying' : captchaState === 'failed' ? 'error' : 'idle'}
                 disabled={captchaState !== 'failed'} onClick={() => void runCaptcha()}>
@@ -282,6 +302,7 @@ export function LoginPage({ mode, onDone }: { mode: 'login' | 'key'; onDone?: ()
         )}
 
         {error ? <Alert variant='destructive'>{error}</Alert> : null}
+        {mode==='login'&&!packaged&&location.protocol==='https:'&&oauthProviders.map(provider=><Button key={provider} disabled={busy||!['off','ready'].includes(captchaState)} type='button' onClick={()=>{setBusy(true);void beginOAuth(provider,'login',captcha).catch(()=>{setBusy(false);setError(t('OAuth 操作失败，请检查配置及网页会话'));void runCaptcha()})}}>{providerName(provider)}</Button>)}
 
         <Button size='touch' variant='default'
           type='button'

@@ -183,6 +183,7 @@ impl AutoCheckin {
         .await
         {
             Ok(result) => {
+                crate::server::core::notifications::checkin(source, result["failedCount"].as_u64().unwrap_or(0) as usize);
                 let summary = retry::merge(
                     &self.store,
                     self.record_success(&result, &today, reason),
@@ -202,6 +203,7 @@ impl AutoCheckin {
             }
             Err(error) => {
                 // 失败也写 lastResult（failed 里放错误文案），与 Node 的 catch 分支一致
+                crate::server::core::notifications::checkin(source, 1);
                 let failure = json!({
                     "at": logging::now_ms(),
                     "date": today,

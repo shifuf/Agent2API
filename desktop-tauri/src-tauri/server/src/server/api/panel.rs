@@ -25,6 +25,7 @@ use std::net::SocketAddr;
 use crate::server::access;
 use crate::server::altcha;
 use crate::server::config;
+use crate::server::core::panel_turnstile::{self, Provider};
 use crate::server::errors;
 use crate::server::http::{ok_json, parse_body};
 use crate::server::logging;
@@ -44,14 +45,18 @@ fn body_str<'a>(payload: &'a serde_json::Value, field: &str) -> String {
 /// 登录失败锁定 —— 那把锁针对「密码猜错」，校验没过说明还没走到验密码那步。
 ///
 /// `local_panel` 决定读哪一端的开关（桌面壳与 headless 是两套独立的设置）。
-fn check_captcha(payload: &serde_json::Value, local_panel: bool) -> Result<(), Response> {
-    if !config::current().captcha_enabled(local_panel) {
+pub(super) async fn check_captcha(payload: &serde_json::Value, state: &ServerState) -> Result<(), Response> {
+    if !config::current().captcha_enabled(state.local_panel) {
         return Ok(());
     }
     let Some(token) = payload.get("captcha").and_then(serde_json::Value::as_str) else {
         return Err(errors::management_error(400, "请完成人机验证后重试"));
     };
-    altcha::verify(token).map_err(|message| errors::management_error(400, &message))
+    let settings = panel_turnstile::load(state.db()).map_err(|message| errors::management_error(503,message))?;
+    match settings.provider {
+        Provider::Altcha => altcha::verify(token).map_err(|message| errors::management_error(400, &message)),
+        Provider::Turnstile => panel_turnstile::verify(&settings,token).await.map_err(|(code,message)| errors::management_error(code,message)),
+    }
 }
 
 /// `GET /api/panel/captcha` —— 签发一道 ALTCHA challenge（登录页加载时领）。
@@ -61,6 +66,12 @@ fn check_captcha(payload: &serde_json::Value, local_panel: bool) -> Result<(), R
 /// 包了信封它就解析失败（altcha-lib 的 challengeHandler 同样发裸对象）。
 /// 开关关闭时回 400 —— 前端据此隐藏验证行。
 pub async fn captcha_challenge(State(state): State<ServerState>) -> Response {
+    if !config::current().captcha_enabled(state.local_panel) { return errors::management_error(400, "机器人校验未启用"); }
+    match panel_turnstile::load(state.db()) {
+        Ok(settings) if settings.provider == Provider::Turnstile => return crate::server::http::raw_json(serde_json::json!({"provider":"turnstile","siteKey":settings.site_key,"widgetOrigin":settings.widget_origin})),
+        Err(error) => return errors::management_error(503,error),
+        _ => (),
+    }
     match altcha::challenge(state.local_panel) {
         Some(challenge) => crate::server::http::raw_json(challenge),
         None => errors::management_error(400, "机器人校验未启用"),
@@ -262,9 +273,17 @@ fn issue_response(session: access::IssuedSession, tokens_in_body: bool) -> Respo
 /// `GET /api/panel/status` —— 登录页用它决定显示「注册」还是「登录」。
 ///
 /// 挂 public：打开登录页时用户还没有任何凭证。
-pub async fn panel_status() -> Response {
+pub async fn panel_status(State(state): State<ServerState>) -> Response {
+    let enabled = config::current().captcha_enabled(state.local_panel);
+    let settings = match panel_turnstile::load(state.db()) {
+        Ok(settings) => settings,
+        Err(error) if enabled => return errors::management_error(503,error),
+        Err(_) => Default::default(),
+    };
     ok_json(serde_json::json!({
         "registered": access::admin_registered(),
+        "oauthProviders":super::panel_oauth::providers(&state),
+        "captchaEnabled":enabled, "captchaProvider":settings.provider, "turnstileSiteKey":if enabled && settings.provider == Provider::Turnstile {Some(settings.site_key)} else {None},
     }))
 }
 
@@ -283,7 +302,7 @@ pub async fn panel_setup(
         return management_error(409, "管理员账号已存在，无需重复注册");
     }
     let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
-    if let Err(response) = check_captcha(&payload, state.local_panel) {
+    if let Err(response) = check_captcha(&payload, &state).await {
         return response;
     }
     let username = body_str(&payload, "username");
@@ -336,7 +355,8 @@ pub async fn panel_login(
         return management_error(429, "登录失败次数过多，请 5 分钟后再试");
     }
     let payload = parse_body(&body).unwrap_or(serde_json::Value::Null);
-    if let Err(response) = check_captcha(&payload, state.local_panel) {
+    if let Err(response) = check_captcha(&payload, &state).await {
+        crate::server::core::notifications::login(false);
         return response;
     }
     let username = body_str(&payload, "username");
@@ -346,11 +366,13 @@ pub async fn panel_login(
         .unwrap_or("");
 
     if !access::verify_login(&username, password) {
+        crate::server::core::notifications::login(false);
         access::record_login_failure(addr.ip());
         logging::log("[Security]", &format!("❌ 面板登录失败（{}）", addr.ip()));
         return management_error(401, "账号或密码不正确");
     }
     access::clear_login_failures(addr.ip());
+    crate::server::core::notifications::login(true);
     // 判定依据跟着日志走：中转环境下「令牌到底走没走响应体」是排查
     // 「登录成功却被弹回登录页」的第一个分叉点 —— 标记头有没有穿过来、
     // 两枚探针各回来了几条，一眼定位是中转剥头还是拼 cookie。

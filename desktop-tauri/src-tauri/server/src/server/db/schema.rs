@@ -22,11 +22,9 @@
 //! 提交）：中途失败时已完成的那几个版本保留、最后一个整体回滚，下次启动从
 //! 落库的版本号继续 —— 不会出现「表建了一半但版本号已经写新」的错位。
 //!
-//! ── 为什么所有语句都带 IF NOT EXISTS ────────────────────────
-//! 版本号是**唯一**的推进依据，但现实里存在「表已经在了、版本号却是 0」的
-//! 情形：用户手工拷过库文件、或者从旧版本二进制回退再前进。DDL 幂等之后这种
-//! 库能直接跑过去（缺的补上、有的跳过），而不是在启动时报一句
-//! 「table already exists」把用户挡在门外。
+//! ── 旧表修复与新表冲突 ────────────────────────────────────────
+//! 早期 DDL 用 IF NOT EXISTS 兼容版本号缺失的旧库。v26/v27 引入整组新表；
+//! 同名表或索引可能属于不兼容布局，必须拒绝并回滚这个版本，不能静默接管。
 //!
 //! ── kv 表的键命名规范（后续切片按此约定往里写）──────────────
 //! `kv` 是「不属于某张实体表的零散持久状态」的落点，键分两类：
@@ -79,6 +77,11 @@ use rusqlite::Connection;
 /// 清单里可能有**没有使用方常量**的项（如遗留的 `desensitize`）：那些是
 /// 「功能已删、数据留着」的键，登记它们的唯一目的就是让配置写入别去动它。
 pub const RESERVED_KV_KEYS: &[&str] = &[
+    "fxRateCache",
+    crate::server::core::branding::KEY,
+    crate::server::core::panel_turnstile::KEY,
+    crate::server::core::panel_oauth::KEY,
+    crate::server::core::privacy::KEY,
     // 账号优先级的全局作用域（core::account_store::sql）
     // 「Agent」页的用户配置：{ clientId: [Profile] } 整份 JSON 一个键
     // （core::agents）。零散状态，与 desktopSettings 同一类。
@@ -340,7 +343,7 @@ pub fn is_reserved(key: &str) -> bool {
 /// 请求日志新增「积分」列读它。与 token 四列刻意不同：这一列**可空 REAL** ——
 /// `NULL` = 这一家没上报（旧行 / 不提供该读数），0 = 确实零消耗；用 0 兜底会
 /// 把「没读到」画成「花了 0 积分」，比缺一列更难排查。
-pub const SCHEMA_VERSION: i64 = 24;
+pub const SCHEMA_VERSION: i64 = 29;
 
 /// 版本 1 的全部表与索引：改造前所有 JSON / JSONL 文件的对应形态。
 ///
@@ -1075,6 +1078,11 @@ fn apply_version(
         // v23：requests 补「积分消耗」一列（请求日志的积分列，见 V23_SCHEMA）
         23 => conn.execute_batch(V23_SCHEMA),
         24 => conn.execute_batch(include_str!("schema_client_identification.sql")),
+        25 => conn.execute_batch(include_str!("schema_model_pricing.sql")),
+        26 => conn.execute_batch(include_str!("schema_task_plugins.sql")),
+        27 => conn.execute_batch(include_str!("schema_tool_images.sql")),
+        28 => conn.execute_batch("ALTER TABLE request_daily ADD COLUMN auxiliary_requests INTEGER NOT NULL DEFAULT 0;"),
+        29 => conn.execute_batch("ALTER TABLE task_plugins ADD COLUMN network_grants_json TEXT NOT NULL DEFAULT '{}';"),
         _ => Ok(()),
     }
 }
@@ -1135,4 +1143,64 @@ fn reset_model_refresh_cooldown(conn: &Connection) -> rusqlite::Result<()> {
         rusqlite::params![encoded],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod version_24_upgrades {
+    use super::*;
+
+    fn before(version: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        for step in 1..=version {
+            apply_version(&conn, step, &mut 0).unwrap();
+        }
+        conn.pragma_update(None, "user_version", version).unwrap();
+        conn.execute("INSERT INTO kv VALUES ('upgrade-marker', 'original')", []).unwrap();
+        conn
+    }
+
+    fn objects(conn: &Connection) -> Vec<(String, String)> {
+        conn.prepare("SELECT name, coalesce(sql,'') FROM sqlite_schema ORDER BY name").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    #[test]
+    fn clean_upgrade_is_repeatable_and_preserves_records() {
+        let conn = before(24);
+        conn.execute("INSERT INTO requests (id,ts,model,credit) VALUES ('fixture',1,'model',2.75)", []).unwrap();
+        migrate(&conn).unwrap();
+        let upgraded = objects(&conn);
+        migrate(&conn).unwrap();
+        assert_eq!(objects(&conn), upgraded);
+        assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+        assert_eq!(conn.query_row("SELECT credit FROM requests WHERE id='fixture' AND cost_usd IS NULL AND pricing_evidence IS NULL", [], |row| row.get::<_, f64>(0)).unwrap(), 2.75);
+    }
+
+    #[test]
+    fn collisions_never_adopt_existing_objects_or_commit_partial_ddl() {
+        for (version, collision) in [
+            (24, "ALTER TABLE request_daily ADD COLUMN priced_requests TEXT"),
+            (25, "CREATE TABLE task_plugins(id TEXT PRIMARY KEY, name TEXT); INSERT INTO task_plugins VALUES('old', 'original')"),
+            (25, "CREATE INDEX idx_task_job_runs_job ON kv(value)"),
+            (26, "CREATE TABLE tool_image_files(job_id TEXT, note TEXT); INSERT INTO tool_image_files VALUES('old', 'original')"),
+            (26, "CREATE INDEX idx_tool_image_files_job ON kv(value)"),
+            (27, "ALTER TABLE request_daily ADD COLUMN auxiliary_requests TEXT"),
+            (28, "ALTER TABLE task_plugins ADD COLUMN network_grants_json BLOB"),
+        ] {
+            let conn = before(version);
+            conn.execute_batch(collision).unwrap();
+            let snapshot = objects(&conn);
+            for _ in 0..2 {
+                assert!(migrate(&conn).is_err(), "v{version}: {collision}");
+                assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), version);
+                assert_eq!(objects(&conn), snapshot);
+                assert_eq!(conn.query_row("SELECT value FROM kv WHERE key='upgrade-marker'", [], |row| row.get::<_, String>(0)).unwrap(), "original");
+            }
+            if collision.starts_with("CREATE TABLE") {
+                let table = if version == 25 { "task_plugins" } else { "tool_image_files" };
+                assert_eq!(conn.query_row(&format!("SELECT * FROM {table}"), [], |row| row.get::<_, String>(1)).unwrap(), "original");
+            }
+        }
+    }
 }

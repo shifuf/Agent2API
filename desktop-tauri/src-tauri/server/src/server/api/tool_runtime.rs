@@ -257,6 +257,7 @@ async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: Mc
     let service = match kind {
         McpServerKind::WebSearch => tool_services::WEB_SEARCH_SERVICE_ID,
         McpServerKind::Vision => tool_services::VISION_SERVICE_ID,
+        McpServerKind::Images => tool_services::IMAGE_GENERATION_SERVICE_ID,
     };
     if !tool_services::is_enabled(service, protocol) {
         return json_response(
@@ -273,7 +274,13 @@ async fn mcp_post(state: &ServerState, headers: HeaderMap, body: Bytes, kind: Mc
             )
         }
     };
-    let context = McpRequestContext { base_url: base_url(&headers, &state), store: state.store().clone(), scope: access.scope };
+    let owner = if kind == McpServerKind::Images {
+        match super::tool_images::validate_origin(&headers).and_then(|()| super::tool_images::owner(&headers)) {
+            Ok(owner) => owner, Err(error) => return error.payload_response(),
+        }
+    } else { String::new() };
+    let context = McpRequestContext { base_url: base_url(&headers, &state), store: state.store().clone(), state: state.clone(),
+        headers, scope: access.scope, source: access.source, key_source: access.key_source, owner };
     match tool_services::mcp_dispatch(&payload, kind, &context).await {
         Some(response) => json_response(StatusCode::OK, response),
         None => StatusCode::ACCEPTED.into_response(),
@@ -288,6 +295,10 @@ pub async fn mcp_web_search(State(state): State<ServerState>, headers: HeaderMap
 /// POST /mcp/vision
 pub async fn mcp_vision(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
     mcp_post(&state, headers, body, McpServerKind::Vision).await
+}
+
+pub async fn mcp_images(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    mcp_post(&state, headers, body, McpServerKind::Images).await
 }
 
 /// 非 POST 方法：按规范用 405 明确告知（本类服务不提供服务端主动推流）

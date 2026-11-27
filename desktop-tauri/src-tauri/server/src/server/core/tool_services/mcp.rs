@@ -28,9 +28,15 @@ pub const INVALID_PARAMS: i64 = -32602;
 pub enum McpServerKind {
     WebSearch,
     Vision,
+    Images,
 }
 
 pub struct McpRequestContext {
+    pub state: crate::server::ServerState,
+    pub headers: axum::http::HeaderMap,
+    pub owner: String,
+    pub source: crate::server::request_stats::RequestSource,
+    pub key_source: Result<std::sync::Arc<crate::server::config::model_key_source::Source>, crate::server::errors::GatewayError>,
     /// 网关基址（视觉分析内部调用用）
     pub base_url: String,
     pub store: crate::server::core::account_store::AccountStore,
@@ -133,6 +139,7 @@ pub fn spec(kind: McpServerKind) -> McpSpec {
     match kind {
         McpServerKind::WebSearch => web_search_spec(),
         McpServerKind::Vision => vision_spec(),
+        McpServerKind::Images => super::image_mcp::spec(super::image_config::load().is_some_and(|config| config.editing.is_some())),
     }
 }
 
@@ -176,6 +183,7 @@ async fn call_tool(
     ctx: &McpRequestContext,
 ) -> Result<Value, ToolCallError> {
     match kind {
+        McpServerKind::Images => Ok(super::image_mcp::call(name, args, ctx).await),
         McpServerKind::WebSearch => {
             let operation = if name == "web_search" {
                 "search"

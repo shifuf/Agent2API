@@ -4,7 +4,8 @@ import {
   SegmentedControl, Spinner, Switch,
 } from '@ui'
 import { t } from '../i18n'
-import { toast } from './assistant-state'
+import { callJson, toast } from './assistant-state'
+import { ToolImageConfig } from './tools-image-config'
 import { WebSearchConfig, VisionConfigPanel } from './tools-config'
 import {
   PROTOCOL_DESC, PROTOCOL_LABELS, SERVICE_DESC, SERVICE_NAME, fetchInstallInfo, patchServer,
@@ -12,6 +13,11 @@ import {
 } from './tools-data'
 
 const CAPABILITY_DESCRIPTIONS: Record<string, { title: string; desc: string; params: Array<{ name: string; type: string; desc: string; required: boolean }> }[]> = {
+  'image-generation': [
+    { title: 'generate_images', desc: t('生成图片'), params: [] },
+    { title: 'edit_images', desc: t('编辑图片'), params: [] },
+    { title: 'get_image_result', desc: t('查询图片任务'), params: [] },
+  ],
   'web-search': [
     {
       title: t('批量网页搜索'),
@@ -183,7 +189,7 @@ export function ToolDetail({ service, onBack, onChanged }: { service: ToolServic
     </div>
 
     {tab === 'config'
-      ? (service.id === 'vision' ? <VisionConfigPanel /> : <WebSearchConfig />)
+      ? (service.id === 'image-generation' ? <ToolImageConfig api={callJson} /> : service.id === 'vision' ? <VisionConfigPanel /> : <WebSearchConfig />)
       : <Card>
         <CardHeader><CardTitle>{t('服务能力')}</CardTitle><span className='ml-auto text-xs text-subtle'>{t('共 {count} 项能力', { count: service.capability_count })}</span></CardHeader>
         <CardContent className='grid grid-cols-1 gap-3 md:grid-cols-2'>

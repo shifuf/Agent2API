@@ -53,6 +53,10 @@ pub(crate) fn try_update_raw_field<T, E>(
     if key == super::compact_routes::KEY_COMPACT_ROUTES {
         next.compact_routes = super::compact_routes::from_raw(&next.raw);
     }
+    if key == super::title_routes::KEY_TITLE_ROUTES {
+        next.title_routes = super::title_routes::from_raw(&next.raw);
+    }
+    if key == super::prompt_rules::KEY { next.prompt_rules = super::prompt_rules::from_raw(&next.raw); }
     if key == super::client_identification::KEY_CLIENT_IDENTIFICATION {
         next.client_identification = super::client_identification::from_raw(&next.raw);
     }

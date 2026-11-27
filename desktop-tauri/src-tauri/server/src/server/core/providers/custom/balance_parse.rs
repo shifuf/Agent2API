@@ -21,7 +21,7 @@
 //!       "remainingPercent": 62.5, "usedPercent": 37.5,
 //!       "view": "剩 62.5%", "resetsAt": 1789… }
 //!   ],
-//!   "subscription": null,       // 这七种方案都没有套餐概念
+//!   "subscription": null,       // New API 有有效订阅时附带归一化套餐数据
 //!   "raw": { }                  // 上游原始响应（排障用；界面默认不展示）
 //! }
 //! ```
@@ -441,27 +441,22 @@ pub(super) fn new_api_document(
     remaining_raw: f64,
     used_raw: Option<f64>,
     display: Option<&QuotaDisplay>,
-    account_payload: &Value,
-    status_payload: Option<&Value>,
 ) -> Value {
     let (remaining, unit) = new_api_display_amount(remaining_raw, display);
     let used = used_raw.map(|used| new_api_display_amount(used, display).0);
-    let wallets = vec![
+    let wallets: Vec<Value> = vec![
         wallet("remaining", "剩余配额", Some(remaining), &unit),
         wallet("used", "已用配额", used, &unit),
     ]
     .into_iter()
     .flatten()
     .collect();
-    let mut document = document(Some(remaining), &unit, wallets, account_payload);
+    let mut document = json!({"available": remaining, "unit": unit, "wallets": wallets, "subscription": null});
     if let Some(object) = document.as_object_mut() {
-        // 状态接口读到了什么、原始配额是多少：排障时这两样最有用
+        // 保留数值口径，不返回站点配置、控制台账号或订阅的原始响应。
         object.insert("quota".to_string(), json!(remaining_raw));
         if let Some(used_raw) = used_raw {
             object.insert("usedQuota".to_string(), json!(used_raw));
-        }
-        if let Some(status) = status_payload {
-            object.insert("status".to_string(), status.clone());
         }
     }
     document

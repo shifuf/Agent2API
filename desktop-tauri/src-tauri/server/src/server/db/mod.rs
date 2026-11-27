@@ -196,6 +196,7 @@ impl Db {
         let conn = Connection::open(path).map_err(|error| format!("打开数据库失败: {error}"))?;
         apply_pragmas(&conn)?;
         schema::migrate(&conn).map_err(|error| format!("建表/升级 schema 失败: {error}"))?;
+        conn.execute_batch("BEGIN; DELETE FROM tool_image_files; UPDATE tool_image_jobs SET result=NULL, state='expired', reserved_bytes=0, error='服务已重启，结果不再可用；未重新提交' WHERE state!='expired'; COMMIT;").map_err(|error| format!("清理临时图片结果失败: {error}"))?;
         let accounts = Arc::new(revisions::AccountRevisions::default());
         let requests = Arc::new(AtomicU64::new(0));
         install_cloud_sync_hook(&conn, accounts.clone(), requests.clone());

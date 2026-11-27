@@ -68,6 +68,8 @@ use crate::server::db::Db;
 mod account_sort;
 mod assistant_config;
 pub(crate) mod compact_routes;
+pub(crate) mod title_routes;
+pub(crate) mod prompt_rules;
 pub(crate) mod client_identification;
 mod github_access;
 mod mutations;
@@ -175,6 +177,8 @@ pub struct RuntimeConfig {
     routing: RoutingSettings,
     routing_profiles: std::sync::Arc<RoutingProfiles>,
     compact_routes: std::sync::Arc<compact_routes::CompactRoutesSnapshot>,
+    title_routes: std::sync::Arc<title_routes::TitleRoutesSnapshot>,
+    pub(crate) prompt_rules: std::sync::Arc<prompt_rules::Snapshot>,
     client_identification: std::sync::Arc<client_identification::ClientIdentificationSnapshot>,
     account_sort: std::sync::Arc<AccountSortSettings>,
     model_rules: std::sync::Arc<crate::server::core::model_rules::ModelRules>,
@@ -199,6 +203,12 @@ pub struct RuntimeConfig {
     /// （改完开关下一个请求就生效，不重启进程），解析一次存下来最省事。
     /// 语义与默认值见 `KEY_DEVELOPER_ROLE_COMPAT`。
     developer_role_compat: bool,
+    /// 第三方模型回答完自动折叠过程开关（设置页「网关 → 第三方模型回答完自动折叠过程」）。
+    ///
+    /// 与 `developer_role_compat` 同一理由：协议重建层在每次下发 Responses 事件前
+    /// 判一次（改完下一个请求就生效，不重启进程），解析一次存下来最省事。
+    /// 语义与默认值见 `KEY_THIRD_PARTY_REASONING_COLLAPSE`。
+    third_party_reasoning_collapse: bool,
     /// **Cline 转发头的逐键覆盖**（设置页「Cline 伪装头」）。
     ///
     /// 存的只是**用户改过的键**（覆盖表），默认值硬编码在
@@ -338,6 +348,11 @@ impl RuntimeConfig {
     /// 开发者角色兼容是否开启（转发层每次发送前判一次，见字段说明）
     pub fn developer_role_compat(&self) -> bool {
         self.developer_role_compat
+    }
+
+    /// 第三方模型回答完自动折叠过程是否开启（协议重建层每次下发前判一次，见字段说明）
+    pub fn third_party_reasoning_collapse(&self) -> bool {
+        self.third_party_reasoning_collapse
     }
 
     /// 会话图片压缩设置（转发层每次发送前取一份 `Copy` 快照，见字段说明）
@@ -605,6 +620,8 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
         routing,
         routing_profiles: routing_profiles::from_raw(&raw),
         compact_routes: compact_routes::from_raw(&raw),
+        title_routes: title_routes::from_raw(&raw),
+        prompt_rules: prompt_rules::from_raw(&raw),
         client_identification: client_identification::from_raw(&raw),
         account_sort: account_sort::from_raw(&raw),
         model_rules: std::sync::Arc::new(crate::server::core::model_rules::ModelRules::from_raw(&raw)),
@@ -624,6 +641,13 @@ fn build(raw: Map<String, Value>) -> RuntimeConfig {
             .get(KEY_DEVELOPER_ROLE_COMPAT)
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        // 只有字面 `true` 算开启：**默认关**。它改的是下发给客户端的响应字节，
+        // 且只有 Codex 桌面端靠这个字段折叠过程；默认开会让所有下游都收到一个
+        // 原本没有的扩展字段，代价落在用户第一次真实请求上，因此宁可显式打开。
+        third_party_reasoning_collapse: raw
+            .get(KEY_THIRD_PARTY_REASONING_COLLAPSE)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         // Cline 伪装头覆盖表：只收 string → string 的项（手改库写出数字/布尔
         // 值的项直接忽略 —— 头值只会是文本），缺失 = 全默认
         cline_upstream_headers: cline_headers_from(&raw),
@@ -1175,6 +1199,20 @@ pub fn strip_newline_keepalive() -> bool {
     env_strip_newline_keepalive()
 }
 
+/// 只取「第三方模型回答完自动折叠过程」开关的轻量读取（**不克隆整份 raw**）。
+///
+/// 与 [`strip_newline_keepalive`] 同一取舍：`/v1/responses` 每个请求在重建
+/// 事件流前问一次，而 `current()` 每调一次就克隆整个 `raw`（含提示词全文），
+/// 热路径上没必要。未初始化时默认关。
+pub fn third_party_reasoning_collapse() -> bool {
+    if let Ok(guard) = CONFIG.read() {
+        if let Some(config) = guard.as_ref() {
+            return config.third_party_reasoning_collapse;
+        }
+    }
+    false
+}
+
 /// 只取「长度截断自动续写」开关的轻量读取（**不克隆整份 raw**）。
 ///
 /// 与 [`strip_newline_keepalive`] 同一取舍：转发层**每个请求**都要问一次
@@ -1500,6 +1538,10 @@ pub(crate) fn update_raw_field_with(key: &str, mutate: impl FnOnce(&mut Value)) 
         if key == compact_routes::KEY_COMPACT_ROUTES {
             config.compact_routes = compact_routes::from_raw(&config.raw);
         }
+        if key == title_routes::KEY_TITLE_ROUTES {
+            config.title_routes = title_routes::from_raw(&config.raw);
+        }
+        if key == prompt_rules::KEY { config.prompt_rules = prompt_rules::from_raw(&config.raw); }
         if key == client_identification::KEY_CLIENT_IDENTIFICATION {
             config.client_identification = client_identification::from_raw(&config.raw);
         }
@@ -1944,6 +1986,23 @@ pub fn set_developer_role_compat(enabled: bool) -> bool {
             .raw
             .insert(KEY_DEVELOPER_ROLE_COMPAT.to_string(), Value::Bool(enabled));
         config.developer_role_compat = enabled;
+    })
+}
+
+// ─── 第三方模型回答完自动折叠过程（thirdPartyReasoningCollapse）────
+
+/// 写入第三方模型回答完自动折叠过程开关。
+///
+/// 与 `set_developer_role_compat` 同一模式：内存快照与 raw 底稿一起改 ——
+/// 前者让下一个请求立刻用新值（协议重建层逐请求读快照），后者保证写盘时
+/// 不吃掉配置里的其它字段。
+pub fn set_third_party_reasoning_collapse(enabled: bool) -> bool {
+    update(|config| {
+        config.raw.insert(
+            KEY_THIRD_PARTY_REASONING_COLLAPSE.to_string(),
+            Value::Bool(enabled),
+        );
+        config.third_party_reasoning_collapse = enabled;
     })
 }
 

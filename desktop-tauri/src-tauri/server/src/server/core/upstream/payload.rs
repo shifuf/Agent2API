@@ -194,6 +194,17 @@ pub(super) async fn send_body<'a>(
     provider_id: &str,
     account: Option<&Value>,
     degraded: bool,
+) -> Result<SendBody<'a>, crate::server::errors::GatewayError> {
+    let mut send = prepare_body(ctx, provider_id, account, degraded).await;
+    if ctx.telemetry.privacy.is_some() { ctx.telemetry.mask_private_body(send.body.to_mut())?; }
+    Ok(send)
+}
+
+async fn prepare_body<'a>(
+    ctx: &'a ProviderContext<'_>,
+    provider_id: &str,
+    account: Option<&Value>,
+    degraded: bool,
 ) -> SendBody<'a> {
     if ctx.images.is_some() {
         let requested = ctx.body.get("model").and_then(Value::as_str).unwrap_or("");
@@ -239,6 +250,7 @@ pub(super) async fn send_body<'a>(
     // 内容拦截后由转发层置位）：降级期用最小中性提示词（`custom` 模式除外，
     // 见 `PromptChoice::text_for`）。
     let prompt = ctx.prompt.for_provider(provider_id);
+    ctx.telemetry.set_prompt_rule(ctx.prompt.matched(provider_id).map(|entry| entry.rule.id.as_str()));
     let processed = if ctx.preserve_system_prompt { None } else { prompt.apply(role_base.as_ref(), degraded) };
     let after_prompt = match processed {
         Some(next) => {

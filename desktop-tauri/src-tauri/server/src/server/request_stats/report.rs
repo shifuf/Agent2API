@@ -157,6 +157,10 @@ pub(super) fn range_bounds(
 
 /// 区间内的总量与按模型 / 按 provider / 按账号累计（overview 的原料）
 pub(super) struct RangeTotals {
+    pub cost_cny: f64,
+    pub cost_usd: f64,
+    pub priced_requests: i64,
+    pub auxiliary_requests: i64,
     pub requests: i64,
     pub successful: i64,
     pub tokens: i64,
@@ -174,6 +178,10 @@ pub(super) fn range_totals(
     end: &str,
 ) -> RangeTotals {
     let mut totals = RangeTotals {
+        cost_cny: 0.0,
+        cost_usd: 0.0,
+        priced_requests: 0,
+        auxiliary_requests: 0,
         requests: 0,
         successful: 0,
         tokens: 0,
@@ -190,6 +198,10 @@ pub(super) fn range_totals(
         totals.successful += day.successful;
         totals.tokens += day.tokens;
         // activeDays 只数**区间内**有请求的天数（补零的日子不算「活跃」）
+        totals.cost_usd += day.cost_usd;
+        totals.cost_cny += day.cost_cny;
+        totals.priced_requests += day.priced_requests;
+        totals.auxiliary_requests += day.auxiliary_requests;
         if day.requests > 0 {
             totals.active_days += 1;
         }
@@ -602,6 +614,8 @@ pub(super) fn entry_json(entry: &RequestEntry) -> Value {
         return Value::Object(serde_json::Map::new());
     };
     if let Some(object) = value.as_object_mut() {
+        object.insert("costCny".into(), json!(entry.cost_cny()));
+        object.insert("pricingCurrency".into(), json!(crate::server::core::model_pricing::display_currency()));
         object.insert("clientLabel".into(), json!(crate::server::core::client::display_name(
             &entry.source.client, entry.source.recorded_client_name(),
         )));

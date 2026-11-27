@@ -413,6 +413,17 @@ pub(super) async fn forward_with_providers(
     connections: &mut ConnectionGuard,
 ) -> Result<ForwardOutcome, GatewayError> {
     super::route_rules_runtime::prepare(service, &mut ctx).await;
+    if ctx.routing.classifier_stack.is_empty() {
+        if let Some((body, routing)) = super::vision_compat::destination(service, &mut ctx)? {
+            let text_body = Box::pin(super::vision_compat::describe(service, &ctx, body, routing)).await?;
+            let original = ProviderContext { body: &text_body, ..ctx };
+            return Box::pin(forward_prepared(service, original, slot, connections)).await;
+        }
+    }
+    Box::pin(forward_prepared(service, ctx, slot, connections)).await
+}
+
+pub(super) async fn forward_prepared(service: &UpstreamService, mut ctx: ProviderContext<'_>, slot: &mut Option<InFlightGuard>, connections: &mut ConnectionGuard) -> Result<ForwardOutcome, GatewayError> {
     let model = model_of(ctx.body);
     if ctx.routing.group.is_some() {
         ctx.telemetry.set_route_decision(json!({ "scope": ctx.routing.scope, "configSnapshot": ctx.routing.json(),
@@ -978,6 +989,7 @@ async fn attempt_queue(
         // WASM 图片调用对应 images 方法；原生请求计划保留原宿主代发路径。
         if (adapter.forwards_response() && ctx.images.is_none())
             || (adapter.forwards_images() && ctx.images.is_some()) {
+            if ctx.telemetry.privacy.is_some() { return Err(GatewayError::bad_request("隐私模式不支持绕过宿主最终报文检查的提供商；请求未转发").with_code("privacy_opaque_provider")); }
             // 会话式转发（CatPaw）内部没有轮换，但**队列的兜底仍然生效**：
             // 它失败了就把它记入已尝试、回到循环挑下一个账号 —— 可能已经换了一家。
             // 没有下一个可用账号时，把这个错误原样透传（它的文案最贴近真实原因）。
@@ -1240,7 +1252,7 @@ async fn attempt_queue(
             // 生成、再插入」—— 语义等价，代价是 miss 那次多一次哈希查找。
             let cache_key = (provider_id, account_pool.clone(), if ctx.routing.group.is_some() { attempt_key.clone() } else { selected_model.clone() }, degraded);
             if !send_cache.contains_key(&cache_key) {
-                let built = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
+                let built = send_body(ctx, provider_id, target.account.as_ref(), degraded).await?;
                 send_cache.insert(cache_key.clone(), built);
             }
             let send = match send_cache.get(&cache_key) {
@@ -1349,6 +1361,7 @@ async fn attempt_queue(
                 }
                 if let Some(ids) = &conversation_ids { ids.apply(&mut plan.headers); }
             }
+            ctx.telemetry.mask_private_body(&mut plan.body)?;
             native_tools = if plan.policy.repair_native_tools {
                 super::native_tools::declared_tools(&plan.body)
             } else { Vec::new() };
@@ -2450,7 +2463,7 @@ async fn attempt_custom(
     // **即将发送**。`send_body` 对自定义 id 是零改写（它的模型名改写只认
     // modelRules），处理结果就是「提示词/脱敏后的客户端请求体」—— 自定义
     // 语义的改写（映射 alias → 真名、思考等级）在 forward 里做。
-    let send = send_body(ctx, &provider_id, target.account.as_ref(), degraded).await;
+    let send = send_body(ctx, &provider_id, target.account.as_ref(), degraded).await?;
     // 「上游模型」列以**真名**为准：send_body 对自定义 id 是零改写（它记的
     // 是请求名），真名的解析与改写发生在 forward 内部 —— 这里按同源解析
     // 覆盖一次（note_upstream_model 是覆盖式，最后一次为准；空串被内部过滤）。
@@ -2666,7 +2679,7 @@ async fn attempt_stateful(
     // `degraded` 由调用方（账号循环）给出：本路径**没有**就地补救（有状态
     // provider 一次转发就是一个会话轮次，没有「换提示词重发」这一步），
     // 但降级期内（状态机已生效）首发的提示词也要跟着换。
-    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await;
+    let send = send_body(ctx, provider_id, target.account.as_ref(), degraded).await?;
     // The declared web-tool bridge consumes failed-result markers before stripping them.
     // RpcAdapter strips the actual outgoing body after that conversion.
     let web_tools = config::web_tools::enabled() && adapter.list_models().iter()
@@ -3177,7 +3190,7 @@ async fn send_with_retry(
         // 分类仍按状态码走（classify_error 只看 status 也能给出结论）。
         let detail = {
             let budget = Duration::from_millis(config::timeout_settings().body_ms());
-            match tokio::time::timeout(budget, read_upstream_error(response, capture)).await {
+            match tokio::time::timeout(budget, read_upstream_error(response, capture, telemetry.privacy.is_some())).await {
                 Ok(detail) => detail,
                 Err(_elapsed) => super::request::UpstreamErrorDetail {
                     code: None,

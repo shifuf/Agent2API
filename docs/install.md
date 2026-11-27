@@ -478,3 +478,29 @@ Release 里的 `Agent2API-<版本>.ipa` **默认是未签名包** —— 苹果�
 | 查看 Agent 接管状态、还原 | 改写客户端配置（手机读不到本机文件） |
 
 桌面端侧栏底部有「手机端打开」入口，点开即是同一个页面。
+
+### 可选：社区插件隔离探测（Linux）
+
+在可信 Linux amd64 构建机运行 `python3 scripts/prepare-community-probe-kit.py --help`，指定发行版的 QEMU x86-64 系统模拟器、Linux amd64 内核、SeaBIOS、QEMU 固件目录、静态 BusyBox（`/bin/busybox`）、`/usr/bin/setpriv` 和脚本核验的 Bun 1.4.2 x64 baseline ZIP。生成目录应归 root 所有、不可由网关用户写入。以非 root 用户、无额外 capabilities 启动网关，`AGENT2API_COMMUNITY_GUEST_DIR` 设为该目录的绝对路径；容器只读挂载 kit 即可，不要传宿主控制套接字、设备或特权模式。
+
+管理员在社区归档中明确选择当前 SHA-256，才能探测独立 JS/ESM 的 OpenCode `server()`。不安装依赖、不跑包生命周期、不导入账号；每次使用一次性、无网卡、无宿主目录的客体。结果仅用于诊断，不授予任何权限。未配置 kit 或宿主不满足前提时拒绝执行，不会退回宿主 Bun。
+
+只接收最多 256 KiB 的单文件入口。默认每次限时 80 秒、CPU 时间 65 秒；慢速主机的运维人员可在网关环境设置 `AGENT2API_COMMUNITY_GUEST_TIMEOUT_SECS` 为 30–300 之间的十进制整数，CPU 限额为该值减 15 秒。无效值会禁用探测。一次只运行一个客体，分配 768 MiB 内存；断开请求即终止。探测结果是客体自报的诊断信号，不是安全认证或权限凭据。
+
+若返回 `503`，先检查 kit 和预算配置。`422` 表示客体未确认完成：可能是脚本失败，也可能是内核先终止了进程（如 CPU 限额），不能据此判断具体原因。只有网关的墙钟计时器到期才返回 `504`。
+
+### 从 WebDAV 或 S3 恢复账号密钥
+
+云同步只在本机没有账号密钥时安装远端密钥。与已有 `account.key` 或有效的 `AGENT2API_ACCOUNT_KEY` 相同则沿用；不同则拒绝，以保护不随云快照迁移的本机数据。请在全新数据目录恢复，或使用整库加密备份迁移；不要删除旧密钥。
+
+### 可选面板登录配置：OAuth 和 Cloudflare Turnstile
+
+另可在「设置 → 安全 → 第三方身份登录」配置 Google 或 GitHub。使用受你控制的固定 HTTPS 面板来源，反向代理必须保留该 `Host`。在提供方登记界面显示的精确回调地址 `/api/panel/oauth/{google|github}/callback`，保存 client ID 和 secret，然后在该来源使用网页管理员 Cookie 会话主动绑定。只认 Google `sub` 或 GitHub 数字 `id`，同邮箱不是授权依据。改面板来源或 client ID 会清除相应绑定；更换管理员密码后请解绑并重新绑定。使用原生壳、APK、屏蔽 Cookie 的中转或未绑定身份时仍请用密码；登录票据不会通过 URL 传给应用。
+
+默认 ALTCHA 不需要外部服务。Turnstile 需要一个由你控制的**独立 HTTPS 静态站点**：不要使用面板或网关的主机名，也不要向此站点转发 API、设置面板 Cookie 或存储凭据。
+
+1. 从面板的 `/api/panel/turnstile-widget` 下载 HTML；在静态站点根目录以 `/turnstile-widget.html` 提供原文件（`Content-Type: text/html`，允许面板嵌入）。面板的下载地址不能用作 iframe 地址。
+2. 在 Cloudflare 创建 Turnstile widget，将**静态站点的主机名**而非面板主机名加入该 widget 的允许列表。客户端须能访问静态站和 `challenges.cloudflare.com`；网关须能通过 HTTPS 访问后者。
+3. 保留一个管理员会话，打开「设置 → 安全 → 登录验证方式」，选择 Turnstile，输入 site key、secret key 和静态站点的 `https://主机名`（不带路径或端口）。确认当前端的机器人校验已开启，再在隐私窗口测试密码登录。
+
+服务端必须同时验证成功、`action=agent2api_panel` 和精确的静态站主机名。网络或验证失败不会转为免验证或自动改用 ALTCHA。可从保留的会话改回 ALTCHA；Cloudflare 的公开测试密钥不返回生产所需的 action，不能用来验收生产登录。

@@ -687,14 +687,23 @@ pub fn usage_to_anthropic(usage: Option<&Value>) -> Value {
     let cached = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .and_then(Value::as_i64)
-        .unwrap_or(0);
+        .unwrap_or(0).max(0);
     let input = number("prompt_tokens");
-    json!({
-        // Anthropic 的 input_tokens **不含**缓存命中部分，所以这里减掉
-        "input_tokens": (input - cached).max(0),
+    let written = usage.get("cache_creation_input_tokens").and_then(Value::as_i64).filter(|value| *value >= 0);
+    let mut result = json!({
+        "input_tokens": input.saturating_sub(cached).saturating_sub(written.unwrap_or(0)).max(0),
         "output_tokens": number("completion_tokens"),
         "cache_read_input_tokens": cached,
-    })
+    });
+    if let Some(written) = written {
+        result["cache_creation_input_tokens"] = json!(written);
+        for key in ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"] {
+            if let Some(count) = usage["cache_creation"][key].as_i64().filter(|value| *value >= 0) {
+                result["cache_creation"][key] = json!(count);
+            }
+        }
+    }
+    result
 }
 
 /// 输入 token 估算：字符数 ÷ 3.5（中英混排的经验值，与 Anthropic 官方

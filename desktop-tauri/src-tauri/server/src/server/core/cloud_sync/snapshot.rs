@@ -59,6 +59,10 @@ pub(crate) const SYNCED_TABLES: &[&str] = &["accounts", "account_usage_records",
 
 /// 非保留配置键里**不进快照**的项（理由见模块头三类排除）。
 const EXCLUDED_CONFIG_KEYS: &[&str] = &[
+    "notifications",
+    "privacyRedaction",
+    "panelTurnstile",
+    "panelOauth",
     // 本机绝对路径
     "logDir",
     "requestStatsDir",
@@ -528,6 +532,10 @@ mod tests {
         assert!(!is_synced_kv_key("desktopSettings"));
         assert!(!is_synced_kv_key("panelTokens"));
         assert!(!is_synced_kv_key("cloudSync"));
+        assert!(!is_synced_kv_key("notifications"));
+        assert!(!is_synced_kv_key("privacyRedaction"));
+        assert!(!is_synced_kv_key("panelTurnstile"));
+        assert!(!is_synced_kv_key("panelOauth"));
         assert!(!is_synced_kv_key("backgroundTaskState"));
     }
 

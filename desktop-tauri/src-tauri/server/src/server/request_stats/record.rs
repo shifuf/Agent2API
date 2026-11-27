@@ -94,6 +94,10 @@ pub struct RequestEntry {
     /// 与「上报了 0」是两件事 —— 前端对前者显示「—」，对后者显示「0」。
     #[serde(rename = "credit", default)]
     pub credit: Option<f64>,
+    #[serde(rename = "costUsd", default)]
+    pub cost_usd: Option<f64>,
+    #[serde(rename = "pricingEvidence", default)]
+    pub pricing_evidence: Value,
     /// 实际承载本次请求的 provider id（架构文档 §3.6）。
     ///
     /// ── 为什么是 `String` + 空串而不是 `Option<String>` ─────────
@@ -353,6 +357,14 @@ fn one() -> i64 {
 }
 
 impl RequestEntry {
+    pub(super) fn is_auxiliary(&self) -> bool {
+        self.route.get("visionParent").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+    }
+    pub(super) fn cost_cny(&self) -> Option<f64> {
+        let rate = self.pricing_evidence.pointer("/quote/fx/rate")?.as_f64()?;
+        let amount = self.cost_usd? * rate;
+        (rate > 0.0 && amount.is_finite()).then_some(amount)
+    }
     /// 是否成功 —— 2xx **且**没有错误摘要。
     ///
     /// ── 为什么不能只看状态码 ───────────────────────────────────
@@ -393,6 +405,8 @@ impl RequestEntry {
         copy.total_tokens = 0;
         copy.cache_read_tokens = 0;
         copy.credit = None;
+        copy.cost_usd = None;
+        copy.pricing_evidence = Value::Null;
         copy
     }
 }
@@ -404,6 +418,9 @@ impl RequestEntry {
 /// `ts` 为 None 时取当前时间；数值字段都会夹到 ≥0，`attempts` 夹到 ≥1。
 #[derive(Clone, Debug)]
 pub struct NewRequestEntry {
+    pub pricing_prompt_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub cache_write_1h_tokens: i64,
     pub ts: Option<i64>,
     /// 本条请求的关联 id（调试模式原始报文的关联键；空串 = 不采）
     pub id: String,
@@ -472,6 +489,9 @@ impl NewRequestEntry {
             completion_tokens: 0,
             total_tokens: 0,
             cache_read_tokens: 0,
+            pricing_prompt_tokens: 0,
+            cache_write_tokens: 0,
+            cache_write_1h_tokens: 0,
             credit: None,
             provider: None,
             client_model: String::new(),
@@ -530,6 +550,18 @@ impl NewRequestEntry {
             .map(|id| id.trim().to_string())
             .filter(|id| !id.is_empty())
             .unwrap_or_default();
+        let priced_prompt = self.pricing_prompt_tokens.max(self.prompt_tokens);
+        let detail = if failed { None } else {
+            crate::server::core::model_pricing::calc::calc_request_cost_detail(
+                &crate::server::core::model_pricing::settings(), &provider, &self.model, &self.upstream_model,
+                ts, priced_prompt, self.completion_tokens, self.cache_read_tokens, self.cache_write_tokens, self.cache_write_1h_tokens,
+            )
+        };
+        let cost_usd = detail.as_ref().and_then(|known| known.as_ref().map(|quote| quote.cost_usd));
+        let pricing_evidence = match detail {
+            Some(known) => serde_json::json!({"date": super::clock::date_key(super::clock::day_of(ts)), "prompt": priced_prompt, "cacheWrite": self.cache_write_tokens, "cacheWrite1h": self.cache_write_1h_tokens, "quote": known.map(|quote| quote.evidence)}),
+            None => Value::Null,
+        };
         RequestEntry {
             ts,
             // 关联 id 透传（trim 的理由同 provider）：空串 = 没生成 / 旧行
@@ -548,6 +580,8 @@ impl NewRequestEntry {
             completion_tokens: token(self.completion_tokens),
             total_tokens: token(self.total_tokens),
             cache_read_tokens: token(self.cache_read_tokens),
+            cost_usd,
+            pricing_evidence,
             credit,
             provider,
             // 双名透传（trim 的理由与 provider 相同：空白不该造出一个
@@ -696,6 +730,14 @@ pub struct RunningProgress {
 /// 按天聚合行（契约字段名与任务约定逐字一致）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DailyEntry {
+    #[serde(default, rename = "costCny")]
+    pub cost_cny: f64,
+    #[serde(default, rename = "costUsd")]
+    pub cost_usd: f64,
+    #[serde(default, rename = "pricedRequests")]
+    pub priced_requests: i64,
+    #[serde(default, rename = "auxiliaryRequests")]
+    pub auxiliary_requests: i64,
     /// 本地时区自然日 `YYYY-MM-DD`
     pub date: String,
     #[serde(default)]
@@ -753,6 +795,10 @@ impl DailyEntry {
     /// 空格子（新建某一天时用）
     pub(super) fn new(date: String) -> Self {
         Self {
+            cost_usd: 0.0,
+            cost_cny: 0.0,
+            priced_requests: 0,
+            auxiliary_requests: 0,
             date,
             requests: 0,
             successful: 0,

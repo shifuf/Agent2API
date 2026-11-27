@@ -217,6 +217,7 @@ fn write_file_line(line: &str) {
 ///
 /// 开了文件通道时同时抄一份到文件（服务形态没有控制台）。
 pub fn console_line(tag: &str, text: &str) {
+    if crate::server::core::privacy::private_log() { return; }
     let line = format!("{} {tag} {text}", timestamp_prefix());
     eprintln!("{line}");
     write_file_line(&line);
@@ -227,6 +228,7 @@ pub fn console_line(tag: &str, text: &str) {
 /// 入库前会做与 Node 版相同的处理：把各段参数用空格连接后 trim，
 /// 空文案直接跳过（只打控制台）。级别由 infer_level 推断。
 pub fn log(tag: &str, text: &str) {
+    if crate::server::core::privacy::private_log() { return; }
     console_line(tag, text);
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -253,6 +255,7 @@ pub fn log(tag: &str, text: &str) {
 /// 会把它误判成 error（导航徽标只统计 error，等于一跑定时任务就亮红标）。
 /// 调用方手里就有失败数，按它选 `"info"` / `"error"` 即可。
 pub fn log_with_level(tag: &str, text: &str, level: &str) {
+    if crate::server::core::privacy::private_log() { return; }
     console_line(tag, text);
     if matches!(level, "debug" | "verbose" | "trace") && !is_verbose() {
         return;
@@ -277,6 +280,7 @@ pub fn log_with_level(tag: &str, text: &str, level: &str) {
 /// 调试日志：只有开关打开时才入库（对应 Node 版 verbose()）。
 /// 控制台始终输出，方便排障时用普通启动也能看到细节。
 pub fn verbose(tag: &str, text: &str) {
+    if crate::server::core::privacy::private_log() { return; }
     console_line(tag, text);
     if !is_verbose() {
         return;
@@ -311,6 +315,7 @@ pub fn log_event(
     message: &str,
     data: Option<Value>,
 ) -> Option<LogEntry> {
+    if crate::server::core::privacy::private_log() { return None; }
     if matches!(level, "debug" | "verbose" | "trace") && !is_verbose() {
         return None;
     }

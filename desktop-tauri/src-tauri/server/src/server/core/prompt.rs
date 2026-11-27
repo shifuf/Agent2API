@@ -39,6 +39,7 @@
 //! 出站的那份应该长什么样」。
 
 use serde_json::{json, Value};
+pub(crate) mod rules;
 
 /// 降级提示词：内容拦截误报时用的**最小中性提示词**（对应参考项目的
 /// `prompt.Degraded`）。
@@ -68,7 +69,8 @@ something you did not actually run.
 without explicit confirmation from the user.";
 
 /// 系统提示词的三种模式（配置文件里的字符串就是契约，见 `config::KEY_PROMPT_MODE`）
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptMode {
     /// 透传客户端 system（默认；与改造前行为逐字相同）
     #[default]
@@ -254,6 +256,9 @@ pub struct PromptPlan<'a> {
     pub default: PromptChoice<'a>,
     /// 逐家覆盖（借自配置快照；空表 = 所有家都用 default）
     providers: &'a std::collections::BTreeMap<String, crate::server::config::ProviderPrompt>,
+    rules: &'a [rules::CompiledRule],
+    client: &'a str,
+    public_model: &'a str,
 }
 
 impl<'a> PromptPlan<'a> {
@@ -269,7 +274,15 @@ impl<'a> PromptPlan<'a> {
         default: PromptChoice<'a>,
         providers: &'a std::collections::BTreeMap<String, crate::server::config::ProviderPrompt>,
     ) -> Self {
-        Self { default, providers }
+        Self { default, providers, rules: &[], client: "", public_model: "" }
+    }
+
+    pub fn with_sample(mut self, rules: &'a [rules::CompiledRule], client: &'a str, public_model: &'a str) -> Self {
+        self.rules = rules; self.client = client; self.public_model = public_model; self
+    }
+
+    pub fn matched(&self, provider: &str) -> Option<&rules::CompiledRule> {
+        self.rules.iter().find(|rule| rule.matches(provider, self.client, self.public_model))
     }
 
     /// 这一家实际要用的那一份（没单独配就走 `default`）。
@@ -277,7 +290,7 @@ impl<'a> PromptPlan<'a> {
     /// 返回**借用**视图而不是值：逐家覆盖里带着几百行文本，克隆一次就等于把
     /// 「借用视图」这层设计白做了。
     pub fn for_provider(&self, provider_id: &str) -> PromptChoice<'_> {
-        match self.providers.get(provider_id) {
+        match self.matched(provider_id).map(|entry| &entry.prompt).or_else(|| self.providers.get(provider_id)) {
             Some(entry) => PromptChoice {
                 mode: entry.mode,
                 text: &entry.text,

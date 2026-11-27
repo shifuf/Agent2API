@@ -68,7 +68,9 @@ async fn dispatch(state: &ServerState, method: Method, path: &str, body: &Bytes)
 
     if rest.is_empty() {
         if method == Method::GET {
-            return ok_json(scheduled_tasks::list());
+            let mut state = scheduled_tasks::list();
+            state["localTaskPlugins"] = Value::Bool(cfg!(feature = "task-plugins"));
+            return ok_json(state);
         }
         return not_found(method.as_str(), path);
     }

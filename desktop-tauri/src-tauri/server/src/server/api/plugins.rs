@@ -16,6 +16,7 @@ pub(crate) const MAX_PACK_UPLOAD_BYTES: usize = MAX_PACK_BASE64_BYTES + 1024 * 1
 
 pub async fn list() -> Response {
     let mut result = plugin_host::management_snapshot();
+    result["localTaskPlugins"] = json!(cfg!(feature = "task-plugins"));
     result["target"] = json!(plugin_host::host_target());
     result["protocol"] = json!(agent2api_provider_protocol::PROTOCOL_VERSION);
     result["maxPackBytes"] = json!(MAX_PACK_BYTES);
@@ -28,6 +29,54 @@ pub async fn list() -> Response {
 
 pub async fn settings() -> Response {
     ok_json(json!(plugin_host::settings::current()))
+}
+
+static INSPECTIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+pub async fn inspect_source(headers: axum::http::HeaderMap, body: Bytes) -> Response {
+    if !crate::server::access::session_valid(&headers) { return management_error(403, "插件验包需要管理员会话"); }
+    let Ok(_permit) = INSPECTIONS.try_acquire() else { return management_error(429, "已有验包任务正在运行"); };
+    let Ok(source) = serde_json::from_slice(&body) else { return management_error(400, "无效的插件来源参数"); };
+    match plugin_host::community::inspect_source(source).await {
+        Ok(value) => ok_json(value),
+        Err((status, message)) => management_error(status, message),
+    }
+}
+
+pub async fn inspect_community(headers: axum::http::HeaderMap, body: Bytes) -> Response {
+    if !crate::server::access::session_valid(&headers) { return management_error(403, "插件验包需要管理员会话"); }
+    let Ok(permit) = INSPECTIONS.try_acquire() else { return management_error(429, "已有验包任务正在运行"); };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let request = serde_json::from_slice(&body).map_err(|_| "无效的插件验包参数")?;
+        plugin_host::community::inspect(request)
+    }).await {
+        Ok(Ok(value)) => ok_json(value),
+        Ok(Err(message)) => management_error(400, message),
+        Err(_) => management_error(500, "验包未完成"),
+    }
+}
+
+pub async fn community_archives(headers: axum::http::HeaderMap, method: axum::http::Method, body: Bytes) -> Response {
+    if !crate::server::access::session_valid(&headers) { return management_error(403, "插件归档需要管理员会话"); }
+    match tokio::task::spawn_blocking(move || {
+        use plugin_host::community::archives;
+        if method == axum::http::Method::GET { archives::list() }
+        else { archives::change(serde_json::from_slice(&body).map_err(|_| "无效的归档操作")?) }
+    }).await {
+        Ok(Ok(value)) => ok_json(value),
+        Ok(Err(message)) => management_error(400, message),
+        Err(_) => management_error(500, "归档操作未完成"),
+    }
+}
+
+pub async fn community_probe(headers: axum::http::HeaderMap, body: Bytes) -> Response {
+    if !crate::server::access::session_valid(&headers) { return management_error(403, "社区插件隔离探测需要管理员会话"); }
+    let Ok(request) = serde_json::from_slice(&body) else { return management_error(400, "隔离探测参数无效"); };
+    match plugin_host::community::probe::run(request).await {
+        Ok(value) => ok_json(value),
+        Err((status, message)) => management_error(status, message),
+    }
 }
 
 pub async fn save_settings(body: Bytes) -> Response {

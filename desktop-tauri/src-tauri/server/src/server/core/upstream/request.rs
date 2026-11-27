@@ -108,7 +108,9 @@ impl UpstreamErrorDetail {
 pub async fn read_upstream_error(
     response: reqwest::Response,
     capture: Option<&crate::server::core::debug_traffic::TrafficCapture>,
+    private: bool,
 ) -> UpstreamErrorDetail {
+    if private { return UpstreamErrorDetail { code: None, message: "上游请求失败；隐私模式已省略错误详情".into(), payload: None }; }
     if let Some(capture) = capture {
         capture.attach_response(response.status().as_u16(), response.headers());
     }

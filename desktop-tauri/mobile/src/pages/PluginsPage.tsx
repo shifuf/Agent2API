@@ -13,12 +13,14 @@ import { PluginCard, StorePluginCard } from './plugins/PluginCards'
 import { PluginSettingsSheet } from './plugins/PluginSettingsSheet'
 import { PluginPackSheet } from './plugins/PluginPackSheet'
 import { PluginTasks } from '../../../ui-shared/plugin-tasks'
+import { LocalTaskPlugins } from '../../../ui-shared/local-task-plugins'
+import { CommunityInspector } from '../../../ui-shared/community-inspector'
 import { apiCall } from '../api/client'
 import type { PluginRequest } from '../../../ui-shared/plugin-controls'
 import { t } from '../i18n'
 import '../styles/checkin.css'
 
-const pluginRequest: PluginRequest = (method, path, body) => apiCall(path, { method,
+const pluginRequest: PluginRequest = (method, path, body, signal) => apiCall(path, { method, signal, quiet: path === '/api/plugins/community/probe',
   ...(body === undefined ? {} : { body }),
 })
 
@@ -122,6 +124,7 @@ export function PluginsPage() {
           <div className='m-ck-title'>{server?.name || server?.base || t('当前网关')}</div>
           <p className='m-ck-note'>{t('安装、更新与启停均作用在这台网关上。插件平台由网关决定，与手机系统无关。')}</p>
           {payload ? <p className='m-ck-note m-mono'>{payload.target}</p> : null}
+          <CommunityInspector key={`inspect-${identity}`} request={pluginRequest} t={t} canAbort />
           <div className='m-ck-actions'>
             <Button size='sm' variant='outline' disabled={Boolean(busy)} onClick={() => void refresh()}>{busy === 'catalog' ? t('读取中…') : t('刷新插件仓库')}</Button>
             <Button size='sm' variant='outline' disabled={Boolean(busy)} onClick={() => void check()}>{busy === 'check' ? t('检查中…') : t('检查更新')}</Button>
@@ -131,6 +134,7 @@ export function PluginsPage() {
         </Card>
       </div>
       {error ? <ErrorNote text={error} /> : null}
+      {payload?.localTaskPlugins && <LocalTaskPlugins key={identity} t={t} api={(method,route,body)=>apiCall(`/api/${route}`,{method,body})} />}
       {payload?.host?.lastError ? <ErrorNote text={payload.host.lastError} /> : null}
       {uninstalled.length ? <div className='m-section'><SectionHead title={t('可安装插件')} />
         {uninstalled.map(item => <StorePluginCard key={item.id} item={item} target={payload?.target || ''}

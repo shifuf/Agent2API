@@ -213,17 +213,17 @@ pub fn mcp_targets(service: &str) -> Vec<Value> {
 }
 
 /// 视觉本地桥接脚本的落点（写一次、安装时复用）
-fn ensure_bridge_script() -> Result<PathBuf, String> {
+fn ensure_bridge_script(service: &str) -> Result<PathBuf, String> {
     let dir = crate::paths::config_dir().join("tools");
     std::fs::create_dir_all(&dir).map_err(|error| format!("创建工具目录失败：{error}"))?;
-    let path = dir.join("vision-bridge.js");
+    let (file, script) = if service == super::IMAGE_GENERATION_SERVICE_ID { ("image-generation.cjs", super::IMAGE_BRIDGE_SCRIPT) } else { ("vision-bridge.js", super::VISION_BRIDGE_SCRIPT) };
+    let path = dir.join(file);
     let current = std::fs::read(&path).ok();
-    if current.as_deref() != Some(super::VISION_BRIDGE_SCRIPT.as_bytes()) {
-        agents::files::write_atomic(&path, super::VISION_BRIDGE_SCRIPT.as_bytes())?;
+    if current.as_deref() != Some(script.as_bytes()) {
+        agents::files::write_atomic(&path, script.as_bytes())?;
     }
     Ok(path)
 }
-
 fn timeout_entry(def: &agents::ClientDef, timeout: u64) -> Value {
     if timeout == 0 {
         return Value::Null;
@@ -259,11 +259,11 @@ fn mcp_entry(
     let base = match bridge {
         Some(path) => {
             let bridge_path = path.display().to_string();
-            let mut env = json!({
+            let mut env = if service == super::IMAGE_GENERATION_SERVICE_ID { json!({"AGENT2API_IMAGE_ENDPOINT":url, "AGENT2API_IMAGE_KEY":api_key}) } else { json!({
                 "AGENT2API_VISION_ENDPOINT": url,
                 "AGENT2API_VISION_KEY": api_key,
-            });
-            if timeout > 0 {
+            }) };
+            if timeout > 0 && service == super::VISION_SERVICE_ID {
                 env["AGENT2API_VISION_TIMEOUT_MS"] = json!(timeout.saturating_mul(1000) + 60_000);
             }
             match def.id {
@@ -350,8 +350,8 @@ pub fn install_mcp(
         super::endpoint(service, "mcp")
     );
     let timeout = super::timeout_seconds(service);
-    let bridge = if service == super::VISION_SERVICE_ID && mode == "bridge" {
-        match ensure_bridge_script() {
+    let bridge = if matches!(service, super::VISION_SERVICE_ID | super::IMAGE_GENERATION_SERVICE_ID) && mode == "bridge" {
+        match ensure_bridge_script(service) {
             Ok(path) => Some(path),
             Err(error) => {
                 return client_ids

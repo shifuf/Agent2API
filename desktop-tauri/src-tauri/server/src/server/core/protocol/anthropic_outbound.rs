@@ -535,7 +535,9 @@ pub struct ChatFromAnthropicStream {
     tools: BTreeMap<i64, bool>,
     input_tokens: i64,
     cache_read: i64,
-    cache_creation: i64,
+    cache_creation: Option<i64>,
+    cache_creation_5m: Option<i64>,
+    cache_creation_1h: Option<i64>,
     output_tokens: i64,
     /// 已映射成 chat 口径的 finish_reason（`message_delta` 里给）
     finish_reason: Option<String>,
@@ -554,7 +556,9 @@ impl ChatFromAnthropicStream {
             tools: BTreeMap::new(),
             input_tokens: 0,
             cache_read: 0,
-            cache_creation: 0,
+            cache_creation: None,
+            cache_creation_5m: None,
+            cache_creation_1h: None,
             output_tokens: 0,
             finish_reason: None,
         }
@@ -753,7 +757,7 @@ impl ChatFromAnthropicStream {
     /// 判据用「字段在不在」而不是「值是否非零」：0 是合法上报值（缓存未命中
     /// 就是 0），拿它当「没报」会让我们永远回落到一个更早的旧值。
     fn absorb_usage(&mut self, usage: &Value) {
-        let take = |key: &str| usage.get(key).and_then(Value::as_i64);
+        let take = |key: &str| usage.get(key).and_then(Value::as_i64).filter(|value| *value >= 0);
         if let Some(value) = take("input_tokens") {
             self.input_tokens = value;
         }
@@ -761,7 +765,12 @@ impl ChatFromAnthropicStream {
             self.cache_read = value;
         }
         if let Some(value) = take("cache_creation_input_tokens") {
-            self.cache_creation = value;
+            self.cache_creation = Some(value);
+        }
+        if let Some(tiers) = usage.get("cache_creation") {
+            let count = |key: &str| tiers.get(key).and_then(Value::as_i64).filter(|value| *value >= 0);
+            self.cache_creation_5m = count("ephemeral_5m_input_tokens").or(self.cache_creation_5m);
+            self.cache_creation_1h = count("ephemeral_1h_input_tokens").or(self.cache_creation_1h);
         }
         if let Some(value) = take("output_tokens") {
             self.output_tokens = value;
@@ -799,27 +808,31 @@ impl ChatFromAnthropicStream {
             }
         });
         out.push(self.finish_frame(&finish_reason));
-        // chat 口径：input_tokens 含缓存部分（`usage_to_anthropic` 的反向
-        // 不等式 —— 那边是「减掉缓存」，这边加回来）。缓存另开一个具体字段：
-        // 请求统计的「缓存」列按 `prompt_tokens_details.cached_tokens` 取值
-        // （见 `upstream::usage::extract_usage`），不带它这一列在活动套餐通道
-        // 上恒显示 0 —— 与输入恒 0 是同一类「账目看着对、其实没采到」。
-        // `cache_creation` 也并进这一项：它同样落在 prompt_tokens 里，
-        // 不并会让「input = prompt - cached」两边对不上。
-        let cached = self.cache_read + self.cache_creation;
-        let prompt_tokens = self.input_tokens + cached;
+        let split_write = self.cache_creation_5m.unwrap_or(0).saturating_add(self.cache_creation_1h.unwrap_or(0));
+        let written = self.cache_creation.unwrap_or(split_write);
+        let prompt_tokens = self.input_tokens.saturating_add(self.cache_read).saturating_add(written);
+        let mut usage = json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": self.output_tokens,
+            "total_tokens": prompt_tokens.saturating_add(self.output_tokens),
+            "prompt_tokens_details": { "cached_tokens": self.cache_read },
+        });
+        if self.cache_creation.is_some() || self.cache_creation_5m.is_some() || self.cache_creation_1h.is_some() {
+            usage["cache_creation_input_tokens"] = json!(written);
+        }
+        if let Some(count) = self.cache_creation_5m {
+            usage["cache_creation"]["ephemeral_5m_input_tokens"] = json!(count);
+        }
+        if let Some(count) = self.cache_creation_1h {
+            usage["cache_creation"]["ephemeral_1h_input_tokens"] = json!(count);
+        }
         out.push(chat_frame(&json!({
             "id": self.id,
             "object": "chat.completion.chunk",
             "created": self.created,
             "model": self.model,
             "choices": [],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": self.output_tokens,
-                "total_tokens": prompt_tokens + self.output_tokens,
-                "prompt_tokens_details": { "cached_tokens": cached },
-            },
+            "usage": usage,
         })));
         out.push(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
         out
@@ -900,6 +913,25 @@ mod tests {
             .iter()
             .map(|frame| String::from_utf8_lossy(frame).into_owned())
             .collect()
+    }
+
+    #[test]
+    fn review_cache_tiers_merge_across_frames_without_inventing_cache_hits() {
+        let mut stream = ChatFromAnthropicStream::new("fixture");
+        let output = output_text(&stream.push(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":11,\"cache_read_input_tokens\":9,\"cache_creation\":{\"ephemeral_5m_input_tokens\":7}}}}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_1h_input_tokens\":3},\"output_tokens\":4}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        ).as_bytes()));
+        let usage = output.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|frame| serde_json::from_str::<Value>(frame).ok())
+            .find_map(|frame| frame.get("usage").cloned()).unwrap();
+        assert_eq!(usage["prompt_tokens"], 21);
+        assert_eq!(usage["total_tokens"], 25);
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 0);
+        assert_eq!(usage["cache_creation_input_tokens"], 10);
+        assert_eq!(usage["cache_creation"]["ephemeral_5m_input_tokens"], 7);
+        assert_eq!(usage["cache_creation"]["ephemeral_1h_input_tokens"], 3);
     }
 
     #[test]

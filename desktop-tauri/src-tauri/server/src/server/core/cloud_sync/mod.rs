@@ -29,7 +29,7 @@
 //! 与整库恢复同一清单（见 `db::backup` 模块头），逐项核实：
 //!   · `config::reload()` —— 配置快照必须重读，否则本次运行还是旧配置；
 //!   · `usage_records::reload_facts()` —— 余额事实表是选路依据；
-//!   · `crypto::reset_cache(Accounts)` —— **仅当密钥文件被替换**（见 `keyfile`）；
+//!   · `crypto::adopt_account_key` —— 只在本机无密钥时安装，绝不覆盖既有密钥；
 //!   · 面板登录态、桌面设置、任务排期**不在同步范围**，因此不需要重装。
 
 pub(crate) mod auto_sync;
@@ -487,21 +487,15 @@ pub(crate) async fn import_key(password: &str) -> Result<Value, String> {
             "解出的密钥与远端 manifest 记录的指纹不一致，文件可能已损坏，请重新上传".to_string(),
         );
     }
-    let backup = keyfile::install_key(&key)?;
+    crypto::adopt_account_key(key)?;
     logging::log(
         "[CloudSync]",
-        &format!(
-            "🔑 已从云同步导入账号密钥（指纹 {fingerprint}{}）",
-            backup
-                .as_ref()
-                .map(|name| format!("，原密钥已备份为 {name}"))
-                .unwrap_or_default()
-        ),
+        &format!("🔑 已从云同步确认账号密钥（指纹 {fingerprint}）"),
     );
     Ok(json!({
         "status": "imported",
         "keyFingerprint": fingerprint,
-        "backup": backup,
+        "backup": null,
     }))
 }
 

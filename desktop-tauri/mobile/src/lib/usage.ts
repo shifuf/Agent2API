@@ -102,7 +102,7 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
   const expiry = creditExpiryText(creditExpirySummaryOf(expiringCreditsOf(data, now), now), t, compact, creditExpiryUnitOf(data))
   const readings = [
     ...(aggregate ? [`${aggregate.label} ${aggregate.unlimited ? t('不限') : compact(aggregate.remaining)}${aggregate.unit && !aggregate.unlimited ? ` ${aggregate.unit}` : ''}`] : []),
-    ...usageSupplementReadingsOf(data, t, compact),
+    ...usageSupplementReadingsOf(data, t, compact, formatStamp),
     ...snapshotReadingsOf(data, t, compact).map(reading => `${reading.name} ${reading.view}`),
     ...recordReadingsOf(data, t, compact, formatStamp),
   ]
@@ -189,7 +189,7 @@ export function usageText(row?: UsageRow, now = Date.now()): UsageView {
     }
   }
 
-  const supplements = usageSupplementReadingsOf(data, t, compact)
+  const supplements = usageSupplementReadingsOf(data, t, compact, formatStamp)
   if (supplements.length) return withErrors({ kind: 'muted', text: supplements[0], detail: supplements.join(' · ') })
   // ⑧ 形状认不出来
   return withErrors({ kind: 'muted', text: t('无数据'), detail: t('未返回可识别的余额数据') })

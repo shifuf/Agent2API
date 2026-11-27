@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="referrer" content="strict-origin"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src https://challenges.cloudflare.com; style-src 'unsafe-inline'; img-src data: https://challenges.cloudflare.com; base-uri 'none'; form-action 'none'"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:transparent}#widget{min-height:65px}</style></head><body><div id="widget"></div>
+<script>
+(() => {
+  const channel = location.hash.slice(1)
+  function connect(event) {
+    if (window.parent === window || event.source !== parent || event.origin === location.origin || !/^[a-f0-9]{32}$/.test(channel) || event.data?.channel !== channel || !event.ports[0] || !/^[a-zA-Z0-9_-]{1,256}$/.test(event.data.siteKey || '')) return
+    window.removeEventListener('message', connect)
+    const port = event.ports[0]
+    const send = (state, token) => port.postMessage({ state, token })
+    const script = document.createElement('script')
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+    script.onerror = () => send('error')
+    script.onload = () => {
+      try {
+        window.turnstile.render('#widget', {
+          sitekey: event.data.siteKey, action: 'agent2api_panel', size: 'flexible', theme: 'auto',
+          'response-field': false, retry: 'never', callback: token => send('verified', token),
+          'expired-callback': () => send('expired'), 'timeout-callback': () => send('error'),
+          'error-callback': () => { send('error'); return true }, 'unsupported-callback': () => send('error'),
+        })
+      } catch { send('error') }
+    }
+    document.head.appendChild(script)
+    addEventListener('pagehide', () => port.close(), { once: true })
+  }
+  addEventListener('message', connect)
+})()
+</script></body></html>

@@ -8,13 +8,13 @@ use super::report::{model_breakdown_json, model_stat_key, push_model_accum, safe
 
 pub(super) fn request_usage(item: &RequestEntry) -> UsageAccum {
     UsageAccum {
-        requests: 1,
-        successful: i64::from(item.is_success()),
+        requests: i64::from(!item.is_auxiliary()),
+        successful: i64::from(item.is_success() && !item.is_auxiliary()),
         tokens: item.total_tokens,
         prompt_tokens: item.prompt_tokens,
         completion_tokens: item.completion_tokens,
         cache_read_tokens: item.cache_read_tokens,
-        token_details_requests: 1,
+        token_details_requests: i64::from(!item.is_auxiliary()),
         last_used_at: Some(item.ts),
     }
 }

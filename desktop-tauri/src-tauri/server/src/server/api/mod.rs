@@ -67,6 +67,7 @@ pub mod auto_checkin;
 pub mod auto_continue;
 pub mod web_tools;
 pub mod billing;
+pub mod branding;
 pub mod captcha;
 pub mod chat;
 // 签到中心的聚合快照（GET /api/checkin-center）：分组口径在后端唯一化，
@@ -84,6 +85,10 @@ pub mod checkin_schedules;
 pub mod cline_headers;
 pub mod codearts_welfare;
 pub mod compact_routes;
+pub mod title_routes;
+pub mod vision_compat;
+pub(crate) mod tool_images;
+mod tool_image_results;
 pub mod client_identification;
 pub mod config_api;
 // WorkBuddy 成长任务（查询 / 执行 / 开学季 / 猫猫旅行）：从参考项目
@@ -129,6 +134,12 @@ pub mod public_model_catalog;
 // Loomy 新手任务的查询 / 一键领取（签到后在界面弹窗），见该文件模块头
 pub mod onboarding;
 pub mod panel;
+pub(crate) mod panel_oauth;
+pub mod notifications;
+#[cfg(feature = "task-plugins")]
+pub mod task_jobs;
+#[cfg(feature = "task-plugins")]
+pub mod task_plugins;
 pub mod pipeline;
 mod stream_wait;
 mod live_progress;
@@ -148,6 +159,8 @@ pub mod plugin_ui;
 // 原样出给 iframe 里的插件页，让迁移过来的页面与宿主同一套色板 / 圆角 / 阴影
 pub mod plugin_theme;
 pub mod prompt;
+pub mod prompt_rules;
+pub(crate) mod privacy;
 pub mod protocol;
 pub mod proxies;
 pub mod qoder_umid;
@@ -162,6 +175,11 @@ pub(crate) mod request_prepare;
 // 同形的单开关端点，转换实施点在 `core::upstream::payload` 的 send_body，
 // 见该文件模块头
 pub mod role_compat;
+// 第三方模型回答完自动折叠过程开关（GET/PUT /api/reasoning-collapse）：与
+// /api/developer-role-compat 同形的单开关端点，实施点在
+// `core::protocol::responses` 的 Responses 事件重建层，见该文件模块头
+pub mod reasoning_collapse;
+pub mod model_pricing;
 pub mod routing_api;
 pub mod routing_flow;
 pub mod routing_groups;

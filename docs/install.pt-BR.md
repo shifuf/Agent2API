@@ -464,3 +464,29 @@ Quando há uma nova versão, uma barra "Reiniciar e atualizar" surge na parte de
 | Ver status do takeover de Agent, restaurar | Reescrever configurações de clientes (um celular não lê arquivos locais) |
 
 A barra lateral do desktop tem uma entrada "Abrir no celular" no rodapé que leva à mesma página.
+
+### Opcional: diagnóstico isolado de plugins da comunidade (Linux)
+
+Em uma máquina Linux amd64 confiável, execute `python3 scripts/prepare-community-probe-kit.py --help`. Forneça o QEMU x86-64 da distribuição, kernel amd64, SeaBIOS, firmware QEMU e o ZIP Bun 1.4.2 x64 baseline verificado. São necessários também `/bin/busybox` estático e `/usr/bin/setpriv`. Instale o kit em um diretório de propriedade de root sem permissão de escrita para o gateway; defina `AGENT2API_COMMUNITY_GUEST_DIR` com seu caminho absoluto. Execute sem root e sem capabilities. Em contêineres, monte somente o kit para leitura; não forneça dispositivos, sockets de controle do host nem modo privilegiado.
+
+O administrador escolhe o SHA-256 atual do arquivo retido para testar o `server()` do OpenCode de um JS/ESM independente. Cada execução usa uma máquina virtual descartável sem rede nem diretórios do host, não instala dependências, não executa scripts de ciclo de vida, não importa contas nem concede permissões. Sem os pré-requisitos, a execução é recusada, sem recorrer ao Bun do host.
+
+Só é aceito um único arquivo de entrada, de até 256 KiB. Os limites padrão são 80 segundos de tempo total e 65 de CPU. Em hosts lentos, o operador pode definir `AGENT2API_COMMUNITY_GUEST_TIMEOUT_SECS` no ambiente do gateway como um inteiro decimal de 30 a 300; o limite de CPU é 15 segundos menor. Um valor inválido desativa o teste. Só uma máquina virtual de 768 MiB é executada por vez; ela termina se a conexão cair. O diagnóstico relatado pela máquina virtual não certifica a segurança nem concede autorização.
+
+Em caso de `503`, verifique o kit e o limite configurado. `422` indica que a máquina virtual não confirmou a conclusão, mas não identifica a causa: pode haver erro no script ou encerramento pelo kernel, inclusive por limite de CPU. Só o prazo de tempo total do gateway gera `504`.
+
+### Restaurar a chave de conta do WebDAV ou S3
+
+A sincronização só instala a chave remota quando não há chave de conta local. Se corresponder à `account.key` ou à `AGENT2API_ACCOUNT_KEY` válida, nada muda. Uma chave diferente é recusada para proteger os dados locais excluídos da cópia em nuvem. Restaure em um novo diretório de dados ou migre com um backup completo criptografado; não exclua a chave original.
+
+### Opções de login no painel: OAuth e Cloudflare Turnstile
+
+Para Google ou GitHub, abra Configurações → Segurança → Login com identidade externa. Configure uma origem HTTPS fixa sob seu controle; o proxy reverso deve preservar `Host`. Registre no provedor o callback exato exibido (`/api/panel/oauth/{google|github}/callback`), salve o client ID e o secret e vincule a identidade usando o cookie da sessão administrativa no navegador nessa origem. Somente o `sub` do Google ou o `id` numérico do GitHub conta; um e-mail igual não autoriza acesso. Mudar a origem ou o client ID remove o vínculo correspondente. Após alterar a senha administrativa, desvincule e vincule novamente. Use senha em shells nativos, APKs, proxies que bloqueiam cookies ou sem vínculo; não há tíquetes de login na URL.
+
+O ALTCHA padrão dispensa serviços externos. O Turnstile exige **um site HTTPS estático separado e sob seu controle**. Não use o host do painel ou do gateway, não encaminhe a API e não armazene cookies do painel nem credenciais nesse site.
+
+1. Baixe o HTML em `/api/panel/turnstile-widget` no painel. Publique-o sem alterações em `/turnstile-widget.html` no site estático, como `text/html`, permitindo a incorporação pelo painel. A URL de download não é a URL do iframe.
+2. Crie um widget Turnstile na Cloudflare e autorize o **host do site estático**, não o do painel. O cliente precisa acessar o site estático e `challenges.cloudflare.com`; o gateway precisa acessar este último por HTTPS.
+3. Mantenha uma sessão administrativa aberta. Em Configurações → Segurança → Método de verificação do login, selecione Turnstile, informe a site key, a secret key e `https://host` do site estático (sem porta ou caminho). Ative a verificação nesse ambiente e teste o login por senha em uma janela privativa.
+
+O servidor exige sucesso, correspondência exata do host estático e `action=agent2api_panel`. Falhas de rede ou validação não ignoram a verificação nem mudam para ALTCHA. Use a sessão aberta para voltar ao ALTCHA. As chaves públicas de teste da Cloudflare não retornam a ação exigida e não validam o login de produção.
