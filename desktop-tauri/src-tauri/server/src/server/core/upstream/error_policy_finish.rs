@@ -119,6 +119,11 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     }
     if replay_or_started { return false; }
     if !decision.switches() { return false; }
+    // The outer sticky loop owns transient channel failures and quota rotation.
+    // Leave their lease active so it can settle the dispatched attempt before
+    // retrying; other errors follow the resolved policy inside this queue.
+    if ctx.routing.sticky_faults() && super::route_content::transient(error)
+        && !decision.skips_provider() { return false; }
     if decision.scope == crate::server::config::error_policy::CooldownScope::Account {
         if let Some(id) = target.account_id.as_deref() {
             for candidate in rotate::scoped_accounts(service, providers, keys.request_model(), ctx.pinned_account, Some(&ctx.routing), None) {
@@ -146,6 +151,27 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     };
     if !super::provider_loop::take_switch(switches_left, switch_total) {
         ctx.telemetry.note_error_policy(json!({ "reason": "换账号次数已用尽，未继续发送" })); return false;
+    }
+    if ctx.routing.group.is_some() {
+        // A transient SwitchProvider action stays in this queue. Settle its
+        // actual dispatch before the next iteration replaces the active lease.
+        if ctx.routing.sticky_faults() && super::route_content::channel_fault(error) {
+            let lease = ctx.routing.attempt_health.lock().unwrap_or_else(|error| error.into_inner()).take();
+            if let Some(lease) = lease.filter(|lease| ctx.telemetry.active_attempt().is_some_and(|attempt|
+                attempt.candidate_id == lease.candidate && attempt.dispatch.dispatched())) {
+                ctx.routing.with_current_configuration(|| service.route.channel_failure(&lease,
+                    ctx.routing.settings.breaker_timeout_seconds, logging::now_ms()));
+            }
+        }
+        let conversation = ctx.routing.conversation_key(ctx.client_headers, ctx.body);
+        ctx.routing.with_current_configuration(|| {
+            if let Some(candidate) = target.attempt_key() {
+                service.route.sticky_forget(&conversation, sticky.model, &candidate, sticky.generation);
+            }
+            if let Some(account) = target.account.as_ref() {
+                super::route_affinity::forget(service, &ctx.routing, &conversation, account, sticky.generation);
+            }
+        });
     }
     logging::console_line("[Upstream]", &format!("统一错误规则「{}」：HTTP {}，顺延到 {}（换号 {}/{}）",
         decision.rule.name, error.status_code, super::account_display(&next), switch_total - *switches_left, switch_total));

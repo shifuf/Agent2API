@@ -11,6 +11,20 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 const executable = path.resolve(process.argv[2] || 'target/debug/agent2api-server.exe')
 await access(executable)
+const scenarioFilter = process.argv[3] || process.env.STICKY_SCENARIO
+if (!scenarioFilter) {
+  // The historical lifecycle suite and policy matrix have independent state.
+  // Use fresh gateways for each, instead of accumulating their accounts, route
+  // groups, cooldowns and catalog maintenance into an unrelated load scenario.
+  let exitCode = 0
+  for (const phase of ['__core__', 'policy candidate failover']) {
+    const run = spawn(process.execPath, [path.resolve(process.argv[1]), executable, phase],
+      { stdio: 'inherit', windowsHide: true })
+    const [code] = await once(run, 'exit')
+    if (code !== 0) exitCode = 1
+  }
+  process.exit(exitCode)
+}
 const directory = await mkdtemp(path.join(os.tmpdir(), 'agent2api-sticky-failover-'))
 const adminKey = 'isolated-sticky-failover-admin'
 const calls = [], passed = [], failed = [], modes = new Map(), releases = new Map()
@@ -31,6 +45,11 @@ const upstream = http.createServer(async (request, response) => {
   const topic = body.messages?.at(-1)?.content || body.input?.at(-1)?.content || ''
   calls.push({ channel, key, model: body.model, topic })
   const mode = modes.get(channel)
+  if (mode?.status) {
+    response.writeHead(mode.status, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ error: { message: 'isolated channel rejection', ...(mode.code ? { code: mode.code } : {}) } }))
+    return
+  }
   if (mode === 'edge-timeout' || mode === 'limited') {
     response.writeHead(mode === 'edge-timeout' ? 524 : 429)
     response.end()
@@ -122,8 +141,7 @@ async function until(label, check, timeout = 15000) {
   throw Error(`Timed out: ${label}`)
 }
 async function scenario(name, action) {
-  const filter = process.argv[3] || process.env.STICKY_SCENARIO
-  if (filter && !name.includes(filter)) return
+  if (scenarioFilter === '__core__' ? name.startsWith('policy candidate failover') : !name.includes(scenarioFilter)) return
   modes.clear()
   try { await action(); passed.push(name); console.log(`PASS ${name}`) }
   catch (error) { failed.push({ name, error: error.stack }); console.error(`FAIL ${name}: ${error.message}`) }
@@ -707,6 +725,79 @@ try {
     await delay(10100)
     assert.equal(await chat(value, 'after-cooldown'), 'a')
   })
+
+  // These exercise the real gateway's policy/affinity boundary. Each case has
+  // fresh accounts so authentication cooling and provider penalties stay local.
+  for (const sticky of ['auto', 'strict', 'off']) {
+    for (const test of [
+      { status: 401, channels: ['a', 'a', 'b'] },
+      { status: 402, channels: ['a', 'a', 'b'] },
+      { status: 403, channels: ['a', 'a', 'b'] },
+      { status: 404, code: 'model_not_found', channels: ['a', 'b'] },
+      { status: 501, channels: ['a', 'b'] },
+      { status: 400, channels: ['a', 'b'] },
+      { status: 503, action: 'return_error', channels: ['a'] },
+      { status: 501, protocol: 'responses', only: 'auto', channels: ['a', 'b'] },
+      { status: 401, protocol: 'anthropic', only: 'auto', channels: ['a', 'a', 'b'] },
+      { status: 401, nested: true, only: 'strict', channels: ['a', 'a', 'b'] },
+      { status: 501, stream: true, only: 'auto', channels: ['a', 'b'] },
+      { status: 503, code: 'plugin_response_started', only: 'auto', channels: ['a'] },
+      { status: 401, switches: 0, only: 'auto', channels: ['a'] },
+      { status: 503, action: 'switch_provider', health: true, only: 'auto', channels: ['a', 'b'] },
+    ]) {
+      if (test.only && test.only !== sticky) continue
+      const suffix = `${test.protocol || ''}${test.nested ? 'nested' : ''}${test.stream ? 'stream' : ''}${test.code === 'plugin_response_started' ? 'hardstop' : ''}${test.switches === 0 ? 'zero' : ''}${test.health ? 'health' : ''}`
+      await scenario(`policy candidate failover ${sticky} HTTP ${test.status}${suffix ? ' ' + suffix : ''}`, async () => {
+        const tag = `policy${sticky}${test.status}${suffix}`
+        const localMembers = []
+        for (const channel of ['a', 'b']) {
+          const source = `${tag}${channel}`
+          const created = await ok('/api/custom-providers', { name: source, protocol: test.protocol || 'chat_completions',
+            baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, keyGroups: [{ id: 'main', name: 'Main',
+              apiKeys: channel === 'a' ? [`${source}-one`, `${source}-two`] : [`${source}-one`],
+              models: ['wire-fixture'], enabled: true }] })
+          localMembers.push({ id: channel, provider: created.provider.id, model: 'wire-fixture',
+            accountScope: 'all', accounts: [], included: true, weight: 1 })
+        }
+        const original = await ok('/api/routing/errors')
+        try {
+          const settings = { ...original.defaults, resends: 0, switches: test.switches ?? 5, intervalSeconds: 0,
+            backoff: false, sink: false, breaker: false }
+          if (test.action) settings.rules.find(rule => rule.kind === 'transient').action = test.action
+          await ok('/api/routing/errors', { settings, revision: original.revision }, { method: 'PUT' })
+          const nested = test.nested ? await save(group(`${tag}child`, { sticky: 'strict', members: localMembers })) : null
+          const value = await save(group(tag, { sticky, members: nested
+            ? [{ id: 'nested', group: nested.id, provider: '', model: '', included: true, accounts: [] }]
+            : localMembers }))
+          assert.equal(await chat(value), `${tag}a`, 'warm the selected channel before it fails')
+          modes.set(`${tag}a`, { status: test.status, code: test.code })
+          const start = calls.length
+          const response = await request('/v1/chat/completions', chatBody(value.model, 'ping', Boolean(test.stream)), { session: value.id })
+          assert.deepEqual(sequence(start), test.channels.map(channel => `${tag}${channel}`),
+            'one client request must follow the selected error action through eligible candidates')
+          if (test.channels.at(-1) === 'a') assert.equal(response.status, test.status)
+          else {
+            assert.equal(response.status, 200)
+            if (test.stream) {
+              assert(response.body.includes(`"content":"${tag}b"`))
+              assert(response.body.includes('data: [DONE]'))
+            } else assert.equal(response.body.choices[0].message.content, `${tag}b`)
+          }
+          if (test.health) {
+            const second = calls.length
+            assert.equal(await chat(value, `${tag}-second-session`), `${tag}b`)
+            assert.deepEqual(sequence(second), [`${tag}a`, `${tag}b`])
+            const frozen = calls.length
+            assert.equal(await chat(value, `${tag}-frozen-session`), `${tag}b`)
+            assert.deepEqual(sequence(frozen), [`${tag}b`], 'two actual transient failures must freeze A even when the policy skips its provider')
+          }
+        } finally {
+          const current = await ok('/api/routing/errors')
+          await ok('/api/routing/errors', { settings: original.settings, revision: current.revision }, { method: 'PUT' })
+        }
+      })
+    }
+  }
   if (failed.length) process.exitCode = 1
   console.log(`Sticky failover: ${passed.length} passed, ${failed.length} failed`)
 } catch (error) { failed.push({ name: 'fixture', error: error.stack }); console.error(error); process.exitCode = 1 }

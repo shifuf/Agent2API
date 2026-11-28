@@ -330,19 +330,9 @@ pub(crate) async fn forward(
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         // Retry-After 要在读 body **之前**取（read_upstream_error 会吃掉响应）
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string);
+        let headers = response.headers().clone();
         let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
-        return Err(classify_custom_error(
-            status,
-            &detail.message,
-            retry_after.as_deref(),
-        ));
+        return Err(classify_custom_detail(status, &detail, &headers));
     }
 
     if stream {
@@ -676,19 +666,9 @@ async fn forward_translated(
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         // Retry-After 要在读 body **之前**取（read_upstream_error 会吃掉响应）
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string);
+        let headers = response.headers().clone();
         let detail = read_upstream_error(response, telemetry.capture().as_deref()).await;
-        return Err(classify_custom_error(
-            status,
-            &detail.message,
-            retry_after.as_deref(),
-        ));
+        return Err(classify_custom_detail(status, &detail, &headers));
     }
 
     // 上游字节流先过协议翻译（→ 标准 chat SSE），再交给既有消费层：
@@ -833,6 +813,27 @@ fn classify_custom_error(status: u16, raw: &str, retry_after: Option<&str>) -> G
         ),
     };
     error.retry_after_secs = retry_after.and_then(|text| retry_after_seconds_at(text, logging::now_ms()));
+    error
+}
+
+/// Keep finite upstream codes/classification so a remote 501 is not mistaken
+/// for an unsent local capability failure. Reuse the native transport's parser,
+/// preserving this path's existing summary and exact Retry-After semantics.
+fn classify_custom_detail(
+    status: u16,
+    detail: &crate::server::core::upstream::request::UpstreamErrorDetail,
+    headers: &HeaderMap,
+) -> GatewayError {
+    let evidence = errors::from_detail(status, detail, headers);
+    let mut error = classify_custom_error(
+        status,
+        &detail.message,
+        headers.get("retry-after").and_then(|value| value.to_str().ok()),
+    );
+    error.code = evidence.code;
+    error.plugin_metadata = evidence.plugin_metadata;
+    error.conversation_class = evidence.conversation_class;
+    error.retry_after_secs = error.retry_after_secs.or(evidence.retry_after_secs);
     error
 }
 

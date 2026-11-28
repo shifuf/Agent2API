@@ -73,6 +73,18 @@ pub(super) fn bind(service: &UpstreamService, route: &RequestRouting, conversati
     }
 }
 
+/// A resolved error policy has approved a switch. Release only this failed
+/// candidate's nested bindings; a concurrent replacement must remain bound.
+pub(super) fn forget(service: &UpstreamService, route: &RequestRouting, conversation: &str,
+    account: &Value, generation: u64) {
+    let policies = account.get("routingStrategyPath").and_then(Value::as_array).cloned().unwrap_or_default();
+    for (depth, policy) in policies.iter().enumerate().skip(1) {
+        let mode = config::StickyMode::from_id(policy.get("sticky").and_then(Value::as_str).unwrap_or("off"));
+        service.route.sticky_forget(&layer_key(route, conversation, mode), &layer_model(route, &policies, depth),
+            &routing_groups::attempt_key(account), generation);
+    }
+}
+
 pub(super) fn sink_enabled(account: Option<&Value>, fallback: bool) -> bool {
     account.and_then(|account| account.get("routingStrategyPath")).and_then(Value::as_array)
         .and_then(|path| path.iter().rev().find_map(|policy| policy.get("sink").and_then(Value::as_bool))).unwrap_or(fallback)

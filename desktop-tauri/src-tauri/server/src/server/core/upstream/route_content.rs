@@ -46,7 +46,8 @@ pub(super) fn transient(error: &GatewayError) -> bool {
     use crate::server::core::providers::adapter::UpstreamErrorClass;
     // Fatal is the plugin protocol's catch-all for ordinary upstream failures;
     // explicit Stop decisions are carried separately by retry_forbidden.
-    !error.retry_forbidden && matches!(error.status_code, 408 | 429 | 500 | 502 | 503 | 504 | 524)
+    !error.retry_forbidden && error.routing_error.as_ref().is_none_or(|decision| decision.switches())
+        && matches!(error.status_code, 408 | 429 | 500 | 502 | 503 | 504 | 524)
         && !matches!(error.conversation_class, Some(UpstreamErrorClass::TokenExpired {..} | UpstreamErrorClass::ContentBlocked {..}))
         && !matches!(error.code.as_deref(), Some("route_empty" | "model_not_found" | "account_scope_mismatch" | "route_strict_failed" | "route_strict_unavailable" | "route_patience_exhausted" | "route_cooling_down"))
 }

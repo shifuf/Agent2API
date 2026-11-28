@@ -805,7 +805,9 @@ async fn attempt_queue(
     // 试到第 10 个，而用户填的那个数字要等跨家才生效。
     let mut budget = RetryBudget::from_snapshot(ctx.error_policy.clone());
     if ctx.routing.sticky_faults() { budget.total = 0; budget.remaining = 0; }
-    let switch_total = if ctx.routing.sticky_faults() { 0 } else { ctx.error_policy.settings.switches as usize };
+    // Channel faults still return to the outer two-failure loop. Other policy
+    // actions (auth, balance, unsupported, etc.) need their normal switch budget.
+    let switch_total = ctx.error_policy.settings.switches as usize;
     let mut switches_left = switch_total;
     let mut decision = ctx.telemetry.route_decision().unwrap_or_else(|| json!({}));
     decision["errorPolicyConfig"] = json!({ "revision": config::error_policy::revision(&ctx.error_policy),
