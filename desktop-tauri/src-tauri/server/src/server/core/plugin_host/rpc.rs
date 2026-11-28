@@ -374,6 +374,10 @@ impl RpcAdapter {
         // 调用方取消等待不能让已发送的管理动作失去保护，完成或超时后才释放租约。
         crate::spawn_task(async move {
             let _lease = lease;
+            // The WASM call future is large. Each task-local scope stores its inner
+            // future, so nesting it inline exhausts the 8 MiB worker stack during
+            // capability discovery. Keep the call on the heap before wrapping it.
+            let call = Box::pin(host.call_coded_with_cancel(&method, params, timeout, cancel.as_ref()));
             crate::server::core::usage_query::diagnostics::scope(query_trace,
                 super::wasm::query_queue::scope(query_reservation,
                 crate::server::core::usage_query::scope_query_cancel(query_cancel,
@@ -383,7 +387,7 @@ impl RpcAdapter {
                                 super::wasm::desktop_credentials::import_scope(provider, desktop_selected,
                                     crate::server::core::runtime_capacity::caller_scope(capacity_caller,
                                         crate::server::core::runtime_capacity::background_if(capacity_background,
-                                            host.call_coded_with_cancel(&method, params, timeout, cancel.as_ref()))),
+                                            call)),
                                 ),
                             ),
                         ),
